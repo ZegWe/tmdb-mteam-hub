@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TMDB · M-Team</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="top">
+    <h1>影视检索</h1>
+    <p class="sub">TMDB 资料与 M-Team 种子（需自行配置 API Key）</p>
+    <div class="actions">
+      <button type="button" id="btn-settings" class="btn secondary">API 设置</button>
+    </div>
+  </header>
+
+  <section class="search-bar">
+    <input type="search" id="q" placeholder="搜索电影或剧集标题…" autocomplete="off" />
+    <button type="button" id="btn-search" class="btn primary">搜索</button>
+  </section>
+
+  <div id="err" class="banner err hidden" role="alert"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <main class="layout" id="main-layout" aria-live="polite">
+    <div id="layout-loading" class="layout-loading hidden" aria-hidden="true" role="status">
+      <div class="spinner" aria-hidden="true"></div>
+      <span class="loading-text">正在搜索 TMDB…</span>
+    </div>
+    <section>
+      <h2>电影</h2>
+      <div id="movies" class="grid"></div>
+    </section>
+    <section>
+      <h2>剧集</h2>
+      <div id="tv" class="grid"></div>
+    </section>
+  </main>
+
+  <aside id="detail" class="drawer is-off">
+    <button type="button" class="close" id="detail-close" aria-label="关闭">×</button>
+    <div id="detail-body"></div>
+  </aside>
+
+  <div id="modal-bg" class="modal-bg hidden"></div>
+  <dialog id="settings" class="modal modal-wide">
+    <form id="settings-form">
+      <h2>API 密钥</h2>
+      <p class="hint">将写入运行目录下的 <code>config.toml</code>（或通过环境变量 <code>CONFIG_PATH</code> 指定路径）。</p>
+      <label>
+        TMDB API Key
+        <input type="password" name="tmdb_api_key" id="f-tmdb" autocomplete="off" />
+      </label>
+      <label>
+        M-Team OpenAPI Key
+        <input type="password" name="mteam_api_key" id="f-mteam" autocomplete="off" />
+      </label>
+
+      <fieldset class="qb-servers-fieldset">
+        <legend>qBittorrent</legend>
+        <p class="hint">在本机可访问的 qB Web UI；保存后会写入配置文件，下次打开设置会从此处加载。</p>
+        <div id="qb-servers-list" class="qb-servers-list"></div>
+        <button type="button" class="btn secondary" id="btn-qb-add">添加服务器</button>
+      </fieldset>
+
+      <div class="form-actions">
+        <button type="button" class="btn secondary" id="btn-cancel-settings">取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="qb-push" class="modal">
+    <form id="qb-push-form">
+      <h2>推送到 qBittorrent</h2>
+      <p class="hint subtle" id="qb-push-torrent-label"></p>
+      <label>
+        qB 服务器
+        <select id="qb-push-server"></select>
+      </label>
+      <label>
+        分类（可选）
+        <input type="text" id="qb-push-category" autocomplete="off" placeholder="留空则用 qB 默认" />
+      </label>
+      <label>
+        保存路径（可选）
+        <input type="text" id="qb-push-savepath" autocomplete="off" placeholder="留空则用 qB 默认保存目录" />
+      </label>
+      <div class="form-actions">
+        <button type="button" class="btn secondary" id="qb-push-cancel">取消</button>
+        <button type="submit" class="btn primary" id="qb-push-submit">确认推送</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

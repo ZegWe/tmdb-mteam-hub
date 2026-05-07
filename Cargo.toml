@@ -1,0 +1,16 @@
+[package]
+name = "tmdb-mteam-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tmdb_client = { version = "1.8", features = ["native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "multipart"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
