@@ -14,6 +14,32 @@ pub struct QbServerEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionWatcherConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_subscription_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_subscription_library_limit")]
+    pub library_limit: usize,
+    #[serde(default = "default_subscription_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_subscription_bootstrap_existing_as_skipped")]
+    pub bootstrap_existing_as_skipped: bool,
+}
+
+impl Default for SubscriptionWatcherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: default_subscription_poll_interval_secs(),
+            library_limit: default_subscription_library_limit(),
+            max_retries: default_subscription_max_retries(),
+            bootstrap_existing_as_skipped: default_subscription_bootstrap_existing_as_skipped(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileConfig {
     #[serde(default = "default_listen_ip")]
     pub listen_ip: String,
@@ -27,6 +53,8 @@ pub struct FileConfig {
     pub douban_cookie: String,
     #[serde(default)]
     pub qb_servers: Vec<QbServerEntry>,
+    #[serde(default)]
+    pub subscription_watcher: SubscriptionWatcherConfig,
 }
 
 fn default_listen_ip() -> String {
@@ -35,6 +63,22 @@ fn default_listen_ip() -> String {
 
 fn default_listen_port() -> u16 {
     8787
+}
+
+fn default_subscription_poll_interval_secs() -> u64 {
+    3600
+}
+
+fn default_subscription_library_limit() -> usize {
+    200
+}
+
+fn default_subscription_max_retries() -> u32 {
+    3
+}
+
+fn default_subscription_bootstrap_existing_as_skipped() -> bool {
+    true
 }
 
 impl Default for FileConfig {
@@ -46,6 +90,7 @@ impl Default for FileConfig {
             mteam_api_key: String::new(),
             douban_cookie: String::new(),
             qb_servers: Vec::new(),
+            subscription_watcher: SubscriptionWatcherConfig::default(),
         }
     }
 }

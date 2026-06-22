@@ -1,6 +1,7 @@
 mod config;
 mod douban;
 mod qbittorrent;
+mod subscription;
 mod tmdb_cache;
 
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ struct AppState {
     douban_cache: TmdbDiskCache,
     douban_cache_ttl_secs: u64,
     douban_qr_sessions: std::sync::Arc<RwLock<HashMap<String, douban::QrSession>>>,
+    wanted_store: subscription::WantedSubscriptionStore,
 }
 
 #[tokio::main]
@@ -84,6 +86,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         douban_cache_ttl_secs
     );
 
+    let subscription_state_dir = resolve_subscription_state_dir();
+    let wanted_store = subscription::WantedSubscriptionStore::new(subscription_state_dir.clone());
+    tracing::info!(
+        "subscription state: dir={}",
+        subscription_state_dir.display()
+    );
+
     let state = AppState {
         config_path,
         config: std::sync::Arc::new(RwLock::new(file_cfg)),
@@ -91,7 +100,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         douban_cache,
         douban_cache_ttl_secs,
         douban_qr_sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        wanted_store,
     };
+    spawn_wanted_watch_loop(state.clone());
 
     let api = Router::new()
         .route("/config", get(get_config).put(put_config))
@@ -111,6 +122,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/mteam/torrents", get(mteam_search))
         .route("/qb/test", post(qb_test))
         .route("/qb/push-mteam", post(qb_push_mteam))
+        .route("/subscriptions/wanted", get(wanted_subscription_state))
+        .route("/subscriptions/wanted/poll", post(wanted_subscription_poll))
+        .route(
+            "/subscriptions/wanted/{id}/status",
+            post(wanted_subscription_status),
+        )
         .with_state(state);
 
     let cors = CorsLayer::new()
@@ -158,6 +175,12 @@ fn resolve_douban_cache_dir() -> PathBuf {
         .unwrap_or_else(|_| cwd_or_dot().join("cache").join("douban"))
 }
 
+fn resolve_subscription_state_dir() -> PathBuf {
+    std::env::var("SUBSCRIPTION_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| cwd_or_dot().join("cache").join("subscriptions"))
+}
+
 fn static_dir() -> std::io::Result<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     if manifest.is_dir() {
@@ -179,6 +202,7 @@ async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
         "mteam_api_key": cfg.mteam_api_key,
         "douban_cookie": cfg.douban_cookie,
         "qb_servers": cfg.qb_servers,
+        "subscription_watcher": cfg.subscription_watcher,
     }))
 }
 
@@ -194,6 +218,8 @@ struct PutConfigBody {
     douban_cookie: String,
     #[serde(default)]
     qb_servers: Vec<QbServerEntry>,
+    #[serde(default)]
+    subscription_watcher: Option<config::SubscriptionWatcherConfig>,
 }
 
 async fn put_config(
@@ -211,6 +237,9 @@ async fn put_config(
     new_cfg.mteam_api_key = body.mteam_api_key;
     new_cfg.douban_cookie = douban::normalize_cookie_header(&body.douban_cookie);
     new_cfg.qb_servers = body.qb_servers;
+    if let Some(subscription_watcher) = body.subscription_watcher {
+        new_cfg.subscription_watcher = normalize_subscription_watcher(subscription_watcher);
+    }
     new_cfg
         .listen_addr()
         .map_err(|e| ApiError::bad_request(format!("监听地址配置无效: {e}")))?;
@@ -219,6 +248,107 @@ async fn put_config(
         .map_err(|e| ApiError::internal(format!("写入配置失败: {e}")))?;
     *state.config.write().await = new_cfg;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn normalize_subscription_watcher(
+    mut cfg: config::SubscriptionWatcherConfig,
+) -> config::SubscriptionWatcherConfig {
+    cfg.poll_interval_secs = cfg.poll_interval_secs.clamp(60, 86_400);
+    cfg.library_limit = cfg.library_limit.clamp(1, 1200);
+    cfg.max_retries = cfg.max_retries.clamp(1, 20);
+    cfg
+}
+
+async fn wanted_subscription_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
+    let snapshot = state
+        .wanted_store
+        .snapshot(&account_key, unix_now_secs())
+        .await
+        .map_err(|e| ApiError::internal(format!("读取想看订阅状态失败: {e}")))?;
+    Ok(Json(
+        serde_json::to_value(snapshot).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn wanted_subscription_poll(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let outcome = run_wanted_watch_poll(&state).await?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn wanted_subscription_status(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<subscription::WantedStatusUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = state.config.read().await.clone();
+    let account_key =
+        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
+    let outcome = state
+        .wanted_store
+        .update_status(
+            &account_key,
+            &id,
+            body,
+            cfg.subscription_watcher.max_retries,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("更新想看订阅状态失败: {e}")))?;
+    let Some(outcome) = outcome else {
+        return Err(ApiError::bad_request("订阅记录不存在"));
+    };
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn run_wanted_watch_poll(
+    state: &AppState,
+) -> Result<subscription::WantedPollOutcome, ApiError> {
+    let cfg = state.config.read().await.clone();
+    let account_key =
+        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
+    let limit = cfg.subscription_watcher.library_limit.clamp(1, 1200);
+    let wish = douban::library(&cfg.douban_cookie, douban::DoubanLibraryStatus::Wish, limit)
+        .await
+        .map_err(ApiError::douban)?;
+    state
+        .wanted_store
+        .apply_wish_items(
+            &account_key,
+            &wish.items,
+            &cfg.subscription_watcher,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入想看订阅状态失败: {e}")))
+}
+
+fn spawn_wanted_watch_loop(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            let cfg = state.config.read().await.subscription_watcher.clone();
+            let interval = cfg.poll_interval_secs.clamp(60, 86_400);
+            if cfg.enabled {
+                match run_wanted_watch_poll(&state).await {
+                    Ok(outcome) => tracing::info!(
+                        account_key = %outcome.account_key,
+                        total = outcome.total_wish_items,
+                        created_unprocessed = outcome.created_unprocessed,
+                        created_skipped = outcome.created_skipped,
+                        updated_existing = outcome.updated_existing,
+                        "wanted subscription poll completed"
+                    ),
+                    Err(e) => tracing::warn!("wanted subscription poll failed: {}", e.message()),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
 }
 
 async fn qb_test(Json(server): Json<QbServerEntry>) -> Result<Json<Value>, ApiError> {
@@ -1254,6 +1384,12 @@ impl ApiError {
         Self::Other {
             status: err.status,
             message: err.message,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::BadRequest { message } | Self::Other { message, .. } => message,
         }
     }
 }
