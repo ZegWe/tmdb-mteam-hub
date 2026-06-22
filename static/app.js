@@ -6,6 +6,7 @@ let qbServersCache = null;
 let subscriptionCategoriesCache = null;
 /** @type {{ name?: string, priority?: number, mode?: string, title_keywords?: string[], resolution_keywords?: string[], source_keywords?: string[] }[] | null} */
 let torrentMatchRulesCache = null;
+let subscriptionStateCache = null;
 let searchSource = "tmdb";
 let currentView = "search";
 let currentAppPage = "main";
@@ -157,7 +158,7 @@ function setResultSectionsForLibrary() {
 }
 
 function setAppPage(page) {
-  currentAppPage = page === "settings" ? "settings" : "main";
+  currentAppPage = ["main", "settings", "subscriptions"].includes(page) ? page : "main";
   for (const section of document.querySelectorAll(".app-page")) {
     const active = section.id === `page-${currentAppPage}`;
     section.classList.toggle("hidden", !active);
@@ -1611,6 +1612,313 @@ async function loadDoubanLibrary(forceRefresh = false) {
   }
 }
 
+function subscriptionRecordsFromState(state) {
+  const records = state?.records && typeof state.records === "object" ? Object.values(state.records) : [];
+  return records.sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+}
+
+const SUB_STATUS_LABELS = {
+  unprocessed: "待处理",
+  matching: "匹配中",
+  processing: "处理中",
+  pushed: "下载中",
+  downloading: "下载中",
+  completed: "已完成",
+  linked: "已链接",
+  failed: "失败",
+  skipped: "已跳过",
+};
+
+const PUSH_STATUS_LABELS = {
+  pushed: "已推送",
+  downloading: "下载中",
+  downloaded: "已下载",
+  completed: "已链接",
+  failed: "失败",
+  dry_run: "预演",
+  pending: "等待完成",
+};
+
+function normalizedStatus(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function subscriptionDisplayStatus(record) {
+  const base = normalizedStatus(record?.status);
+  const push = normalizedStatus(record?.last_push?.status);
+  const completion = normalizedStatus(record?.last_completion?.status);
+  if (base === "skipped") return { key: "skipped", text: SUB_STATUS_LABELS.skipped };
+  if (base === "linked" || push === "linked" || completion === "completed") return { key: "linked", text: SUB_STATUS_LABELS.linked };
+  if (base === "completed") return { key: "completed", text: SUB_STATUS_LABELS.completed };
+  if (base === "failed" || push === "failed" || completion === "failed") return { key: "failed", text: SUB_STATUS_LABELS.failed };
+  if (push === "downloaded") return { key: "downloaded", text: "已下载待链接" };
+  if (push === "downloading" || base === "downloading" || base === "pushed") return { key: "pushed", text: SUB_STATUS_LABELS.pushed };
+  if (base === "processing") return { key: "processing", text: SUB_STATUS_LABELS.processing };
+  return { key: base || "unprocessed", text: SUB_STATUS_LABELS[base] || "待处理" };
+}
+
+function formatPercent(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  return `${Math.round(Math.max(0, Math.min(1, n)) * 100)}%`;
+}
+
+function formatBytes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let idx = 0;
+  while (v >= 1024 && idx < units.length - 1) {
+    v /= 1024;
+    idx += 1;
+  }
+  return `${v >= 10 || idx === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[idx]}`;
+}
+
+function subscriptionProgress(record) {
+  const push = record?.last_push;
+  if (!push) return null;
+  const progress = Number(push.download_progress);
+  if (Number.isFinite(progress)) return Math.max(0, Math.min(1, progress));
+  if (normalizedStatus(record?.status) === "completed") return 1;
+  return null;
+}
+
+function progressBarHtml(progress) {
+  if (progress == null) return "";
+  const pct = Math.max(0, Math.min(1, Number(progress)));
+  return `<div class="subscription-progress" aria-label="下载进度 ${formatPercent(pct)}"><span style="width:${Math.round(pct * 100)}%"></span></div>`;
+}
+
+function renderSubscriptionSummary(state) {
+  const el = $("#subscription-summary");
+  if (!el) return;
+  const records = subscriptionRecordsFromState(state);
+  const counts = records.reduce((acc, record) => {
+    const key = subscriptionDisplayStatus(record).key;
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const bits = [
+    `总计 ${records.length}`,
+    counts.unprocessed ? `待处理 ${counts.unprocessed}` : "",
+    counts.pushed ? `下载中 ${counts.pushed}` : "",
+    counts.downloaded ? `待链接 ${counts.downloaded}` : "",
+    counts.completed ? `完成 ${counts.completed}` : "",
+    counts.failed ? `失败 ${counts.failed}` : "",
+    counts.skipped ? `跳过 ${counts.skipped}` : "",
+    state?.last_poll_at ? `上次轮询 ${formatUnixSeconds(state.last_poll_at)}` : "",
+  ].filter(Boolean);
+  el.textContent = bits.join(" · ");
+}
+
+function renderSubscriptionCards(state) {
+  const mount = $("#subscription-list");
+  if (!mount) return;
+  const records = subscriptionRecordsFromState(state);
+  renderSubscriptionSummary(state);
+  if (!records.length) {
+    mount.innerHTML = '<p class="empty-hint">暂无订阅记录</p>';
+    return;
+  }
+  mount.innerHTML = records
+    .map((record) => {
+      const status = subscriptionDisplayStatus(record);
+      const progress = subscriptionProgress(record);
+      const push = record.last_push || {};
+      const completion = record.last_completion || {};
+      const meta = [
+        record.release_year || "",
+        record.category_text || "",
+        push.qb_category ? `qB ${push.qb_category}` : "",
+        push.download_state || "",
+        record.updated_at ? `更新 ${formatUnixSeconds(record.updated_at)}` : "",
+      ].filter(Boolean);
+      const sub = completion.error || push.error || record.last_error || record.skip_reason || "";
+      const episodeCount = Array.isArray(push.episodes) && push.episodes.length
+        ? `<span class="subscription-episode-count">${push.episodes.length} 集</span>`
+        : "";
+      return `<article class="subscription-card" data-subscription-id="${escapeHtml(record.subject_id)}">
+        <div class="subscription-card-head">
+          <h2>${escapeHtml(record.title || record.subject_id)}</h2>
+          <span class="subscription-status subscription-status-${escapeHtml(status.key)}">${escapeHtml(status.text)}</span>
+        </div>
+        <div class="subscription-card-meta">${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}${episodeCount}</div>
+        ${progressBarHtml(progress)}
+        ${progress != null ? `<div class="subscription-card-progress">${escapeHtml(formatPercent(progress))}</div>` : ""}
+        ${sub ? `<p class="subscription-card-note">${escapeHtml(sub)}</p>` : ""}
+      </article>`;
+    })
+    .join("");
+}
+
+async function loadSubscriptions({ poll = false, silent = false } = {}) {
+  clearErr();
+  const refreshBtn = $("#btn-subscription-refresh");
+  const pollBtn = $("#btn-subscription-poll");
+  if (refreshBtn) refreshBtn.disabled = true;
+  if (pollBtn) pollBtn.disabled = true;
+  try {
+    if (poll) {
+      await api("/api/subscriptions/wanted/poll", { method: "POST", body: "{}" });
+    }
+    const state = await api("/api/subscriptions/wanted");
+    subscriptionStateCache = state;
+    renderSubscriptionCards(state);
+    if (!silent) showToast(poll ? "订阅轮询完成" : "订阅已刷新", "ok");
+    return state;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    showErr(msg);
+    $("#subscription-list").innerHTML = `<p class="empty-hint">加载失败：${escapeHtml(msg)}</p>`;
+    throw err;
+  } finally {
+    if (refreshBtn) refreshBtn.disabled = false;
+    if (pollBtn) pollBtn.disabled = false;
+  }
+}
+
+function findCachedSubscriptionRecord(id) {
+  const records = subscriptionRecordsFromState(subscriptionStateCache);
+  return records.find((record) => String(record.subject_id) === String(id));
+}
+
+function detailRow(label, value) {
+  if (value == null || String(value).trim() === "") return "";
+  return `<div class="detail-meta-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`;
+}
+
+function renderSubscriptionEpisodeRows(episodes = []) {
+  if (!Array.isArray(episodes) || !episodes.length) return "";
+  return `<section class="subscription-detail-section">
+    <h4>分集</h4>
+    <div class="subscription-episode-list">
+      ${episodes
+        .map(
+          (ep) => `<div class="subscription-episode-row">
+            <span class="subscription-episode-title">${escapeHtml(ep.label || "未识别分集")}</span>
+            <span class="subscription-episode-state">${escapeHtml(PUSH_STATUS_LABELS[normalizedStatus(ep.status)] || ep.status || "")}</span>
+            ${progressBarHtml(ep.progress)}
+            <span class="subscription-episode-files">${escapeHtml(`${ep.completed_file_count || ep.linked_file_count || 0}/${ep.file_count || 0}`)}</span>
+          </div>`,
+        )
+        .join("")}
+    </div>
+  </section>`;
+}
+
+function renderSubscriptionFileRows(files = [], mode = "progress") {
+  if (!Array.isArray(files) || !files.length) return "";
+  return `<section class="subscription-detail-section">
+    <h4>${mode === "links" ? "硬链接结果" : "文件"}</h4>
+    <div class="subscription-file-list">
+      ${files
+        .slice(0, 80)
+        .map((file) => {
+          const progress = mode === "links" ? null : Number(file.progress);
+          const status = mode === "links" ? file.status : `${formatPercent(progress)}${file.episode_label ? ` · ${file.episode_label}` : ""}`;
+          const name = mode === "links" ? file.target_path || file.source_path : file.name;
+          const note = file.error || (mode === "links" ? file.source_path : formatBytes(file.size));
+          return `<div class="subscription-file-row">
+            <div class="subscription-file-main">
+              <span class="subscription-file-name">${escapeHtml(name || "")}</span>
+              ${note ? `<span class="subscription-file-note">${escapeHtml(note)}</span>` : ""}
+            </div>
+            <span class="subscription-file-status">${escapeHtml(status || "")}</span>
+          </div>`;
+        })
+        .join("")}
+    </div>
+  </section>`;
+}
+
+function renderSubscriptionDetail(record) {
+  const status = subscriptionDisplayStatus(record);
+  const push = record.last_push || null;
+  const completion = record.last_completion || null;
+  const progress = subscriptionProgress(record);
+  const metaRows = [
+    detailRow("豆瓣 ID", record.subject_id),
+    detailRow("分类文本", record.category_text),
+    detailRow("上映年份", record.release_year),
+    detailRow("状态", status.text),
+    detailRow("重试", `${record.retry_count || 0}/${record.max_retries || 0}`),
+    detailRow("首次看到", formatUnixSeconds(record.first_seen_at)),
+    detailRow("最近更新", formatUnixSeconds(record.updated_at)),
+  ].join("");
+  const pushRows = push
+    ? [
+        detailRow("种子", push.torrent_title),
+        detailRow("qB", push.qb_server),
+        detailRow("分类", push.qb_category),
+        detailRow("保存目录", push.qb_save_dir_name),
+        detailRow("qB 状态", push.download_state || PUSH_STATUS_LABELS[normalizedStatus(push.status)] || push.status),
+        detailRow("qB hash", push.qb_hash),
+        detailRow("文件", push.total_file_count != null ? `${push.completed_file_count || 0}/${push.total_file_count}` : ""),
+        detailRow("大小", formatBytes(push.total_size)),
+        detailRow("检查时间", formatUnixSeconds(push.checked_at)),
+      ].join("")
+    : "";
+  const completionRows = completion
+    ? [
+        detailRow("链接状态", PUSH_STATUS_LABELS[normalizedStatus(completion.status)] || completion.status),
+        detailRow("目标目录", completion.target_dir),
+        detailRow("源目录", completion.source_path),
+        detailRow("完成时间", formatUnixSeconds(completion.completed_at)),
+        detailRow("错误", completion.error),
+      ].join("")
+    : "";
+  return `<article class="subscription-detail" data-subscription-detail-id="${escapeHtml(record.subject_id)}">
+    <div class="subscription-detail-head">
+      <h3>${escapeHtml(record.title || record.subject_id)}</h3>
+      <span class="subscription-status subscription-status-${escapeHtml(status.key)}">${escapeHtml(status.text)}</span>
+    </div>
+    ${progressBarHtml(progress)}
+    <dl class="detail-meta">${metaRows}</dl>
+    <div class="row-actions">
+      ${push ? `<button type="button" class="btn secondary" data-sub-action="progress" data-subscription-id="${escapeHtml(record.subject_id)}">刷新下载进度</button>` : ""}
+      ${push ? `<button type="button" class="btn primary" data-sub-action="completion" data-subscription-id="${escapeHtml(record.subject_id)}">检查完成并硬链接</button>` : ""}
+    </div>
+    ${record.last_error ? `<p class="subscription-detail-error">${escapeHtml(record.last_error)}</p>` : ""}
+    ${pushRows ? `<section class="subscription-detail-section"><h4>下载</h4><dl class="detail-meta">${pushRows}</dl></section>` : ""}
+    ${renderSubscriptionEpisodeRows((completion?.episodes?.length ? completion.episodes : push?.episodes) || [])}
+    ${completionRows ? `<section class="subscription-detail-section"><h4>硬链接</h4><dl class="detail-meta">${completionRows}</dl></section>` : ""}
+    ${renderSubscriptionFileRows(push?.files || [])}
+    ${renderSubscriptionFileRows(completion?.linked_files || push?.linked_files || [], "links")}
+  </article>`;
+}
+
+function openSubscriptionDetail(record) {
+  const detail = $("#detail");
+  const body = $("#detail-body");
+  if (!detail || !body) return;
+  body.innerHTML = renderSubscriptionDetail(record);
+  detail.classList.remove("is-off");
+}
+
+async function refreshSubscriptionProgress(id) {
+  const data = await api(`/api/subscriptions/wanted/${encodeURIComponent(id)}/progress`, {
+    method: "POST",
+    body: "{}",
+  });
+  subscriptionStateCache = await api("/api/subscriptions/wanted");
+  renderSubscriptionCards(subscriptionStateCache);
+  openSubscriptionDetail(data.record || findCachedSubscriptionRecord(id));
+  showToast("下载进度已刷新", "ok");
+}
+
+async function checkSubscriptionCompletion(id) {
+  const data = await api(`/api/subscriptions/wanted/${encodeURIComponent(id)}/completion`, {
+    method: "POST",
+    body: JSON.stringify({ dry_run: false }),
+  });
+  subscriptionStateCache = await api("/api/subscriptions/wanted");
+  renderSubscriptionCards(subscriptionStateCache);
+  openSubscriptionDetail(data.record || findCachedSubscriptionRecord(id));
+  showToast(data.completed ? "硬链接完成" : "下载尚未完成", "ok");
+}
+
 async function runSearch() {
   clearErr();
   currentView = "search";
@@ -1680,12 +1988,49 @@ document.querySelectorAll("[data-app-page-target]").forEach((btn) => {
     if (btn.dataset.appPageTarget === "settings") {
       await loadSettings();
       openSettings();
+    } else if (btn.dataset.appPageTarget === "subscriptions") {
+      resetDoubanQrUi();
+      setAppPage("subscriptions");
+      loadSubscriptions({ silent: true }).catch(() => {});
     } else {
       closeSettings();
     }
   });
 });
 $("#btn-cancel-settings").addEventListener("click", closeSettings);
+
+$("#btn-subscription-refresh")?.addEventListener("click", () => {
+  loadSubscriptions().catch(() => {});
+});
+
+$("#btn-subscription-poll")?.addEventListener("click", () => {
+  loadSubscriptions({ poll: true }).catch(() => {});
+});
+
+$("#subscription-list")?.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-subscription-id]");
+  if (!card) return;
+  const record = findCachedSubscriptionRecord(card.dataset.subscriptionId || "");
+  if (record) openSubscriptionDetail(record);
+});
+
+$("#detail-body")?.addEventListener("click", (event) => {
+  const action = event.target.closest("[data-sub-action]");
+  if (!action) return;
+  const id = action.dataset.subscriptionId || "";
+  if (!id) return;
+  const buttons = [...document.querySelectorAll("[data-sub-action]")];
+  buttons.forEach((btn) => (btn.disabled = true));
+  const run =
+    action.dataset.subAction === "progress"
+      ? refreshSubscriptionProgress(id)
+      : checkSubscriptionCompletion(id);
+  run
+    .catch((err) => showToast(err instanceof Error ? err.message : String(err), "err"))
+    .finally(() => {
+      buttons.forEach((btn) => (btn.disabled = false));
+    });
+});
 
 $("#btn-qb-add")?.addEventListener("click", () => {
   const list = $("#qb-servers-list");

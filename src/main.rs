@@ -4,7 +4,7 @@ mod qbittorrent;
 mod subscription;
 mod tmdb_cache;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -89,8 +89,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let subscription_state_dir = resolve_subscription_state_dir();
     let wanted_store = subscription::WantedSubscriptionStore::new(subscription_state_dir.clone());
     tracing::info!(
-        "subscription state: dir={}",
-        subscription_state_dir.display()
+        "subscription state: dir={} db={}",
+        subscription_state_dir.display(),
+        wanted_store.db_path().display()
     );
 
     let state = AppState {
@@ -135,6 +136,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route(
             "/subscriptions/wanted/{id}/completion",
             post(wanted_subscription_completion),
+        )
+        .route(
+            "/subscriptions/wanted/{id}/progress",
+            post(wanted_subscription_progress),
         )
         .route(
             "/subscriptions/wanted/{id}/status",
@@ -517,6 +522,14 @@ struct WantedCompletionBody {
     dry_run: bool,
 }
 
+#[derive(Deserialize, Default)]
+struct WantedProgressBody {
+    #[serde(default)]
+    qb_server_name: Option<String>,
+    #[serde(default)]
+    qb_hash: Option<String>,
+}
+
 async fn wanted_subscription_candidates(
     State(state): State<AppState>,
     PathParam(id): PathParam<String>,
@@ -559,6 +572,8 @@ async fn wanted_subscription_push(
             record.status,
             subscription::WantedSubscriptionStatus::Pushed
                 | subscription::WantedSubscriptionStatus::Completed
+                | subscription::WantedSubscriptionStatus::Linked
+                | subscription::WantedSubscriptionStatus::Downloading
                 | subscription::WantedSubscriptionStatus::Processing
         )
     {
@@ -698,6 +713,7 @@ async fn wanted_subscription_completion(
     if matches!(
         record.status,
         subscription::WantedSubscriptionStatus::Completed
+            | subscription::WantedSubscriptionStatus::Linked
     ) && !body.force
     {
         return Ok(Json(json!({
@@ -733,12 +749,15 @@ async fn wanted_subscription_completion(
     let torrents = qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await?;
     let qb_torrent = select_qb_torrent(&torrents, &push, body.qb_hash.as_deref())?;
     let now = unix_now_secs();
+    let qb_files = qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await?;
 
     push.checked_at = Some(now);
     push.qb_hash = Some(qb_torrent.hash.clone());
     push.qb_name = Some(qb_torrent.name.clone());
+    apply_qb_progress_to_push(&mut push, &qb_torrent, &qb_files);
 
     if !qb_torrent.is_complete() {
+        push.status = "downloading".to_string();
         let completion = subscription::HardlinkCompletionRecord {
             status: "pending".to_string(),
             checked_at: now,
@@ -748,6 +767,7 @@ async fn wanted_subscription_completion(
             source_path: None,
             target_dir: None,
             linked_files: Vec::new(),
+            episodes: push.episodes.clone(),
             error: None,
         };
         if !body.dry_run {
@@ -758,7 +778,7 @@ async fn wanted_subscription_completion(
                     &record.subject_id,
                     push.clone(),
                     completion.clone(),
-                    subscription::WantedSubscriptionStatus::Pushed,
+                    subscription::WantedSubscriptionStatus::Downloading,
                     None,
                     now,
                 )
@@ -770,6 +790,7 @@ async fn wanted_subscription_completion(
                 "completed": false,
                 "dry_run": false,
                 "completion": completion,
+                "progress": push,
                 "record": record,
             })));
         }
@@ -778,10 +799,10 @@ async fn wanted_subscription_completion(
             "completed": false,
             "dry_run": true,
             "completion": completion,
+            "progress": push,
         })));
     }
 
-    let qb_files = qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await?;
     let plan = build_hardlink_plan(&record, &category, &push, &qb_torrent, &qb_files, now)?;
     let completion = if body.dry_run {
         dry_run_hardlink_plan(&plan, now)
@@ -789,7 +810,11 @@ async fn wanted_subscription_completion(
         execute_hardlink_plan(&plan, now)
     };
     let completed = completion.status == "completed";
-    push.status = completion.status.clone();
+    push.status = if completed {
+        "linked".to_string()
+    } else {
+        completion.status.clone()
+    };
     push.error = completion.error.clone();
     push.completed_at = completion.completed_at;
     push.source_path = completion.source_path.clone();
@@ -798,16 +823,17 @@ async fn wanted_subscription_completion(
 
     if body.dry_run {
         return Ok(Json(json!({
-            "ok": true,
-            "completed": completed,
-            "dry_run": true,
+                "ok": true,
+                "completed": completed,
+                "dry_run": true,
             "completion": completion,
+            "progress": push,
             "plan_file_count": plan.files.len(),
         })));
     }
 
     let status = if completed {
-        subscription::WantedSubscriptionStatus::Completed
+        subscription::WantedSubscriptionStatus::Linked
     } else {
         subscription::WantedSubscriptionStatus::Failed
     };
@@ -832,6 +858,63 @@ async fn wanted_subscription_completion(
         "dry_run": false,
         "completion": completion,
         "push": push,
+        "record": record,
+    })))
+}
+
+async fn wanted_subscription_progress(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<WantedProgressBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    let mut push = record
+        .last_push
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("订阅记录缺少 qB pushed record"))?;
+    let qb_server = select_qb_server(
+        &cfg.qb_servers,
+        body.qb_server_name
+            .as_deref()
+            .or(Some(push.qb_server.as_str())),
+    )?;
+    let torrents = qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await?;
+    let qb_torrent = select_qb_torrent(&torrents, &push, body.qb_hash.as_deref())?;
+    let qb_files = qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await?;
+    let now = unix_now_secs();
+
+    push.checked_at = Some(now);
+    push.qb_hash = Some(qb_torrent.hash.clone());
+    push.qb_name = Some(qb_torrent.name.clone());
+    apply_qb_progress_to_push(&mut push, &qb_torrent, &qb_files);
+    push.status = if qb_torrent.is_complete() {
+        "downloaded".to_string()
+    } else {
+        "downloading".to_string()
+    };
+
+    let record = state
+        .wanted_store
+        .update_push_record(
+            &account_key,
+            &record.subject_id,
+            push.clone(),
+            if qb_torrent.is_complete() {
+                subscription::WantedSubscriptionStatus::Completed
+            } else {
+                subscription::WantedSubscriptionStatus::Downloading
+            },
+            None,
+            now,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入 qB 下载进度失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "completed": qb_torrent.is_complete(),
+        "progress": push,
         "record": record,
     })))
 }
@@ -1286,6 +1369,321 @@ async fn record_push_failure(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default)]
+struct EpisodeMarker {
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    label: Option<String>,
+}
+
+fn apply_qb_progress_to_push(
+    push: &mut subscription::TorrentPushRecord,
+    torrent: &qbittorrent::QbTorrentInfo,
+    files: &[qbittorrent::QbTorrentFile],
+) {
+    let file_records = torrent_file_progress_records(files);
+    let total_file_count = file_records.len();
+    let completed_file_count = file_records
+        .iter()
+        .filter(|file| file.progress >= 0.999_999)
+        .count();
+    let total_size = if torrent.size > 0 {
+        torrent.size
+    } else {
+        file_records.iter().map(|file| file.size).sum()
+    };
+
+    push.download_progress = Some(torrent.progress.clamp(0.0, 1.0));
+    push.download_state = (!torrent.state.trim().is_empty()).then(|| torrent.state.clone());
+    push.total_size = (total_size > 0).then_some(total_size);
+    push.total_file_count = Some(total_file_count);
+    push.completed_file_count = Some(completed_file_count);
+    push.files = file_records;
+    push.episodes = episode_records_from_file_progress(&push.files);
+}
+
+fn torrent_file_progress_records(
+    files: &[qbittorrent::QbTorrentFile],
+) -> Vec<subscription::TorrentFileProgressRecord> {
+    files
+        .iter()
+        .filter(|file| should_link_media_file(&file.name))
+        .map(|file| {
+            let episode = episode_marker_from_name(&file.name);
+            subscription::TorrentFileProgressRecord {
+                name: file.name.clone(),
+                size: file.size,
+                progress: file.progress.clamp(0.0, 1.0),
+                priority: file.priority,
+                season_number: episode.season_number,
+                episode_number: episode.episode_number,
+                episode_label: episode.label,
+            }
+        })
+        .collect()
+}
+
+fn episode_records_from_file_progress(
+    files: &[subscription::TorrentFileProgressRecord],
+) -> Vec<subscription::EpisodeProgressRecord> {
+    let mut grouped: BTreeMap<String, Vec<&subscription::TorrentFileProgressRecord>> =
+        BTreeMap::new();
+    for file in files {
+        if let Some(label) = file.episode_label.as_deref() {
+            grouped.entry(label.to_string()).or_default().push(file);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(label, rows)| {
+            let file_count = rows.len();
+            let completed_file_count = rows
+                .iter()
+                .filter(|file| file.progress >= 0.999_999)
+                .count();
+            let progress = if file_count == 0 {
+                0.0
+            } else {
+                rows.iter().map(|file| file.progress).sum::<f64>() / file_count as f64
+            };
+            let first = rows[0];
+            subscription::EpisodeProgressRecord {
+                season_number: first.season_number,
+                episode_number: first.episode_number,
+                label,
+                file_count,
+                completed_file_count,
+                linked_file_count: 0,
+                failed_file_count: 0,
+                progress,
+                status: if completed_file_count == file_count {
+                    "downloaded".to_string()
+                } else if progress > 0.0 {
+                    "downloading".to_string()
+                } else {
+                    "pending".to_string()
+                },
+            }
+        })
+        .collect()
+}
+
+fn episode_records_from_hardlink_files(
+    files: &[subscription::HardlinkFileRecord],
+) -> Vec<subscription::EpisodeProgressRecord> {
+    let mut grouped: BTreeMap<String, Vec<&subscription::HardlinkFileRecord>> = BTreeMap::new();
+    for file in files {
+        if let Some(label) = file.episode_label.as_deref() {
+            grouped.entry(label.to_string()).or_default().push(file);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(label, rows)| {
+            let file_count = rows.len();
+            let linked_file_count = rows
+                .iter()
+                .filter(|file| {
+                    matches!(
+                        file.status.as_str(),
+                        "linked" | "already_linked" | "planned"
+                    )
+                })
+                .count();
+            let failed_file_count = rows
+                .iter()
+                .filter(|file| file.status.as_str() == "failed")
+                .count();
+            let first = rows[0];
+            subscription::EpisodeProgressRecord {
+                season_number: first.season_number,
+                episode_number: first.episode_number,
+                label,
+                file_count,
+                completed_file_count: linked_file_count,
+                linked_file_count,
+                failed_file_count,
+                progress: if file_count == 0 {
+                    0.0
+                } else {
+                    linked_file_count as f64 / file_count as f64
+                },
+                status: if failed_file_count > 0 {
+                    "failed".to_string()
+                } else if linked_file_count == file_count {
+                    "linked".to_string()
+                } else {
+                    "pending".to_string()
+                },
+            }
+        })
+        .collect()
+}
+
+fn episode_marker_from_name(name: &str) -> EpisodeMarker {
+    let lower = name.to_ascii_lowercase();
+    if let Some((season, episode, last_episode)) = find_season_episode_marker(&lower) {
+        let label = if let Some(last) = last_episode.filter(|last| *last > episode) {
+            format!("S{season:02}E{episode:02}-E{last:02}")
+        } else {
+            format!("S{season:02}E{episode:02}")
+        };
+        return EpisodeMarker {
+            season_number: Some(season),
+            episode_number: Some(episode),
+            label: Some(label),
+        };
+    }
+    if let Some((episode, last_episode)) = find_bare_episode_marker(&lower)
+        .map(|(episode, last)| (episode, last))
+        .or_else(|| find_chinese_episode_marker(name).map(|episode| (episode, None)))
+    {
+        let label = if let Some(last) = last_episode.filter(|last| *last > episode) {
+            format!("E{episode:02}-E{last:02}")
+        } else {
+            format!("E{episode:02}")
+        };
+        return EpisodeMarker {
+            season_number: None,
+            episode_number: Some(episode),
+            label: Some(label),
+        };
+    }
+    if let Some(season) = find_season_pack_marker(&lower) {
+        return EpisodeMarker {
+            season_number: Some(season),
+            episode_number: None,
+            label: Some(format!("S{season:02} 全季")),
+        };
+    }
+    EpisodeMarker::default()
+}
+
+fn find_season_episode_marker(text: &str) -> Option<(u32, u32, Option<u32>)> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b's' {
+            i += 1;
+            continue;
+        }
+        if let Some((season, mut pos)) = read_ascii_number(bytes, i + 1) {
+            pos = skip_episode_separators(bytes, pos);
+            if pos < bytes.len() && bytes[pos] == b'e' {
+                if let Some((episode, end)) = read_ascii_number(bytes, pos + 1) {
+                    if season > 0 && episode > 0 {
+                        return Some((season, episode, read_episode_range_end(bytes, end)));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_bare_episode_marker(text: &str) -> Option<(u32, Option<u32>)> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'e'
+            && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
+            if let Some((episode, end)) = read_ascii_number(bytes, i + 1) {
+                if episode > 0 {
+                    return Some((episode, read_episode_range_end(bytes, end)));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn read_episode_range_end(bytes: &[u8], pos: usize) -> Option<u32> {
+    if pos >= bytes.len() {
+        return None;
+    }
+    let mut next = if bytes[pos] == b'e' {
+        pos
+    } else if matches!(bytes[pos], b'-' | b'_' | b'~' | b' ') {
+        skip_episode_range_separators(bytes, pos)
+    } else {
+        return None;
+    };
+    if next < bytes.len() && bytes[next] == b'e' {
+        next += 1;
+    }
+    let (episode, _) = read_ascii_number(bytes, next)?;
+    (episode > 0).then_some(episode)
+}
+
+fn skip_episode_range_separators(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && matches!(bytes[pos], b'-' | b'_' | b'~' | b' ') {
+        pos += 1;
+    }
+    pos
+}
+
+fn find_season_pack_marker(text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b's' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            if let Some((season, pos)) = read_ascii_number(bytes, i + 1) {
+                if season > 0 && (pos >= bytes.len() || bytes[pos] != b'e') {
+                    return Some(season);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_chinese_episode_marker(text: &str) -> Option<u32> {
+    let chars = text.chars().collect::<Vec<_>>();
+    for (idx, ch) in chars.iter().enumerate() {
+        if *ch != '第' {
+            continue;
+        }
+        let mut digits = String::new();
+        for next in chars.iter().skip(idx + 1) {
+            if next.is_ascii_digit() {
+                digits.push(*next);
+            } else if *next == '集' && !digits.is_empty() {
+                return digits.parse().ok();
+            } else if !digits.is_empty() {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn read_ascii_number(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut pos = start;
+    let mut value = 0u32;
+    let mut seen = false;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        seen = true;
+        value = value
+            .saturating_mul(10)
+            .saturating_add((bytes[pos] - b'0') as u32);
+        pos += 1;
+    }
+    seen.then_some((value, pos))
+}
+
+fn skip_episode_separators(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && matches!(bytes[pos], b'.' | b'_' | b'-' | b' ' | b'[' | b']') {
+        pos += 1;
+    }
+    pos
+}
+
 #[derive(Debug, Clone)]
 struct HardlinkPlan {
     source_root: PathBuf,
@@ -1300,6 +1698,9 @@ struct HardlinkFilePlan {
     source_path: PathBuf,
     target_path: PathBuf,
     size: u64,
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    episode_label: Option<String>,
 }
 
 fn select_qb_torrent(
@@ -1376,10 +1777,14 @@ fn build_hardlink_plan(
     for (file, relative) in selected {
         let source_path = source_path_for_qb_file(&source_root, push, torrent, &relative);
         let target_path = target_dir.join(relative);
+        let episode = episode_marker_from_name(&file.name);
         plan_files.push(HardlinkFilePlan {
             source_path,
             target_path,
             size: file.size,
+            season_number: episode.season_number,
+            episode_number: episode.episode_number,
+            episode_label: episode.label,
         });
     }
 
@@ -1453,9 +1858,28 @@ fn dry_run_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::Hardlin
                 target_path: file.target_path.display().to_string(),
                 size: file.size,
                 status: "planned".to_string(),
+                season_number: file.season_number,
+                episode_number: file.episode_number,
+                episode_label: file.episode_label.clone(),
                 error: None,
             })
             .collect(),
+        episodes: episode_records_from_hardlink_files(
+            &plan
+                .files
+                .iter()
+                .map(|file| subscription::HardlinkFileRecord {
+                    source_path: file.source_path.display().to_string(),
+                    target_path: file.target_path.display().to_string(),
+                    size: file.size,
+                    status: "planned".to_string(),
+                    season_number: file.season_number,
+                    episode_number: file.episode_number,
+                    episode_label: file.episode_label.clone(),
+                    error: None,
+                })
+                .collect::<Vec<_>>(),
+        ),
         error: None,
     }
 }
@@ -1485,6 +1909,7 @@ fn execute_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::Hardlin
         qb_name: Some(plan.qb_name.clone()),
         source_path: Some(plan.source_root.display().to_string()),
         target_dir: Some(plan.target_dir.display().to_string()),
+        episodes: episode_records_from_hardlink_files(&records),
         linked_files: records,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
     }
@@ -1499,6 +1924,9 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             target_path: target_display,
             size: file.size,
             status: "failed".to_string(),
+            season_number: file.season_number,
+            episode_number: file.episode_number,
+            episode_label: file.episode_label.clone(),
             error: Some("源文件不存在".to_string()),
         };
     }
@@ -1509,6 +1937,9 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
                 target_path: target_display,
                 size: file.size,
                 status: "already_linked".to_string(),
+                season_number: file.season_number,
+                episode_number: file.episode_number,
+                episode_label: file.episode_label.clone(),
                 error: None,
             };
         }
@@ -1517,6 +1948,9 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             target_path: target_display,
             size: file.size,
             status: "failed".to_string(),
+            season_number: file.season_number,
+            episode_number: file.episode_number,
+            episode_label: file.episode_label.clone(),
             error: Some("目标文件已存在且不是同一硬链接".to_string()),
         };
     }
@@ -1527,6 +1961,9 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
                 target_path: target_display,
                 size: file.size,
                 status: "failed".to_string(),
+                season_number: file.season_number,
+                episode_number: file.episode_number,
+                episode_label: file.episode_label.clone(),
                 error: Some(format!("创建目标目录失败: {e}")),
             };
         }
@@ -1537,6 +1974,9 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             target_path: target_display,
             size: file.size,
             status: "linked".to_string(),
+            season_number: file.season_number,
+            episode_number: file.episode_number,
+            episode_label: file.episode_label.clone(),
             error: None,
         },
         Err(e) => subscription::HardlinkFileRecord {
@@ -1544,6 +1984,9 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             target_path: target_display,
             size: file.size,
             status: "failed".to_string(),
+            season_number: file.season_number,
+            episode_number: file.episode_number,
+            episode_label: file.episode_label.clone(),
             error: Some(hardlink_error_message(&e)),
         },
     }
@@ -1691,6 +2134,13 @@ fn torrent_push_record(
         qb_name: None,
         checked_at: None,
         completed_at: None,
+        download_progress: None,
+        download_state: None,
+        total_size: None,
+        completed_file_count: None,
+        total_file_count: None,
+        files: Vec::new(),
+        episodes: Vec::new(),
         source_path: None,
         target_dir: None,
         linked_files: Vec::new(),
@@ -3098,6 +3548,8 @@ mod subscription_category_tests {
             save_path: "/downloads/movie".to_string(),
             content_path: String::new(),
             progress: 1.0,
+            size: 5,
+            downloaded: 5,
             completion_on: 200,
             state: "uploading".to_string(),
         }
@@ -3200,6 +3652,9 @@ mod subscription_category_tests {
                 source_path: source,
                 target_path: target,
                 size: 5,
+                season_number: None,
+                episode_number: None,
+                episode_label: None,
             }],
         };
 
@@ -3223,6 +3678,9 @@ mod subscription_category_tests {
                 source_path: root.join("source/missing.mkv"),
                 target_path: root.join("target/missing.mkv"),
                 size: 5,
+                season_number: None,
+                episode_number: None,
+                episode_label: None,
             }],
         };
         let result = execute_hardlink_plan(&plan, 300);
@@ -3251,6 +3709,9 @@ mod subscription_category_tests {
                 source_path: source,
                 target_path: target,
                 size: 6,
+                season_number: None,
+                episode_number: None,
+                episode_label: None,
             }],
         };
         let result = execute_hardlink_plan(&plan, 300);
@@ -3265,6 +3726,115 @@ mod subscription_category_tests {
     fn hardlink_error_message_calls_out_cross_device() {
         let err = std::io::Error::from_raw_os_error(18);
         assert!(hardlink_error_message(&err).contains("跨设备硬链接失败"));
+    }
+
+    #[test]
+    fn episode_progress_groups_common_episode_file_names() {
+        let files = vec![
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E01.2160p.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E02.2160p.mkv".to_string(),
+                size: 10,
+                progress: 0.5,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show/第03集.mkv".to_string(),
+                size: 10,
+                progress: 0.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E04-E05.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S02.Complete.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+        ];
+        let progress = torrent_file_progress_records(&files);
+        let episodes = episode_records_from_file_progress(&progress);
+        let labels = episodes
+            .iter()
+            .map(|episode| episode.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["E03", "S01E01", "S01E02", "S01E04-E05", "S02 全季"]
+        );
+        assert_eq!(episodes[1].status, "downloaded");
+        assert_eq!(episodes[2].status, "downloading");
+    }
+
+    #[test]
+    fn qb_progress_snapshot_updates_push_file_and_episode_records() {
+        let mut category = category("剧集", "剧集");
+        category.qb_category = "tv".to_string();
+        let mut push = torrent_push_record(
+            "subject-tv",
+            &QbServerEntry {
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "u".to_string(),
+                password: "p".to_string(),
+                insecure_tls: false,
+            },
+            &category,
+            &torrent("456", "Show.S01"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        let torrent = qbittorrent::QbTorrentInfo {
+            hash: "hash-tv".to_string(),
+            name: "Show.S01".to_string(),
+            category: "tv".to_string(),
+            save_path: "/downloads/tv".to_string(),
+            content_path: "tv/Show.S01".to_string(),
+            progress: 0.5,
+            size: 20,
+            downloaded: 10,
+            completion_on: -1,
+            state: "downloading".to_string(),
+        };
+        let files = vec![
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E01.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E02.mkv".to_string(),
+                size: 10,
+                progress: 0.0,
+                priority: 1,
+            },
+        ];
+
+        apply_qb_progress_to_push(&mut push, &torrent, &files);
+
+        assert_eq!(push.download_progress, Some(0.5));
+        assert_eq!(push.download_state.as_deref(), Some("downloading"));
+        assert_eq!(push.total_size, Some(20));
+        assert_eq!(push.completed_file_count, Some(1));
+        assert_eq!(push.total_file_count, Some(2));
+        assert_eq!(push.files.len(), 2);
+        assert_eq!(push.episodes.len(), 2);
+        assert_eq!(push.episodes[0].label, "S01E01");
+        assert_eq!(push.episodes[0].status, "downloaded");
+        assert_eq!(push.episodes[1].label, "S01E02");
+        assert_eq!(push.episodes[1].status, "pending");
     }
 }
 

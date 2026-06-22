@@ -15,6 +15,7 @@
       </div>
       <nav class="nav-list">
         <button type="button" class="nav-item is-active" data-app-page-target="main">主功能</button>
+        <button type="button" class="nav-item" id="btn-subscriptions" data-app-page-target="subscriptions">订阅</button>
         <button type="button" class="nav-item" id="btn-settings" data-app-page-target="settings">设置</button>
       </nav>
     </aside>
@@ -63,6 +64,21 @@
             <div id="tv" class="grid"></div>
           </section>
         </main>
+      </section>
+
+      <section id="page-subscriptions" class="app-page hidden">
+        <header class="top subscriptions-top">
+          <h1>订阅</h1>
+          <p class="sub">想看订阅、下载进度与硬链接结果</p>
+          <div class="actions">
+            <button type="button" id="btn-subscription-poll" class="btn secondary">轮询想看</button>
+            <button type="button" id="btn-subscription-refresh" class="btn secondary">刷新</button>
+          </div>
+        </header>
+        <section class="subscription-toolbar" aria-live="polite">
+          <p id="subscription-summary" class="hint">尚未加载订阅状态</p>
+        </section>
+        <section id="subscription-list" class="subscription-list" aria-live="polite"></section>
       </section>
 
       <section id="page-settings" class="app-page hidden">

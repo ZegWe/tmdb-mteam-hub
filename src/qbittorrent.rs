@@ -23,6 +23,10 @@ pub struct QbTorrentInfo {
     #[serde(default)]
     pub progress: f64,
     #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub downloaded: u64,
+    #[serde(default)]
     pub completion_on: i64,
     #[serde(default)]
     pub state: String,

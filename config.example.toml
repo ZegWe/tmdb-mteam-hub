@@ -1,7 +1,8 @@
 # 默认在「启动进程时的当前工作目录」读写 config.toml，
 # TMDB 磁盘缓存为「当前目录下的 cache/tmdb/」。
 # 豆瓣想看/看过缓存为「当前目录下的 cache/douban/」。
-# 固定路径可使用环境变量：CONFIG_PATH、TMDB_CACHE_DIR、DOUBAN_CACHE_DIR。
+# 订阅状态 SQLite 数据库默认为「当前目录下的 cache/subscriptions/wanted.sqlite」。
+# 固定路径可使用环境变量：CONFIG_PATH、TMDB_CACHE_DIR、DOUBAN_CACHE_DIR、SUBSCRIPTION_STATE_DIR。
 # 缓存 TTL 可使用环境变量：TMDB_CACHE_TTL_SECS、DOUBAN_CACHE_TTL_SECS。
 # 服务监听地址，修改后需重启生效。
 listen_ip = "127.0.0.1"

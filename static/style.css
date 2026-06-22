@@ -909,6 +909,193 @@ a.torrent-card-link:visited {
   white-space: nowrap;
 }
 
+.subscription-toolbar {
+  padding: 0 1.5rem 0.5rem;
+}
+
+.subscription-list {
+  padding: 0.5rem 1.5rem 3rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.subscription-card {
+  min-height: 148px;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.subscription-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-dim);
+}
+
+.subscription-card-head,
+.subscription-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.subscription-card h2,
+.subscription-detail h3 {
+  margin: 0;
+  min-width: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.subscription-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.55rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--text);
+  background: var(--bg);
+  white-space: nowrap;
+}
+
+.subscription-status-completed,
+.subscription-status-linked {
+  border-color: rgba(124, 207, 154, 0.45);
+  color: #93e2ad;
+}
+
+.subscription-status-failed {
+  border-color: rgba(239, 113, 113, 0.55);
+  color: var(--danger);
+}
+
+.subscription-status-pushed,
+.subscription-status-downloaded,
+.subscription-status-downloading,
+.subscription-status-matching,
+.subscription-status-processing {
+  border-color: rgba(96, 165, 250, 0.55);
+  color: #9ac4ff;
+}
+
+.subscription-status-skipped {
+  color: var(--muted);
+}
+
+.subscription-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.55rem;
+  margin-top: 0.55rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.subscription-episode-count {
+  color: var(--accent);
+}
+
+.subscription-progress {
+  height: 7px;
+  margin-top: 0.75rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.subscription-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #7ccf9a);
+}
+
+.subscription-card-progress {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.subscription-card-note,
+.subscription-detail-error {
+  margin: 0.65rem 0 0;
+  color: var(--danger);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.subscription-detail {
+  display: grid;
+  gap: 1rem;
+}
+
+.subscription-detail-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.subscription-episode-list,
+.subscription-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.subscription-episode-row,
+.subscription-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.65rem;
+  align-items: center;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 0.78rem;
+}
+
+.subscription-episode-row .subscription-progress {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.subscription-episode-title,
+.subscription-file-name {
+  min-width: 0;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.subscription-episode-state,
+.subscription-file-status,
+.subscription-episode-files {
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.subscription-file-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.subscription-file-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+  word-break: break-word;
+}
+
 .modal {
   position: fixed;
   top: 50%;
