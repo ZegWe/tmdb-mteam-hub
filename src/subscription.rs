@@ -83,6 +83,50 @@ pub struct TorrentPushRecord {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qb_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qb_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_files: Vec<HardlinkFileRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardlinkFileRecord {
+    pub source_path: String,
+    pub target_path: String,
+    pub size: u64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardlinkCompletionRecord {
+    pub status: String,
+    pub checked_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qb_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qb_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_files: Vec<HardlinkFileRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +147,8 @@ pub struct WantedSubscriptionRecord {
     pub candidate_matches: Vec<TorrentCandidateMatchRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_push: Option<TorrentPushRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_completion: Option<HardlinkCompletionRecord>,
     pub created_at: u64,
     pub updated_at: u64,
     pub first_seen_at: u64,
@@ -263,6 +309,32 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn update_completion_record(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        push: TorrentPushRecord,
+        completion: HardlinkCompletionRecord,
+        status: WantedSubscriptionStatus,
+        error: Option<String>,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        record.status = status;
+        record.last_push = Some(push);
+        record.last_completion = Some(completion);
+        record.last_error = error.filter(|s| !s.trim().is_empty());
+        record.updated_at = now;
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state).await?;
+        Ok(Some(record))
+    }
+
     fn path_for(&self, account_key: &str) -> PathBuf {
         self.root
             .join(format!("wanted_{}.json", safe_account_key(account_key)))
@@ -397,6 +469,7 @@ fn record_from_item(
         skip_reason: None,
         candidate_matches: Vec::new(),
         last_push: None,
+        last_completion: None,
         created_at: now,
         updated_at: now,
         first_seen_at: now,

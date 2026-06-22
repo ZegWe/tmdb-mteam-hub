@@ -3,9 +3,48 @@
 use crate::config::QbServerEntry;
 use crate::ApiError;
 use axum::http::StatusCode;
+use serde::{Deserialize, Serialize};
 
 const QB_HTTP_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 tmdb-mteam-hub/0.1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QbTorrentInfo {
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub save_path: String,
+    #[serde(default)]
+    pub content_path: String,
+    #[serde(default)]
+    pub progress: f64,
+    #[serde(default)]
+    pub completion_on: i64,
+    #[serde(default)]
+    pub state: String,
+}
+
+impl QbTorrentInfo {
+    pub fn is_complete(&self) -> bool {
+        self.progress >= 0.999_999 || self.completion_on > 0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QbTorrentFile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub progress: f64,
+    #[serde(default)]
+    pub priority: i64,
+}
 
 async fn http_client_tls(insecure: bool) -> Result<reqwest::Client, ApiError> {
     let mut b = reqwest::Client::builder()
@@ -160,6 +199,76 @@ pub async fn add_torrent_from_url(
         ));
     }
     Ok(())
+}
+
+pub async fn list_torrents(
+    server: &QbServerEntry,
+    category: Option<&str>,
+) -> Result<Vec<QbTorrentInfo>, ApiError> {
+    let base = server.base_url.trim().trim_end_matches('/');
+    let client = http_client_tls(server.insecure_tls).await?;
+    qb_login_session(&client, server).await?;
+
+    let referer = join_url(base, "/");
+    let info_url = join_url(base, "/api/v2/torrents/info");
+    let mut req = client.get(info_url).header("Referer", &referer);
+    if let Some(category) = category.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.query(&[("category", category)]);
+    }
+    let resp = req.send().await.map_err(|e| {
+        ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 查询任务失败: {e}"))
+    })?;
+    let st = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !st.is_success() {
+        return Err(ApiError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("qB 查询任务返回 {st}: {body}"),
+        ));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| ApiError::internal(format!("解析 qB 任务列表失败: {e}")))
+}
+
+pub async fn torrent_files(
+    server: &QbServerEntry,
+    hash: &str,
+) -> Result<Vec<QbTorrentFile>, ApiError> {
+    let hash = hash.trim();
+    if hash.is_empty() {
+        return Err(ApiError::bad_request("qB 任务 hash 为空"));
+    }
+    let base = server.base_url.trim().trim_end_matches('/');
+    let client = http_client_tls(server.insecure_tls).await?;
+    qb_login_session(&client, server).await?;
+
+    let referer = join_url(base, "/");
+    let files_url = join_url(base, "/api/v2/torrents/files");
+    let resp = client
+        .get(files_url)
+        .header("Referer", &referer)
+        .query(&[("hash", hash)])
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 查询文件失败: {e}"))
+        })?;
+    let st = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !st.is_success() {
+        return Err(ApiError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("qB 查询文件返回 {st}: {body}"),
+        ));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| ApiError::internal(format!("解析 qB 文件列表失败: {e}")))
 }
 
 fn is_qb_ok(body: &str) -> bool {

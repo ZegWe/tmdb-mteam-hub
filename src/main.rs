@@ -5,7 +5,7 @@ mod subscription;
 mod tmdb_cache;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -131,6 +131,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route(
             "/subscriptions/wanted/{id}/push",
             post(wanted_subscription_push),
+        )
+        .route(
+            "/subscriptions/wanted/{id}/completion",
+            post(wanted_subscription_completion),
         )
         .route(
             "/subscriptions/wanted/{id}/status",
@@ -501,6 +505,18 @@ struct WantedPushBody {
     page_size: Option<u32>,
 }
 
+#[derive(Deserialize, Default)]
+struct WantedCompletionBody {
+    #[serde(default)]
+    qb_server_name: Option<String>,
+    #[serde(default)]
+    qb_hash: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
 async fn wanted_subscription_candidates(
     State(state): State<AppState>,
     PathParam(id): PathParam<String>,
@@ -673,6 +689,153 @@ async fn wanted_subscription_push(
     })))
 }
 
+async fn wanted_subscription_completion(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<WantedCompletionBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    if matches!(
+        record.status,
+        subscription::WantedSubscriptionStatus::Completed
+    ) && !body.force
+    {
+        return Ok(Json(json!({
+            "ok": true,
+            "already_completed": true,
+            "record": record,
+        })));
+    }
+
+    let category = category_for_wanted_record(&record, &cfg.subscription_categories)?.clone();
+    let mut push = record
+        .last_push
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("订阅记录缺少 qB pushed record"))?;
+    if push.status == "failed" && !body.force {
+        return Err(ApiError::bad_request(
+            "最后一次 qB push 已失败；需要重新检查请传 force=true",
+        ));
+    }
+    if push.torrent_id.trim().is_empty() && body.qb_hash.as_deref().unwrap_or("").trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "pushed record 缺少种子 id，且未提供 qb_hash",
+        ));
+    }
+
+    let qb_server = select_qb_server(
+        &cfg.qb_servers,
+        body.qb_server_name
+            .as_deref()
+            .or(Some(push.qb_server.as_str())),
+    )?;
+    let torrents = qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await?;
+    let qb_torrent = select_qb_torrent(&torrents, &push, body.qb_hash.as_deref())?;
+    let now = unix_now_secs();
+
+    push.checked_at = Some(now);
+    push.qb_hash = Some(qb_torrent.hash.clone());
+    push.qb_name = Some(qb_torrent.name.clone());
+
+    if !qb_torrent.is_complete() {
+        let completion = subscription::HardlinkCompletionRecord {
+            status: "pending".to_string(),
+            checked_at: now,
+            completed_at: None,
+            qb_hash: Some(qb_torrent.hash.clone()),
+            qb_name: Some(qb_torrent.name.clone()),
+            source_path: None,
+            target_dir: None,
+            linked_files: Vec::new(),
+            error: None,
+        };
+        if !body.dry_run {
+            let record = state
+                .wanted_store
+                .update_completion_record(
+                    &account_key,
+                    &record.subject_id,
+                    push.clone(),
+                    completion.clone(),
+                    subscription::WantedSubscriptionStatus::Pushed,
+                    None,
+                    now,
+                )
+                .await
+                .map_err(|e| ApiError::internal(format!("写入 qB 完成检查记录失败: {e}")))?
+                .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+            return Ok(Json(json!({
+                "ok": true,
+                "completed": false,
+                "dry_run": false,
+                "completion": completion,
+                "record": record,
+            })));
+        }
+        return Ok(Json(json!({
+            "ok": true,
+            "completed": false,
+            "dry_run": true,
+            "completion": completion,
+        })));
+    }
+
+    let qb_files = qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await?;
+    let plan = build_hardlink_plan(&record, &category, &push, &qb_torrent, &qb_files, now)?;
+    let completion = if body.dry_run {
+        dry_run_hardlink_plan(&plan, now)
+    } else {
+        execute_hardlink_plan(&plan, now)
+    };
+    let completed = completion.status == "completed";
+    push.status = completion.status.clone();
+    push.error = completion.error.clone();
+    push.completed_at = completion.completed_at;
+    push.source_path = completion.source_path.clone();
+    push.target_dir = completion.target_dir.clone();
+    push.linked_files = completion.linked_files.clone();
+
+    if body.dry_run {
+        return Ok(Json(json!({
+            "ok": true,
+            "completed": completed,
+            "dry_run": true,
+            "completion": completion,
+            "plan_file_count": plan.files.len(),
+        })));
+    }
+
+    let status = if completed {
+        subscription::WantedSubscriptionStatus::Completed
+    } else {
+        subscription::WantedSubscriptionStatus::Failed
+    };
+    let record = state
+        .wanted_store
+        .update_completion_record(
+            &account_key,
+            &record.subject_id,
+            push.clone(),
+            completion.clone(),
+            status,
+            completion.error.clone(),
+            now,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入硬链接结果失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    Ok(Json(json!({
+        "ok": completed,
+        "completed": completed,
+        "dry_run": false,
+        "completion": completion,
+        "push": push,
+        "record": record,
+    })))
+}
+
 async fn load_wanted_record_context(
     state: &AppState,
     id: &str,
@@ -715,7 +878,9 @@ fn select_qb_server(
 ) -> Result<QbServerEntry, ApiError> {
     let requested = requested_name.map(str::trim).filter(|s| !s.is_empty());
     let server = if let Some(name) = requested {
-        servers.iter().find(|server| server.name.trim() == name)
+        servers
+            .iter()
+            .find(|server| server.name.trim() == name || server.base_url.trim() == name)
     } else {
         servers.first()
     };
@@ -1121,6 +1286,378 @@ async fn record_push_failure(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct HardlinkPlan {
+    source_root: PathBuf,
+    target_dir: PathBuf,
+    qb_hash: String,
+    qb_name: String,
+    files: Vec<HardlinkFilePlan>,
+}
+
+#[derive(Debug, Clone)]
+struct HardlinkFilePlan {
+    source_path: PathBuf,
+    target_path: PathBuf,
+    size: u64,
+}
+
+fn select_qb_torrent(
+    torrents: &[qbittorrent::QbTorrentInfo],
+    push: &subscription::TorrentPushRecord,
+    requested_hash: Option<&str>,
+) -> Result<qbittorrent::QbTorrentInfo, ApiError> {
+    if let Some(hash) = requested_hash.map(str::trim).filter(|s| !s.is_empty()) {
+        return torrents
+            .iter()
+            .find(|torrent| torrent.hash.eq_ignore_ascii_case(hash))
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request(format!("qB 中未找到指定 hash: {hash}")));
+    }
+    let title = normalize_match_text(&push.torrent_title);
+    if title.is_empty() {
+        return Err(ApiError::bad_request(
+            "pushed record 缺少种子标题，无法匹配 qB 任务",
+        ));
+    }
+    torrents
+        .iter()
+        .find(|torrent| {
+            let name = normalize_match_text(&torrent.name);
+            !name.is_empty() && (name == title || name.contains(&title) || title.contains(&name))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("qB 中未找到已推送种子: {}", push.torrent_title))
+        })
+}
+
+fn normalize_match_text(raw: &str) -> String {
+    raw.trim().to_lowercase()
+}
+
+fn build_hardlink_plan(
+    record: &subscription::WantedSubscriptionRecord,
+    category: &SubscriptionCategory,
+    push: &subscription::TorrentPushRecord,
+    torrent: &qbittorrent::QbTorrentInfo,
+    files: &[qbittorrent::QbTorrentFile],
+    _now: u64,
+) -> Result<HardlinkPlan, ApiError> {
+    let release_year = record.release_year.ok_or_else(|| {
+        ApiError::bad_request("订阅记录缺少上映年份，无法创建 中文名.上映年份 目录")
+    })?;
+    let title = sanitize_output_component(&record.title);
+    if title.is_empty() {
+        return Err(ApiError::bad_request(
+            "订阅记录缺少中文名，无法创建硬链接目录",
+        ));
+    }
+    let source_root = PathBuf::from(category.download_dir.trim());
+    if source_root.as_os_str().is_empty() {
+        return Err(ApiError::bad_request("订阅分类缺少真实下载目录"));
+    }
+    let target_root = PathBuf::from(category.link_target_dir.trim());
+    if target_root.as_os_str().is_empty() {
+        return Err(ApiError::bad_request("订阅分类缺少硬链接目标目录"));
+    }
+    let target_dir = target_root.join(format!("{title}.{release_year}"));
+
+    let selected = files
+        .iter()
+        .filter(|file| should_link_media_file(&file.name))
+        .filter_map(|file| safe_relative_path(&file.name).map(|relative| (file, relative)))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(ApiError::bad_request("qB 文件列表中没有可硬链接的媒体文件"));
+    }
+
+    let mut plan_files = Vec::new();
+    for (file, relative) in selected {
+        let source_path = source_path_for_qb_file(&source_root, push, torrent, &relative);
+        let target_path = target_dir.join(relative);
+        plan_files.push(HardlinkFilePlan {
+            source_path,
+            target_path,
+            size: file.size,
+        });
+    }
+
+    Ok(HardlinkPlan {
+        source_root,
+        target_dir,
+        qb_hash: torrent.hash.clone(),
+        qb_name: torrent.name.clone(),
+        files: plan_files,
+    })
+}
+
+fn source_path_for_qb_file(
+    source_root: &Path,
+    push: &subscription::TorrentPushRecord,
+    torrent: &qbittorrent::QbTorrentInfo,
+    relative: &Path,
+) -> PathBuf {
+    let direct = source_root.join(relative);
+    if direct.exists() {
+        return direct;
+    }
+
+    let content_path = map_qb_path_to_local(
+        Path::new(torrent.content_path.trim()),
+        push.qb_save_dir_name.trim(),
+        source_root,
+    );
+    if let Some(path) = content_path {
+        if path.is_file() {
+            return path;
+        }
+        let joined = path.join(relative);
+        if joined.exists() {
+            return joined;
+        }
+    }
+    direct
+}
+
+fn map_qb_path_to_local(
+    qb_path: &Path,
+    qb_save_dir_name: &str,
+    source_root: &Path,
+) -> Option<PathBuf> {
+    if qb_path.as_os_str().is_empty() {
+        return None;
+    }
+    let save_dir = Path::new(qb_save_dir_name);
+    if !qb_save_dir_name.trim().is_empty() && qb_path.starts_with(save_dir) {
+        let suffix = qb_path.strip_prefix(save_dir).ok()?;
+        return Some(source_root.join(suffix));
+    }
+    None
+}
+
+fn dry_run_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::HardlinkCompletionRecord {
+    subscription::HardlinkCompletionRecord {
+        status: "dry_run".to_string(),
+        checked_at: now,
+        completed_at: None,
+        qb_hash: Some(plan.qb_hash.clone()),
+        qb_name: Some(plan.qb_name.clone()),
+        source_path: Some(plan.source_root.display().to_string()),
+        target_dir: Some(plan.target_dir.display().to_string()),
+        linked_files: plan
+            .files
+            .iter()
+            .map(|file| subscription::HardlinkFileRecord {
+                source_path: file.source_path.display().to_string(),
+                target_path: file.target_path.display().to_string(),
+                size: file.size,
+                status: "planned".to_string(),
+                error: None,
+            })
+            .collect(),
+        error: None,
+    }
+}
+
+fn execute_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::HardlinkCompletionRecord {
+    let mut records = Vec::new();
+    let mut errors = Vec::new();
+
+    for file in &plan.files {
+        let record = hardlink_one_file(file);
+        if let Some(error) = record.error.clone() {
+            errors.push(error);
+        }
+        records.push(record);
+    }
+
+    let status = if errors.is_empty() {
+        "completed"
+    } else {
+        "failed"
+    };
+    subscription::HardlinkCompletionRecord {
+        status: status.to_string(),
+        checked_at: now,
+        completed_at: errors.is_empty().then_some(now),
+        qb_hash: Some(plan.qb_hash.clone()),
+        qb_name: Some(plan.qb_name.clone()),
+        source_path: Some(plan.source_root.display().to_string()),
+        target_dir: Some(plan.target_dir.display().to_string()),
+        linked_files: records,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+    }
+}
+
+fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecord {
+    let source_display = file.source_path.display().to_string();
+    let target_display = file.target_path.display().to_string();
+    if !file.source_path.exists() {
+        return subscription::HardlinkFileRecord {
+            source_path: source_display,
+            target_path: target_display,
+            size: file.size,
+            status: "failed".to_string(),
+            error: Some("源文件不存在".to_string()),
+        };
+    }
+    if file.target_path.exists() {
+        if same_file(&file.source_path, &file.target_path).unwrap_or(false) {
+            return subscription::HardlinkFileRecord {
+                source_path: source_display,
+                target_path: target_display,
+                size: file.size,
+                status: "already_linked".to_string(),
+                error: None,
+            };
+        }
+        return subscription::HardlinkFileRecord {
+            source_path: source_display,
+            target_path: target_display,
+            size: file.size,
+            status: "failed".to_string(),
+            error: Some("目标文件已存在且不是同一硬链接".to_string()),
+        };
+    }
+    if let Some(parent) = file.target_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return subscription::HardlinkFileRecord {
+                source_path: source_display,
+                target_path: target_display,
+                size: file.size,
+                status: "failed".to_string(),
+                error: Some(format!("创建目标目录失败: {e}")),
+            };
+        }
+    }
+    match std::fs::hard_link(&file.source_path, &file.target_path) {
+        Ok(()) => subscription::HardlinkFileRecord {
+            source_path: source_display,
+            target_path: target_display,
+            size: file.size,
+            status: "linked".to_string(),
+            error: None,
+        },
+        Err(e) => subscription::HardlinkFileRecord {
+            source_path: source_display,
+            target_path: target_display,
+            size: file.size,
+            status: "failed".to_string(),
+            error: Some(hardlink_error_message(&e)),
+        },
+    }
+}
+
+fn hardlink_error_message(error: &std::io::Error) -> String {
+    if error.raw_os_error() == Some(18) {
+        return "跨设备硬链接失败: 源目录和目标目录不在同一文件系统".to_string();
+    }
+    format!("硬链接失败: {error}")
+}
+
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let ma = std::fs::metadata(a)?;
+    let mb = std::fs::metadata(b)?;
+    Ok(ma.dev() == mb.dev() && ma.ino() == mb.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    Ok(std::fs::canonicalize(a)? == std::fs::canonicalize(b)?)
+}
+
+fn should_link_media_file(path: &str) -> bool {
+    let Some(relative) = safe_relative_path(path) else {
+        return false;
+    };
+    if relative.components().any(|component| {
+        let text = component.as_os_str().to_string_lossy().to_lowercase();
+        matches!(
+            text.as_str(),
+            "sample"
+                | "samples"
+                | "screenshot"
+                | "screenshots"
+                | "screen"
+                | "screens"
+                | "proof"
+                | "cover"
+                | "covers"
+                | "poster"
+                | "posters"
+                | "extra"
+                | "extras"
+        )
+    }) {
+        return false;
+    }
+    let file_name = relative
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if file_name.contains("sample") || file_name.contains("screenshot") {
+        return false;
+    }
+    let ext = relative
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "mkv"
+            | "mp4"
+            | "m4v"
+            | "avi"
+            | "mov"
+            | "wmv"
+            | "flv"
+            | "webm"
+            | "ts"
+            | "m2ts"
+            | "iso"
+            | "srt"
+            | "ass"
+            | "ssa"
+            | "sup"
+            | "sub"
+            | "idx"
+    )
+}
+
+fn safe_relative_path(path: &str) -> Option<PathBuf> {
+    let raw = Path::new(path.trim());
+    if raw.as_os_str().is_empty() || raw.is_absolute() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            std::path::Component::Normal(part) => out.push(part),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+fn sanitize_output_component(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().chars() {
+        let safe = match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => ' ',
+            _ => ch,
+        };
+        if safe.is_control() {
+            continue;
+        }
+        out.push(safe);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn torrent_push_record(
     subscription_id: &str,
     qb_server: &QbServerEntry,
@@ -1150,6 +1687,13 @@ fn torrent_push_record(
         pushed_at,
         status: status.to_string(),
         error,
+        qb_hash: None,
+        qb_name: None,
+        checked_at: None,
+        completed_at: None,
+        source_path: None,
+        target_dir: None,
+        linked_files: Vec::new(),
     }
 }
 
@@ -2518,6 +3062,209 @@ mod subscription_category_tests {
         assert_eq!(push.qb_identifier, "mteam:12345");
         assert_eq!(push.status, "failed");
         assert_eq!(push.error.as_deref(), Some("qB 添加失败"));
+    }
+
+    fn wanted_record(
+        subject_id: &str,
+        title: &str,
+        release_year: Option<u16>,
+    ) -> subscription::WantedSubscriptionRecord {
+        subscription::WantedSubscriptionRecord {
+            subject_id: subject_id.to_string(),
+            title: title.to_string(),
+            release_year,
+            category_text: Some("电影".to_string()),
+            tags: vec!["电影".to_string()],
+            status: subscription::WantedSubscriptionStatus::Pushed,
+            retry_count: 0,
+            max_retries: 3,
+            last_error: None,
+            skip_reason: None,
+            candidate_matches: Vec::new(),
+            last_push: None,
+            last_completion: None,
+            created_at: 100,
+            updated_at: 100,
+            first_seen_at: 100,
+            last_seen_at: 100,
+        }
+    }
+
+    fn qb_torrent(name: &str) -> qbittorrent::QbTorrentInfo {
+        qbittorrent::QbTorrentInfo {
+            hash: "abcdef".to_string(),
+            name: name.to_string(),
+            category: "qb-电影".to_string(),
+            save_path: "/downloads/movie".to_string(),
+            content_path: String::new(),
+            progress: 1.0,
+            completion_on: 200,
+            state: "uploading".to_string(),
+        }
+    }
+
+    fn qb_file(name: &str, size: u64) -> qbittorrent::QbTorrentFile {
+        qbittorrent::QbTorrentFile {
+            name: name.to_string(),
+            size,
+            progress: 1.0,
+            priority: 1,
+        }
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("tmdb_mteam_{name}_{nanos}"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn media_file_filter_keeps_media_and_skips_noise() {
+        assert!(should_link_media_file("Movie/Movie.2024.2160p.mkv"));
+        assert!(should_link_media_file("Movie/Subs/Movie.zh.ass"));
+        assert!(!should_link_media_file("Movie/Sample/sample.mkv"));
+        assert!(!should_link_media_file("Movie/Screenshots/shot01.png"));
+        assert!(!should_link_media_file("Movie/readme.txt"));
+        assert!(!should_link_media_file("../escape.mkv"));
+    }
+
+    #[test]
+    fn hardlink_plan_creates_chinese_title_year_outer_dir() {
+        let root = temp_test_dir("plan");
+        let source = root.join("downloads");
+        let target = root.join("links");
+        std::fs::create_dir_all(source.join("TorrentRoot")).unwrap();
+        std::fs::write(source.join("TorrentRoot/movie.mkv"), b"movie").unwrap();
+
+        let mut category = category("电影", "电影");
+        category.download_dir = source.display().to_string();
+        category.link_target_dir = target.display().to_string();
+        let push = torrent_push_record(
+            "subject-1",
+            &QbServerEntry {
+                name: "qb".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "u".to_string(),
+                password: "p".to_string(),
+                insecure_tls: false,
+            },
+            &category,
+            &torrent("123", "Movie 2160p"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        let Ok(plan) = build_hardlink_plan(
+            &wanted_record("subject-1", "测试电影", Some(2024)),
+            &category,
+            &push,
+            &qb_torrent("Movie 2160p"),
+            &[
+                qb_file("TorrentRoot/movie.mkv", 5),
+                qb_file("TorrentRoot/Sample/sample.mkv", 1),
+            ],
+            200,
+        ) else {
+            panic!("valid completed torrent should produce a hardlink plan");
+        };
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.target_dir, target.join("测试电影.2024"));
+        assert_eq!(
+            plan.files[0].source_path,
+            source.join("TorrentRoot/movie.mkv")
+        );
+        assert_eq!(
+            plan.files[0].target_path,
+            target.join("测试电影.2024/TorrentRoot/movie.mkv")
+        );
+    }
+
+    #[test]
+    fn hardlink_execution_is_idempotent_for_existing_hardlink() {
+        let root = temp_test_dir("idempotent");
+        let source = root.join("source/movie.mkv");
+        let target = root.join("target/movie.mkv");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"movie").unwrap();
+        let plan = HardlinkPlan {
+            source_root: root.join("source"),
+            target_dir: root.join("target"),
+            qb_hash: "hash".to_string(),
+            qb_name: "movie".to_string(),
+            files: vec![HardlinkFilePlan {
+                source_path: source,
+                target_path: target,
+                size: 5,
+            }],
+        };
+
+        let first = execute_hardlink_plan(&plan, 300);
+        assert_eq!(first.status, "completed");
+        assert_eq!(first.linked_files[0].status, "linked");
+        let second = execute_hardlink_plan(&plan, 400);
+        assert_eq!(second.status, "completed");
+        assert_eq!(second.linked_files[0].status, "already_linked");
+    }
+
+    #[test]
+    fn hardlink_execution_records_missing_source() {
+        let root = temp_test_dir("missing");
+        let plan = HardlinkPlan {
+            source_root: root.join("source"),
+            target_dir: root.join("target"),
+            qb_hash: "hash".to_string(),
+            qb_name: "movie".to_string(),
+            files: vec![HardlinkFilePlan {
+                source_path: root.join("source/missing.mkv"),
+                target_path: root.join("target/missing.mkv"),
+                size: 5,
+            }],
+        };
+        let result = execute_hardlink_plan(&plan, 300);
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.linked_files[0].error.as_deref(),
+            Some("源文件不存在")
+        );
+    }
+
+    #[test]
+    fn hardlink_execution_records_target_conflict() {
+        let root = temp_test_dir("target_conflict");
+        let source = root.join("source/movie.mkv");
+        let target = root.join("target/movie.mkv");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&target, b"target").unwrap();
+        let plan = HardlinkPlan {
+            source_root: root.join("source"),
+            target_dir: root.join("target"),
+            qb_hash: "hash".to_string(),
+            qb_name: "movie".to_string(),
+            files: vec![HardlinkFilePlan {
+                source_path: source,
+                target_path: target,
+                size: 6,
+            }],
+        };
+        let result = execute_hardlink_plan(&plan, 300);
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.linked_files[0].error.as_deref(),
+            Some("目标文件已存在且不是同一硬链接")
+        );
+    }
+
+    #[test]
+    fn hardlink_error_message_calls_out_cross_device() {
+        let err = std::io::Error::from_raw_os_error(18);
+        assert!(hardlink_error_message(&err).contains("跨设备硬链接失败"));
     }
 }
 
