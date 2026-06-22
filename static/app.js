@@ -4,6 +4,8 @@ const IMG_BASE = "https://image.tmdb.org/t/p/w342";
 let qbServersCache = null;
 /** @type {{ name?: string, wanted_tag?: string, qb_category?: string, qb_save_dir_name?: string, download_dir?: string, link_target_dir?: string }[] | null} */
 let subscriptionCategoriesCache = null;
+/** @type {{ name?: string, priority?: number, mode?: string, title_keywords?: string[], resolution_keywords?: string[], source_keywords?: string[] }[] | null} */
+let torrentMatchRulesCache = null;
 let searchSource = "tmdb";
 let currentView = "search";
 let currentAppPage = "main";
@@ -1380,6 +1382,99 @@ function collectSubscriptionCategoriesFromDom() {
     .filter(categoryPayloadHasAnyValue);
 }
 
+function splitKeywordList(value) {
+  return String(value || "")
+    .split(/[,，\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function joinKeywordList(values) {
+  return Array.isArray(values) ? values.filter(Boolean).join(", ") : "";
+}
+
+function torrentRulePayloadFromRow(row) {
+  return {
+    name: row.querySelector('[data-torrent-rule="name"]')?.value?.trim() ?? "",
+    priority: Number(row.querySelector('[data-torrent-rule="priority"]')?.value || 0) || 0,
+    mode: row.querySelector('[data-torrent-rule="mode"]')?.value === "any" ? "any" : "all",
+    title_keywords: splitKeywordList(row.querySelector('[data-torrent-rule="title_keywords"]')?.value),
+    resolution_keywords: splitKeywordList(row.querySelector('[data-torrent-rule="resolution_keywords"]')?.value),
+    source_keywords: splitKeywordList(row.querySelector('[data-torrent-rule="source_keywords"]')?.value),
+  };
+}
+
+function torrentRulePayloadHasAnyValue(rule) {
+  return (
+    rule.name ||
+    rule.priority ||
+    rule.title_keywords.length ||
+    rule.resolution_keywords.length ||
+    rule.source_keywords.length
+  );
+}
+
+function makeTorrentRuleRowEl(rule = {}) {
+  const row = document.createElement("div");
+  row.className = "torrent-rule-row";
+  row.innerHTML = `
+    <label>规则名<input type="text" data-torrent-rule="name" placeholder="如 优先 2160p BluRay" /></label>
+    <label>优先级<input type="number" data-torrent-rule="priority" step="1" placeholder="100" /></label>
+    <label>匹配模式
+      <select data-torrent-rule="mode">
+        <option value="all">全部满足</option>
+        <option value="any">任一满足</option>
+      </select>
+    </label>
+    <label>标题关键词<input type="text" data-torrent-rule="title_keywords" placeholder="2160p, 4K" /></label>
+    <label>分辨率关键词<input type="text" data-torrent-rule="resolution_keywords" placeholder="1080p, 2160p" /></label>
+    <label>版本/来源关键词<input type="text" data-torrent-rule="source_keywords" placeholder="BluRay, REMUX, WEB-DL" /></label>
+    <div class="torrent-rule-actions">
+      <p class="hint subtle">保存后自动订阅推送会按优先级生成可解释的候选匹配结果。</p>
+      <button type="button" class="btn btn-mini torrent-rule-remove">移除</button>
+    </div>`;
+
+  row.querySelector('[data-torrent-rule="name"]').value = rule.name ?? "";
+  row.querySelector('[data-torrent-rule="priority"]').value = Number.isFinite(Number(rule.priority))
+    ? String(Number(rule.priority))
+    : "0";
+  row.querySelector('[data-torrent-rule="mode"]').value = rule.mode === "any" ? "any" : "all";
+  row.querySelector('[data-torrent-rule="title_keywords"]').value = joinKeywordList(rule.title_keywords);
+  row.querySelector('[data-torrent-rule="resolution_keywords"]').value = joinKeywordList(rule.resolution_keywords);
+  row.querySelector('[data-torrent-rule="source_keywords"]').value = joinKeywordList(rule.source_keywords);
+
+  row.querySelector(".torrent-rule-remove")?.addEventListener("click", () => {
+    row.remove();
+    const list = $("#torrent-rules-list");
+    if (list && !list.querySelector(".torrent-rule-row")) {
+      list.innerHTML = '<p class="subtle torrent-rule-empty">未配置规则；自动推送会使用首个候选种子。</p>';
+    }
+  });
+  return row;
+}
+
+function renderTorrentRulesEditor(rules) {
+  const list = $("#torrent-rules-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const arr = Array.isArray(rules) ? rules : [];
+  if (!arr.length) {
+    list.innerHTML = '<p class="subtle torrent-rule-empty">未配置规则；自动推送会使用首个候选种子。</p>';
+    return;
+  }
+  for (const rule of arr) {
+    list.appendChild(makeTorrentRuleRowEl(rule));
+  }
+}
+
+function collectTorrentRulesFromDom() {
+  const list = $("#torrent-rules-list");
+  if (!list) return [];
+  return [...list.querySelectorAll(".torrent-rule-row")]
+    .map((row) => torrentRulePayloadFromRow(row))
+    .filter(torrentRulePayloadHasAnyValue);
+}
+
 function clearDoubanQrTimer() {
   if (doubanQrTimer) {
     clearInterval(doubanQrTimer);
@@ -1560,6 +1655,8 @@ async function loadSettings() {
     $("#f-douban-cookie").value = c.douban_cookie || "";
     renderSubscriptionCategoriesEditor(c.subscription_categories);
     subscriptionCategoriesCache = Array.isArray(c.subscription_categories) ? c.subscription_categories : [];
+    renderTorrentRulesEditor(c.torrent_match_rules);
+    torrentMatchRulesCache = Array.isArray(c.torrent_match_rules) ? c.torrent_match_rules : [];
     renderQbServersEditor(c.qb_servers);
     qbServersCache = Array.isArray(c.qb_servers) ? c.qb_servers : [];
   } catch {
@@ -1602,6 +1699,13 @@ $("#btn-subscription-category-add")?.addEventListener("click", () => {
   if (!list) return;
   list.querySelector(".subscription-category-empty")?.remove();
   list.appendChild(makeSubscriptionCategoryRowEl({}));
+});
+
+$("#btn-torrent-rule-add")?.addEventListener("click", () => {
+  const list = $("#torrent-rules-list");
+  if (!list) return;
+  list.querySelector(".torrent-rule-empty")?.remove();
+  list.appendChild(makeTorrentRuleRowEl({}));
 });
 
 document.querySelectorAll("[data-search-source]").forEach((btn) => {
@@ -1666,6 +1770,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   const doubanCookie = $("#f-douban-cookie").value;
   const qbServers = collectQbServersFromDom();
   const subscriptionCategories = collectSubscriptionCategoriesFromDom();
+  const torrentMatchRules = collectTorrentRulesFromDom();
   const submitBtn = e.target.querySelector('button[type="submit"]');
   if (submitBtn) submitBtn.disabled = true;
   try {
@@ -1677,10 +1782,12 @@ $("#settings-form").addEventListener("submit", async (e) => {
         douban_cookie: doubanCookie,
         qb_servers: qbServers,
         subscription_categories: subscriptionCategories,
+        torrent_match_rules: torrentMatchRules,
       }),
     });
     qbServersCache = qbServers;
     subscriptionCategoriesCache = subscriptionCategories;
+    torrentMatchRulesCache = torrentMatchRules;
     doubanTagHistoryCache = null;
     closeSettings();
   } catch (err) {

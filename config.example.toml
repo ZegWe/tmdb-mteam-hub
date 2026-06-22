@@ -28,3 +28,22 @@ douban_cookie = ""
 # qb_save_dir_name = "movies"
 # download_dir = "/downloads/movies"
 # link_target_dir = "/media/movies"
+
+# 想看订阅监听。首次启用默认只建档并跳过已有想看，之后新出现的想看条目进入未处理队列。
+[subscription_watcher]
+enabled = false
+poll_interval_secs = 3600
+library_limit = 200
+max_retries = 3
+bootstrap_existing_as_skipped = true
+
+# 种子自动选择规则。priority 数字越大越先尝试；高优先级无匹配时才尝试低优先级。
+# mode = "all" 表示所有关键词都要命中；mode = "any" 表示命中任一关键词即可。
+# 关键词会在种子标题、简介、来源等可见文本中做大小写不敏感匹配。
+# [[torrent_match_rules]]
+# name = "优先 2160p BluRay"
+# priority = 100
+# mode = "all"
+# title_keywords = ["2160p"]
+# resolution_keywords = ["2160p", "4k"]
+# source_keywords = ["blu-ray", "bluray", "remux"]

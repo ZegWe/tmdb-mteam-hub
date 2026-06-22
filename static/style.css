@@ -1031,11 +1031,13 @@ a.torrent-card-link:visited {
 }
 
 .subscription-categories-fieldset,
+.torrent-rules-fieldset,
 .qb-servers-fieldset {
   margin-top: 0;
 }
 
 .subscription-categories-fieldset legend,
+.torrent-rules-fieldset legend,
 .qb-servers-fieldset legend {
   padding: 0 0.25rem;
   font-size: 0.88rem;
@@ -1043,6 +1045,7 @@ a.torrent-card-link:visited {
 }
 
 .subscription-categories-list,
+.torrent-rules-list,
 .qb-servers-list {
   margin-top: 0.5rem;
   display: flex;
@@ -1051,6 +1054,7 @@ a.torrent-card-link:visited {
 }
 
 .subscription-category-row,
+.torrent-rule-row,
 .qb-server-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1062,6 +1066,7 @@ a.torrent-card-link:visited {
 }
 
 .subscription-category-row label,
+.torrent-rule-row label,
 .qb-server-row label {
   display: flex;
   flex-direction: column;
@@ -1071,6 +1076,9 @@ a.torrent-card-link:visited {
 }
 
 .subscription-category-row input[type="text"],
+.torrent-rule-row input[type="text"],
+.torrent-rule-row input[type="number"],
+.torrent-rule-row select,
 .qb-server-row input[type="text"],
 .qb-server-row input[type="password"] {
   width: 100%;
@@ -1082,7 +1090,8 @@ a.torrent-card-link:visited {
   font-size: 0.85rem;
 }
 
-.subscription-category-row .subscription-category-actions {
+.subscription-category-row .subscription-category-actions,
+.torrent-rule-row .torrent-rule-actions {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
@@ -1091,7 +1100,8 @@ a.torrent-card-link:visited {
   gap: 0.45rem;
 }
 
-.subscription-category-row .subscription-category-actions .hint {
+.subscription-category-row .subscription-category-actions .hint,
+.torrent-rule-row .torrent-rule-actions .hint {
   flex: 1 1 280px;
 }
 
@@ -1207,6 +1217,7 @@ code {
   }
 
   .subscription-category-row,
+  .torrent-rule-row,
   .qb-server-row {
     grid-template-columns: 1fr;
   }

@@ -103,6 +103,13 @@
             <button type="button" class="btn secondary" id="btn-subscription-category-add">添加分类</button>
           </section>
 
+          <section class="settings-section torrent-rules-fieldset">
+            <h2>种子匹配规则</h2>
+            <p class="hint">数字越大越先尝试；高优先级没有候选命中时才尝试低优先级。关键词用逗号分隔。</p>
+            <div id="torrent-rules-list" class="torrent-rules-list"></div>
+            <button type="button" class="btn secondary" id="btn-torrent-rule-add">添加规则</button>
+          </section>
+
           <section class="settings-section qb-servers-fieldset">
             <h2>qBittorrent</h2>
             <p class="hint">在本机可访问的 qB Web UI；保存后会写入配置文件，下次打开设置会从此处加载。</p>

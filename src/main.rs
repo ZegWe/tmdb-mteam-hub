@@ -1,6 +1,7 @@
 mod config;
 mod douban;
 mod qbittorrent;
+mod subscription;
 mod tmdb_cache;
 
 use std::collections::{HashMap, HashSet};
@@ -14,7 +15,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use config::{FileConfig, QbServerEntry, SubscriptionCategory};
+use config::{FileConfig, QbServerEntry, SubscriptionCategory, TorrentMatchRule};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tmdb_cache::TmdbDiskCache;
@@ -31,6 +32,7 @@ struct AppState {
     douban_cache: TmdbDiskCache,
     douban_cache_ttl_secs: u64,
     douban_qr_sessions: std::sync::Arc<RwLock<HashMap<String, douban::QrSession>>>,
+    wanted_store: subscription::WantedSubscriptionStore,
 }
 
 #[tokio::main]
@@ -84,6 +86,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         douban_cache_ttl_secs
     );
 
+    let subscription_state_dir = resolve_subscription_state_dir();
+    let wanted_store = subscription::WantedSubscriptionStore::new(subscription_state_dir.clone());
+    tracing::info!(
+        "subscription state: dir={}",
+        subscription_state_dir.display()
+    );
+
     let state = AppState {
         config_path,
         config: std::sync::Arc::new(RwLock::new(file_cfg)),
@@ -91,7 +100,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         douban_cache,
         douban_cache_ttl_secs,
         douban_qr_sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        wanted_store,
     };
+    spawn_wanted_watch_loop(state.clone());
 
     let api = Router::new()
         .route("/config", get(get_config).put(put_config))
@@ -111,6 +122,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/mteam/torrents", get(mteam_search))
         .route("/qb/test", post(qb_test))
         .route("/qb/push-mteam", post(qb_push_mteam))
+        .route("/subscriptions/wanted", get(wanted_subscription_state))
+        .route("/subscriptions/wanted/poll", post(wanted_subscription_poll))
+        .route(
+            "/subscriptions/wanted/{id}/candidates",
+            post(wanted_subscription_candidates),
+        )
+        .route(
+            "/subscriptions/wanted/{id}/push",
+            post(wanted_subscription_push),
+        )
+        .route(
+            "/subscriptions/wanted/{id}/status",
+            post(wanted_subscription_status),
+        )
         .with_state(state);
 
     let cors = CorsLayer::new()
@@ -158,6 +183,12 @@ fn resolve_douban_cache_dir() -> PathBuf {
         .unwrap_or_else(|_| cwd_or_dot().join("cache").join("douban"))
 }
 
+fn resolve_subscription_state_dir() -> PathBuf {
+    std::env::var("SUBSCRIPTION_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| cwd_or_dot().join("cache").join("subscriptions"))
+}
+
 fn static_dir() -> std::io::Result<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     if manifest.is_dir() {
@@ -180,6 +211,8 @@ async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
         "douban_cookie": cfg.douban_cookie,
         "qb_servers": cfg.qb_servers,
         "subscription_categories": cfg.subscription_categories,
+        "subscription_watcher": cfg.subscription_watcher,
+        "torrent_match_rules": cfg.torrent_match_rules,
     }))
 }
 
@@ -197,6 +230,10 @@ struct PutConfigBody {
     qb_servers: Vec<QbServerEntry>,
     #[serde(default)]
     subscription_categories: Option<Vec<SubscriptionCategory>>,
+    #[serde(default)]
+    subscription_watcher: Option<config::SubscriptionWatcherConfig>,
+    #[serde(default)]
+    torrent_match_rules: Option<Vec<TorrentMatchRule>>,
 }
 
 async fn put_config(
@@ -217,6 +254,12 @@ async fn put_config(
     if let Some(subscription_categories) = body.subscription_categories {
         new_cfg.subscription_categories =
             normalize_subscription_categories(subscription_categories)?;
+    }
+    if let Some(subscription_watcher) = body.subscription_watcher {
+        new_cfg.subscription_watcher = normalize_subscription_watcher(subscription_watcher);
+    }
+    if let Some(torrent_match_rules) = body.torrent_match_rules {
+        new_cfg.torrent_match_rules = normalize_torrent_match_rules(torrent_match_rules)?;
     }
     new_cfg
         .listen_addr()
@@ -328,6 +371,831 @@ fn normalize_wanted_tag_from_categories(
     Err(ApiError::bad_request(format!(
         "标记想看的标签必须来自订阅分类: {selected}"
     )))
+}
+
+fn normalize_subscription_watcher(
+    mut cfg: config::SubscriptionWatcherConfig,
+) -> config::SubscriptionWatcherConfig {
+    cfg.poll_interval_secs = cfg.poll_interval_secs.clamp(60, 86_400);
+    cfg.library_limit = cfg.library_limit.clamp(1, 1200);
+    cfg.max_retries = cfg.max_retries.clamp(1, 20);
+    cfg
+}
+
+fn normalize_torrent_match_rules(
+    rules: Vec<TorrentMatchRule>,
+) -> Result<Vec<TorrentMatchRule>, ApiError> {
+    let mut out = Vec::new();
+    let mut names = HashSet::new();
+    for (idx, rule) in rules.into_iter().enumerate() {
+        let n = idx + 1;
+        let normalized = TorrentMatchRule {
+            name: rule.name.trim().to_string(),
+            priority: rule.priority,
+            mode: rule.mode,
+            title_keywords: normalize_keyword_list(rule.title_keywords),
+            resolution_keywords: normalize_keyword_list(rule.resolution_keywords),
+            source_keywords: normalize_keyword_list(rule.source_keywords),
+        };
+        if normalized.name.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "种子匹配规则 #{n} 缺少规则名"
+            )));
+        }
+        if !names.insert(normalized.name.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "种子匹配规则名重复: {}",
+                normalized.name
+            )));
+        }
+        if normalized.title_keywords.is_empty()
+            && normalized.resolution_keywords.is_empty()
+            && normalized.source_keywords.is_empty()
+        {
+            return Err(ApiError::bad_request(format!(
+                "种子匹配规则 {} 至少需要一个关键词",
+                normalized.name
+            )));
+        }
+        out.push(normalized);
+    }
+    out.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(out)
+}
+
+fn normalize_keyword_list(values: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let item = value.trim();
+        if !item.is_empty() && !out.iter().any(|existing| existing == item) {
+            out.push(item.to_string());
+        }
+    }
+    out
+}
+
+async fn wanted_subscription_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
+    let snapshot = state
+        .wanted_store
+        .snapshot(&account_key, unix_now_secs())
+        .await
+        .map_err(|e| ApiError::internal(format!("读取想看订阅状态失败: {e}")))?;
+    Ok(Json(
+        serde_json::to_value(snapshot).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn wanted_subscription_poll(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let outcome = run_wanted_watch_poll(&state).await?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn wanted_subscription_status(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<subscription::WantedStatusUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = state.config.read().await.clone();
+    let account_key =
+        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
+    let outcome = state
+        .wanted_store
+        .update_status(
+            &account_key,
+            &id,
+            body,
+            cfg.subscription_watcher.max_retries,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("更新想看订阅状态失败: {e}")))?;
+    let Some(outcome) = outcome else {
+        return Err(ApiError::bad_request("订阅记录不存在"));
+    };
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct WantedCandidateBody {
+    #[serde(default)]
+    page_size: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+struct WantedPushBody {
+    #[serde(default)]
+    qb_server_name: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    page_size: Option<u32>,
+}
+
+async fn wanted_subscription_candidates(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<WantedCandidateBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    let _category = category_for_wanted_record(&record, &cfg.subscription_categories)?;
+    let candidates =
+        search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await?;
+    let matches = match_torrent_candidates(&candidates, &cfg.torrent_match_rules);
+    let record = state
+        .wanted_store
+        .update_candidate_matches(
+            &account_key,
+            &record.subject_id,
+            matches.clone(),
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入候选种子记录失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    Ok(Json(json!({
+        "subscription_id": record.subject_id,
+        "candidate_count": candidates.len(),
+        "selected": matches.iter().find(|item| item.selected),
+        "matches": matches,
+        "record": record,
+    })))
+}
+
+async fn wanted_subscription_push(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<WantedPushBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    if !body.force
+        && matches!(
+            record.status,
+            subscription::WantedSubscriptionStatus::Pushed
+                | subscription::WantedSubscriptionStatus::Completed
+                | subscription::WantedSubscriptionStatus::Processing
+        )
+    {
+        return Err(ApiError::bad_request(format!(
+            "订阅 {} 当前状态为 {:?}，不会重复推送；需要重试请传 force=true",
+            record.subject_id, record.status
+        )));
+    }
+    let category = category_for_wanted_record(&record, &cfg.subscription_categories)?.clone();
+    let qb_server = select_qb_server(&cfg.qb_servers, body.qb_server_name.as_deref())?;
+    let candidates =
+        search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await?;
+    let matches = match_torrent_candidates(&candidates, &cfg.torrent_match_rules);
+    let selected = matches.iter().find(|item| item.selected).cloned();
+    let now = unix_now_secs();
+    state
+        .wanted_store
+        .update_candidate_matches(&account_key, &record.subject_id, matches.clone(), now)
+        .await
+        .map_err(|e| ApiError::internal(format!("写入候选种子记录失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    let Some(selected) = selected else {
+        let error = if candidates.is_empty() {
+            "未搜索到候选种子".to_string()
+        } else {
+            "没有候选种子匹配当前规则".to_string()
+        };
+        record_push_failure(
+            &state,
+            &account_key,
+            &record.subject_id,
+            &qb_server,
+            &category,
+            None,
+            error.clone(),
+        )
+        .await?;
+        return Err(ApiError::bad_request(error));
+    };
+
+    let processing = subscription::WantedStatusUpdate {
+        status: subscription::WantedSubscriptionStatus::Processing,
+        error: None,
+        skip_reason: None,
+    };
+    state
+        .wanted_store
+        .update_status(
+            &account_key,
+            &record.subject_id,
+            processing,
+            cfg.subscription_watcher.max_retries,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("更新订阅处理状态失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    let dl_url =
+        match mteam_fetch_gen_dl_url(&cfg.mteam_api_key, &selected.candidate.torrent_id).await {
+            Ok(url) => url,
+            Err(e) => {
+                record_push_failure(
+                    &state,
+                    &account_key,
+                    &record.subject_id,
+                    &qb_server,
+                    &category,
+                    Some(&selected),
+                    e.message().to_string(),
+                )
+                .await?;
+                return Err(e);
+            }
+        };
+
+    if let Err(e) = qbittorrent::add_torrent_from_url(
+        &qb_server,
+        &dl_url,
+        Some(&category.qb_category),
+        Some(&category.qb_save_dir_name),
+    )
+    .await
+    {
+        record_push_failure(
+            &state,
+            &account_key,
+            &record.subject_id,
+            &qb_server,
+            &category,
+            Some(&selected),
+            e.message().to_string(),
+        )
+        .await?;
+        return Err(e);
+    }
+
+    let push = torrent_push_record(
+        &record.subject_id,
+        &qb_server,
+        &category,
+        &selected.candidate,
+        "pushed",
+        Some(unix_now_secs()),
+        None,
+    );
+    let record = state
+        .wanted_store
+        .update_push_record(
+            &account_key,
+            &record.subject_id,
+            push.clone(),
+            subscription::WantedSubscriptionStatus::Pushed,
+            None,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入 qB 推送记录失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "subscription_id": record.subject_id,
+        "selected": selected,
+        "push": push,
+        "record": record,
+    })))
+}
+
+async fn load_wanted_record_context(
+    state: &AppState,
+    id: &str,
+) -> Result<(FileConfig, String, subscription::WantedSubscriptionRecord), ApiError> {
+    let cfg = state.config.read().await.clone();
+    let account_key =
+        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
+    let snapshot = state
+        .wanted_store
+        .snapshot(&account_key, unix_now_secs())
+        .await
+        .map_err(|e| ApiError::internal(format!("读取想看订阅状态失败: {e}")))?;
+    let record = snapshot
+        .records
+        .get(id.trim())
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    Ok((cfg, account_key, record))
+}
+
+fn category_for_wanted_record<'a>(
+    record: &subscription::WantedSubscriptionRecord,
+    categories: &'a [SubscriptionCategory],
+) -> Result<&'a SubscriptionCategory, ApiError> {
+    let wanted_text = record
+        .category_text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| record.tags.first().map(String::as_str))
+        .ok_or_else(|| ApiError::bad_request("订阅记录缺少想看分类标签"))?;
+    categories
+        .iter()
+        .find(|category| category.wanted_tag.trim() == wanted_text.trim())
+        .ok_or_else(|| ApiError::bad_request(format!("订阅分类不存在或已被修改: {wanted_text}")))
+}
+
+fn select_qb_server(
+    servers: &[QbServerEntry],
+    requested_name: Option<&str>,
+) -> Result<QbServerEntry, ApiError> {
+    let requested = requested_name.map(str::trim).filter(|s| !s.is_empty());
+    let server = if let Some(name) = requested {
+        servers.iter().find(|server| server.name.trim() == name)
+    } else {
+        servers.first()
+    };
+    server
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("请先在设置中配置 qB 服务器"))
+}
+
+async fn search_mteam_candidates_for_record(
+    api_key: &str,
+    record: &subscription::WantedSubscriptionRecord,
+    page_size: Option<u32>,
+) -> Result<Vec<subscription::TorrentCandidateRecord>, ApiError> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err(ApiError::bad_request("请先在设置中填写 M-Team API Key"));
+    }
+    let page_size = page_size.unwrap_or(default_page_size()).clamp(1, 100);
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    let subject_id = record.subject_id.trim();
+    if !subject_id.is_empty() {
+        let douban = normalize_douban_url(subject_id);
+        let body = json!({
+            "pageNumber": 1,
+            "pageSize": page_size,
+            "douban": douban,
+        });
+        let response = mteam_search_post(&client, key, &body).await?;
+        append_unique_candidates(
+            &mut candidates,
+            &mut seen,
+            mteam_candidates_from_response(&response, "douban", subject_id),
+        );
+    }
+
+    let title = record.title.trim();
+    if !title.is_empty() {
+        let body = json!({
+            "pageNumber": 1,
+            "pageSize": page_size,
+            "keyword": title,
+        });
+        let response = mteam_search_post(&client, key, &body).await?;
+        append_unique_candidates(
+            &mut candidates,
+            &mut seen,
+            mteam_candidates_from_response(&response, "keyword", title),
+        );
+    }
+
+    Ok(candidates)
+}
+
+fn append_unique_candidates(
+    out: &mut Vec<subscription::TorrentCandidateRecord>,
+    seen: &mut HashSet<String>,
+    candidates: Vec<subscription::TorrentCandidateRecord>,
+) {
+    for candidate in candidates {
+        let key = if candidate.torrent_id.trim().is_empty() {
+            format!("title:{}", candidate.title)
+        } else {
+            format!("id:{}", candidate.torrent_id)
+        };
+        if seen.insert(key) {
+            out.push(candidate);
+        }
+    }
+}
+
+fn mteam_candidates_from_response(
+    response: &Value,
+    source: &str,
+    search_query: &str,
+) -> Vec<subscription::TorrentCandidateRecord> {
+    let mut values = Vec::new();
+    collect_mteam_candidate_objects(response, &mut values);
+    values
+        .into_iter()
+        .filter_map(|value| mteam_candidate_from_value(value, source, search_query))
+        .collect()
+}
+
+fn collect_mteam_candidate_objects<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_mteam_candidate_objects(item, out);
+            }
+        }
+        Value::Object(map) => {
+            let looks_like_torrent = ["id", "torrentId", "torrent_id", "tid"]
+                .iter()
+                .any(|key| map.contains_key(*key))
+                && ["name", "title", "smallDescr", "small_descr"]
+                    .iter()
+                    .any(|key| map.contains_key(*key));
+            if looks_like_torrent {
+                out.push(value);
+            } else {
+                for item in map.values() {
+                    collect_mteam_candidate_objects(item, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mteam_candidate_from_value(
+    value: &Value,
+    source: &str,
+    search_query: &str,
+) -> Option<subscription::TorrentCandidateRecord> {
+    let title = first_string_field(value, &["name", "title", "smallDescr", "small_descr"])?;
+    let torrent_id =
+        first_string_field(value, &["id", "torrentId", "torrent_id", "tid"]).unwrap_or_default();
+    let subtitle = first_string_field(
+        value,
+        &[
+            "smallDescr",
+            "small_descr",
+            "description",
+            "descr",
+            "subTitle",
+            "subtitle",
+        ],
+    )
+    .unwrap_or_default();
+    Some(subscription::TorrentCandidateRecord {
+        torrent_id,
+        title,
+        subtitle,
+        source: source.to_string(),
+        search_query: search_query.to_string(),
+        size: first_string_field(value, &["size", "sizeStr", "size_str"]),
+        seeders: first_u64_field(value, &["seeders", "seeder", "seed", "status.seeders"]),
+        leechers: first_u64_field(value, &["leechers", "leecher", "leech", "status.leechers"]),
+        uploaded_at: first_string_field(value, &["createdDate", "created_date", "added", "date"]),
+    })
+}
+
+fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value_at_path(value, key))
+        .find_map(value_to_trimmed_string)
+}
+
+fn first_u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .filter_map(|key| value_at_path(value, key))
+        .find_map(|value| match value {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        })
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = value;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+fn value_to_trimmed_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn match_torrent_candidates(
+    candidates: &[subscription::TorrentCandidateRecord],
+    rules: &[TorrentMatchRule],
+) -> Vec<subscription::TorrentCandidateMatchRecord> {
+    if rules.is_empty() {
+        return match_torrent_candidates_without_rules(candidates);
+    }
+
+    let mut sorted_rules = rules.to_vec();
+    sorted_rules.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let mut rows = candidates
+        .iter()
+        .map(|candidate| {
+            let evaluations = sorted_rules
+                .iter()
+                .map(|rule| evaluate_candidate_rule(candidate, rule))
+                .collect::<Vec<_>>();
+            let best = evaluations.iter().find(|item| item.matched);
+            subscription::TorrentCandidateMatchRecord {
+                candidate: candidate.clone(),
+                selected: false,
+                matched_rule_name: best.map(|item| item.rule_name.clone()),
+                matched_priority: best.map(|item| item.priority),
+                matched_keywords: best
+                    .map(|item| item.matched_keywords.clone())
+                    .unwrap_or_default(),
+                excluded_reason: if candidate.torrent_id.trim().is_empty() {
+                    Some("缺少种子 ID，无法推送".to_string())
+                } else {
+                    best.and_then(|item| item.excluded_reason.clone())
+                },
+                rule_evaluations: evaluations,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let selected_priority = rows
+        .iter()
+        .filter(|row| row.candidate.torrent_id.trim().len() > 0)
+        .filter_map(|row| row.matched_priority)
+        .max();
+    if let Some(priority) = selected_priority {
+        if let Some(selected) = rows.iter_mut().find(|row| {
+            row.candidate.torrent_id.trim().len() > 0 && row.matched_priority == Some(priority)
+        }) {
+            selected.selected = true;
+            selected.excluded_reason = None;
+        }
+        for row in rows.iter_mut().filter(|row| !row.selected) {
+            if row.matched_priority.is_none() && row.excluded_reason.is_none() {
+                row.excluded_reason = Some("未命中任何规则".to_string());
+            } else if row.matched_priority.is_some() && row.excluded_reason.is_none() {
+                row.excluded_reason = Some("已有更高优先级或更靠前候选被选中".to_string());
+            }
+        }
+    } else {
+        for row in &mut rows {
+            if row.excluded_reason.is_none() {
+                row.excluded_reason = Some("未命中任何规则".to_string());
+            }
+        }
+    }
+    rows
+}
+
+fn match_torrent_candidates_without_rules(
+    candidates: &[subscription::TorrentCandidateRecord],
+) -> Vec<subscription::TorrentCandidateMatchRecord> {
+    let mut selected = false;
+    candidates
+        .iter()
+        .map(|candidate| {
+            let can_push = !candidate.torrent_id.trim().is_empty();
+            let row_selected = can_push && !selected;
+            if row_selected {
+                selected = true;
+            }
+            subscription::TorrentCandidateMatchRecord {
+                candidate: candidate.clone(),
+                selected: row_selected,
+                matched_rule_name: row_selected.then(|| "默认首个候选".to_string()),
+                matched_priority: row_selected.then_some(0),
+                matched_keywords: Vec::new(),
+                excluded_reason: if row_selected {
+                    None
+                } else if can_push {
+                    Some("未配置规则，已有更靠前候选被选中".to_string())
+                } else {
+                    Some("缺少种子 ID，无法推送".to_string())
+                },
+                rule_evaluations: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn evaluate_candidate_rule(
+    candidate: &subscription::TorrentCandidateRecord,
+    rule: &TorrentMatchRule,
+) -> subscription::CandidateRuleEvaluation {
+    let checks = rule_keyword_checks(rule);
+    if checks.is_empty() {
+        return subscription::CandidateRuleEvaluation {
+            rule_name: rule.name.clone(),
+            priority: rule.priority,
+            mode: rule_mode_label(rule).to_string(),
+            matched: false,
+            matched_keywords: Vec::new(),
+            missing_keywords: Vec::new(),
+            excluded_reason: Some("规则没有关键词".to_string()),
+        };
+    }
+    let searchable = format!(
+        "{}\n{}\n{}\n{}",
+        candidate.title, candidate.subtitle, candidate.source, candidate.search_query
+    )
+    .to_lowercase();
+    let mut matched_keywords = Vec::new();
+    let mut missing_keywords = Vec::new();
+    for (label, needle) in checks {
+        if searchable.contains(&needle.to_lowercase()) {
+            matched_keywords.push(label);
+        } else {
+            missing_keywords.push(label);
+        }
+    }
+    let matched = match rule.mode {
+        config::TorrentRuleMatchMode::All => missing_keywords.is_empty(),
+        config::TorrentRuleMatchMode::Any => !matched_keywords.is_empty(),
+    };
+    let excluded_reason = (!matched).then(|| {
+        if matched_keywords.is_empty() {
+            "规则关键词均未命中".to_string()
+        } else {
+            format!("缺少关键词: {}", missing_keywords.join(", "))
+        }
+    });
+    subscription::CandidateRuleEvaluation {
+        rule_name: rule.name.clone(),
+        priority: rule.priority,
+        mode: rule_mode_label(rule).to_string(),
+        matched,
+        matched_keywords,
+        missing_keywords,
+        excluded_reason,
+    }
+}
+
+fn rule_keyword_checks(rule: &TorrentMatchRule) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (prefix, values) in [
+        ("title", &rule.title_keywords),
+        ("resolution", &rule.resolution_keywords),
+        ("source", &rule.source_keywords),
+    ] {
+        for value in values {
+            let keyword = value.trim();
+            if !keyword.is_empty() {
+                out.push((format!("{prefix}:{keyword}"), keyword.to_string()));
+            }
+        }
+    }
+    out
+}
+
+fn rule_mode_label(rule: &TorrentMatchRule) -> &'static str {
+    match rule.mode {
+        config::TorrentRuleMatchMode::All => "all",
+        config::TorrentRuleMatchMode::Any => "any",
+    }
+}
+
+async fn record_push_failure(
+    state: &AppState,
+    account_key: &str,
+    subscription_id: &str,
+    qb_server: &QbServerEntry,
+    category: &SubscriptionCategory,
+    selected: Option<&subscription::TorrentCandidateMatchRecord>,
+    error: String,
+) -> Result<(), ApiError> {
+    let fallback = subscription::TorrentCandidateRecord {
+        torrent_id: String::new(),
+        title: String::new(),
+        subtitle: String::new(),
+        source: String::new(),
+        search_query: String::new(),
+        size: None,
+        seeders: None,
+        leechers: None,
+        uploaded_at: None,
+    };
+    let candidate = selected.map(|item| &item.candidate).unwrap_or(&fallback);
+    let push = torrent_push_record(
+        subscription_id,
+        qb_server,
+        category,
+        candidate,
+        "failed",
+        None,
+        Some(error.clone()),
+    );
+    state
+        .wanted_store
+        .update_push_record(
+            account_key,
+            subscription_id,
+            push,
+            subscription::WantedSubscriptionStatus::Failed,
+            Some(error),
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入 qB 推送失败记录失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    Ok(())
+}
+
+fn torrent_push_record(
+    subscription_id: &str,
+    qb_server: &QbServerEntry,
+    category: &SubscriptionCategory,
+    candidate: &subscription::TorrentCandidateRecord,
+    status: &str,
+    pushed_at: Option<u64>,
+    error: Option<String>,
+) -> subscription::TorrentPushRecord {
+    let qb_server_name = if qb_server.name.trim().is_empty() {
+        qb_server.base_url.trim().to_string()
+    } else {
+        qb_server.name.trim().to_string()
+    };
+    subscription::TorrentPushRecord {
+        subscription_id: subscription_id.to_string(),
+        torrent_id: candidate.torrent_id.clone(),
+        torrent_title: candidate.title.clone(),
+        qb_server: qb_server_name,
+        qb_category: category.qb_category.trim().to_string(),
+        qb_save_dir_name: category.qb_save_dir_name.trim().to_string(),
+        qb_identifier: if candidate.torrent_id.trim().is_empty() {
+            String::new()
+        } else {
+            format!("mteam:{}", candidate.torrent_id.trim())
+        },
+        pushed_at,
+        status: status.to_string(),
+        error,
+    }
+}
+
+async fn run_wanted_watch_poll(
+    state: &AppState,
+) -> Result<subscription::WantedPollOutcome, ApiError> {
+    let cfg = state.config.read().await.clone();
+    let account_key =
+        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
+    let limit = cfg.subscription_watcher.library_limit.clamp(1, 1200);
+    let wish = douban::library(&cfg.douban_cookie, douban::DoubanLibraryStatus::Wish, limit)
+        .await
+        .map_err(ApiError::douban)?;
+    state
+        .wanted_store
+        .apply_wish_items(
+            &account_key,
+            &wish.items,
+            &cfg.subscription_watcher,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入想看订阅状态失败: {e}")))
+}
+
+fn spawn_wanted_watch_loop(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            let cfg = state.config.read().await.subscription_watcher.clone();
+            let interval = cfg.poll_interval_secs.clamp(60, 86_400);
+            if cfg.enabled {
+                match run_wanted_watch_poll(&state).await {
+                    Ok(outcome) => tracing::info!(
+                        account_key = %outcome.account_key,
+                        total = outcome.total_wish_items,
+                        created_unprocessed = outcome.created_unprocessed,
+                        created_skipped = outcome.created_skipped,
+                        updated_existing = outcome.updated_existing,
+                        "wanted subscription poll completed"
+                    ),
+                    Err(e) => tracing::warn!("wanted subscription poll failed: {}", e.message()),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
 }
 
 async fn qb_test(Json(server): Json<QbServerEntry>) -> Result<Json<Value>, ApiError> {
@@ -1468,6 +2336,189 @@ mod subscription_category_tests {
             .collect::<Vec<_>>();
         assert_eq!(tags, vec!["剧集", "电影"]);
     }
+
+    fn torrent(id: &str, title: &str) -> subscription::TorrentCandidateRecord {
+        subscription::TorrentCandidateRecord {
+            torrent_id: id.to_string(),
+            title: title.to_string(),
+            subtitle: String::new(),
+            source: "keyword".to_string(),
+            search_query: "测试电影".to_string(),
+            size: None,
+            seeders: None,
+            leechers: None,
+            uploaded_at: None,
+        }
+    }
+
+    fn torrent_rule(
+        name: &str,
+        priority: i32,
+        mode: config::TorrentRuleMatchMode,
+        title_keywords: &[&str],
+        resolution_keywords: &[&str],
+        source_keywords: &[&str],
+    ) -> TorrentMatchRule {
+        TorrentMatchRule {
+            name: name.to_string(),
+            priority,
+            mode,
+            title_keywords: title_keywords.iter().map(|s| s.to_string()).collect(),
+            resolution_keywords: resolution_keywords.iter().map(|s| s.to_string()).collect(),
+            source_keywords: source_keywords.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn torrent_matching_prefers_high_priority_rule() {
+        let candidates = vec![
+            torrent("1", "测试电影 1080p WEB-DL"),
+            torrent("2", "测试电影 2160p BluRay REMUX"),
+        ];
+        let rules = vec![
+            torrent_rule(
+                "low 1080p",
+                10,
+                config::TorrentRuleMatchMode::All,
+                &["1080p"],
+                &[],
+                &[],
+            ),
+            torrent_rule(
+                "high 2160p",
+                100,
+                config::TorrentRuleMatchMode::All,
+                &["2160p"],
+                &[],
+                &["remux"],
+            ),
+        ];
+        let matches = match_torrent_candidates(&candidates, &rules);
+        let selected = matches.iter().find(|item| item.selected).unwrap();
+        assert_eq!(selected.candidate.torrent_id, "2");
+        assert_eq!(selected.matched_rule_name.as_deref(), Some("high 2160p"));
+        assert_eq!(selected.matched_priority, Some(100));
+    }
+
+    #[test]
+    fn torrent_matching_falls_back_to_lower_priority_when_high_misses() {
+        let candidates = vec![torrent("1", "测试电影 1080p WEB-DL")];
+        let rules = vec![
+            torrent_rule(
+                "high 2160p",
+                100,
+                config::TorrentRuleMatchMode::All,
+                &["2160p"],
+                &[],
+                &[],
+            ),
+            torrent_rule(
+                "low 1080p",
+                10,
+                config::TorrentRuleMatchMode::All,
+                &["1080p"],
+                &[],
+                &[],
+            ),
+        ];
+        let matches = match_torrent_candidates(&candidates, &rules);
+        let selected = matches.iter().find(|item| item.selected).unwrap();
+        assert_eq!(selected.candidate.torrent_id, "1");
+        assert_eq!(selected.matched_rule_name.as_deref(), Some("low 1080p"));
+        assert!(selected
+            .rule_evaluations
+            .iter()
+            .any(|item| item.rule_name == "high 2160p" && !item.matched));
+    }
+
+    #[test]
+    fn torrent_matching_supports_and_and_or_modes() {
+        let candidates = vec![
+            torrent("1", "测试电影 2160p WEB-DL"),
+            torrent("2", "测试电影 1080p BluRay"),
+        ];
+        let rules = vec![
+            torrent_rule(
+                "all remux",
+                100,
+                config::TorrentRuleMatchMode::All,
+                &["2160p"],
+                &[],
+                &["remux"],
+            ),
+            torrent_rule(
+                "any web or bluray",
+                50,
+                config::TorrentRuleMatchMode::Any,
+                &[],
+                &[],
+                &["web-dl", "bluray"],
+            ),
+        ];
+        let matches = match_torrent_candidates(&candidates, &rules);
+        let selected = matches.iter().find(|item| item.selected).unwrap();
+        assert_eq!(selected.candidate.torrent_id, "1");
+        assert_eq!(
+            selected.matched_rule_name.as_deref(),
+            Some("any web or bluray")
+        );
+        assert!(selected
+            .matched_keywords
+            .iter()
+            .any(|keyword| keyword == "source:web-dl"));
+    }
+
+    #[test]
+    fn torrent_matching_records_no_match_explanations() {
+        let candidates = vec![torrent("1", "测试电影 720p HDTV")];
+        let rules = vec![torrent_rule(
+            "wanted",
+            100,
+            config::TorrentRuleMatchMode::All,
+            &["2160p"],
+            &[],
+            &["remux"],
+        )];
+        let matches = match_torrent_candidates(&candidates, &rules);
+        assert!(!matches.iter().any(|item| item.selected));
+        assert_eq!(
+            matches[0].excluded_reason.as_deref(),
+            Some("未命中任何规则")
+        );
+        assert!(matches[0].rule_evaluations[0]
+            .missing_keywords
+            .contains(&"title:2160p".to_string()));
+    }
+
+    #[test]
+    fn failed_push_record_keeps_qb_and_candidate_context() {
+        let candidate = torrent("12345", "测试电影 2160p");
+        let qb = QbServerEntry {
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let category = category("电影", "电影");
+        let push = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category,
+            &candidate,
+            "failed",
+            None,
+            Some("qB 添加失败".to_string()),
+        );
+        assert_eq!(push.subscription_id, "subject-1");
+        assert_eq!(push.torrent_id, "12345");
+        assert_eq!(push.qb_server, "nas");
+        assert_eq!(push.qb_category, "qb-电影");
+        assert_eq!(push.qb_save_dir_name, "save-电影");
+        assert_eq!(push.qb_identifier, "mteam:12345");
+        assert_eq!(push.status, "failed");
+        assert_eq!(push.error.as_deref(), Some("qB 添加失败"));
+    }
 }
 
 pub(crate) enum ApiError {
@@ -1507,6 +2558,12 @@ impl ApiError {
         Self::Other {
             status: err.status,
             message: err.message,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::BadRequest { message } | Self::Other { message, .. } => message,
         }
     }
 }
