@@ -2,6 +2,12 @@ const IMG_BASE = "https://image.tmdb.org/t/p/w342";
 
 /** @type {{ name?: string, base_url?: string, username?: string, password?: string, insecure_tls?: boolean }[] | null} */
 let qbServersCache = null;
+let searchSource = "tmdb";
+let currentView = "search";
+let doubanQrTimer = null;
+let doubanQrSessionId = "";
+let doubanTagHistoryCache = null;
+let doubanTagHistoryPromise = null;
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -26,6 +32,10 @@ const MOVIE_STATUS_ZH = {
 function posterUrl(path) {
   if (!path) return "";
   return `${IMG_BASE}${path}`;
+}
+
+function itemImageUrl(it) {
+  return it.poster_url || it.cover_url || posterUrl(it.poster_path) || "";
 }
 
 function showErr(msg) {
@@ -77,17 +87,57 @@ async function resolveQbServers() {
   return qbServersCache;
 }
 
-function setSearchLoading(on) {
+function setSearchLoading(on, text = "正在搜索…") {
   const overlay = $("#layout-loading");
   const btn = $("#btn-search");
   const q = $("#q");
   if (overlay) {
     overlay.classList.toggle("hidden", !on);
     overlay.setAttribute("aria-hidden", on ? "false" : "true");
+    const loadingText = overlay.querySelector(".loading-text");
+    if (loadingText) loadingText.textContent = text;
   }
   if (btn) btn.disabled = !!on;
   if (q) q.disabled = !!on;
   $("#main-layout")?.setAttribute("aria-busy", on ? "true" : "false");
+}
+
+function setSearchSource(source) {
+  searchSource = source === "douban" ? "douban" : "tmdb";
+  for (const btn of document.querySelectorAll("[data-search-source]")) {
+    const active = btn.dataset.searchSource === searchSource;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+  const q = $("#q");
+  if (q) {
+    q.placeholder = searchSource === "douban" ? "搜索豆瓣影视标题…" : "搜索电影或剧集标题…";
+  }
+}
+
+function setResultSectionsForSource(source) {
+  $("#library-bar")?.classList.add("hidden");
+  const moviesTitle = $("#movies-title");
+  const tvSection = $("#tv-section");
+  if (source === "douban") {
+    if (moviesTitle) moviesTitle.textContent = "豆瓣影视";
+    if (tvSection) tvSection.classList.add("hidden");
+    $("#tv").innerHTML = "";
+  } else {
+    if (moviesTitle) moviesTitle.textContent = "电影";
+    if (tvSection) tvSection.classList.remove("hidden");
+  }
+}
+
+function setResultSectionsForLibrary() {
+  currentView = "douban-library";
+  $("#library-bar")?.classList.remove("hidden");
+  const moviesTitle = $("#movies-title");
+  const tvTitle = $("#tv-title");
+  const tvSection = $("#tv-section");
+  if (moviesTitle) moviesTitle.textContent = "想看";
+  if (tvTitle) tvTitle.textContent = "看过";
+  if (tvSection) tvSection.classList.remove("hidden");
 }
 
 async function api(path, opts = {}) {
@@ -118,10 +168,14 @@ function renderCards(container, items, type) {
   for (const it of items) {
     const div = document.createElement("div");
     div.className = "card";
-    div.dataset.type = it.media_type || type;
-    div.dataset.id = String(it.id);
+    const mediaType = it.source === "douban" ? "douban" : it.media_type || type;
+    div.dataset.type = mediaType;
+    div.dataset.id = String(it.id ?? it.subject_id ?? "");
+    if (mediaType === "douban" && Array.isArray(it.tags)) {
+      div.dataset.doubanTags = normalizeDoubanTags(it.tags.join(" "));
+    }
     const img = document.createElement("img");
-    img.src = posterUrl(it.poster_path) || "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    img.src = itemImageUrl(it) || "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
     img.alt = "";
     img.loading = "lazy";
     const meta = document.createElement("div");
@@ -131,13 +185,30 @@ function renderCards(container, items, type) {
     title.textContent = it.title || "(无标题)";
     const sub = document.createElement("div");
     sub.className = "subtle";
-    const d = it.release_date || it.first_air_date || "";
-    sub.textContent = [d, it.vote_average != null ? `★ ${it.vote_average.toFixed(1)}` : ""]
-      .filter(Boolean)
-      .join(" · ");
+    if (mediaType === "douban") {
+      const ratingValue = it.rating?.value ?? it.vote_average;
+      const libraryBits = [it.date || it.abstract_text || it.abstract || it.abstract_2 || ""].filter(Boolean);
+      const normalBits = [
+        it.abstract_text || it.abstract || it.abstract_2 || "",
+        ratingValue != null ? `★ ${Number(ratingValue).toFixed(1)}` : "",
+      ].filter(Boolean);
+      sub.textContent = (currentView === "douban-library" ? libraryBits : normalBits).join(" · ");
+    } else {
+      const d = it.release_date || it.first_air_date || "";
+      const ratingValue = it.vote_average;
+      sub.textContent = [
+        d,
+        ratingValue != null ? `★ ${Number(ratingValue).toFixed(1)}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    }
     meta.append(title, sub);
     div.append(img, meta);
-    div.addEventListener("click", () => openDetail(div.dataset.type, Number(div.dataset.id)));
+    div.addEventListener("click", () => {
+      const id = div.dataset.type === "douban" ? div.dataset.id : Number(div.dataset.id);
+      openDetail(div.dataset.type, id, { doubanTags: div.dataset.doubanTags || "" });
+    });
     container.append(div);
   }
 }
@@ -227,13 +298,6 @@ function renderExternalIdsBar(d, mediaType, numericId) {
       `<a class="detail-ext-link tag" href="${escapeHtml(ih)}" target="_blank" rel="noopener noreferrer">IMDb · ${escapeHtml(String(imdb))}</a>`,
     );
   }
-  const wd = d.external_ids?.wikidata_id;
-  if (wd && String(wd).trim()) {
-    const wid = escapeHtml(String(wd).trim());
-    parts.push(
-      `<a class="detail-ext-link tag" href="https://www.wikidata.org/wiki/${wid}" target="_blank" rel="noopener noreferrer">Wikidata · ${wid}</a>`,
-    );
-  }
   const dubId = doubanFromDetail(d);
   const dubUrl = doubanUrlFromDetail(d);
   if (dubId && dubUrl) {
@@ -320,7 +384,308 @@ function renderDetailMeta(d, mediaType) {
   return `<dl class="detail-meta">${html}</dl>`;
 }
 
-async function openDetail(mediaType, id) {
+function renderDoubanMeta(d) {
+  const rows = [];
+  if (d.rating?.value != null) {
+    const count = d.rating.count != null ? `（${Number(d.rating.count).toLocaleString()} 人）` : "";
+    rows.push(["评分", `${Number(d.rating.value).toFixed(1)} / 10${count}`]);
+  }
+  if (d.date_published) rows.push(["发布日期", d.date_published]);
+  if (d.duration) rows.push(["片长", d.duration]);
+  if (Array.isArray(d.genres) && d.genres.length) rows.push(["类型", d.genres.join(" · ")]);
+  if (Array.isArray(d.directors) && d.directors.length) rows.push(["导演", d.directors.join(" · ")]);
+  if (Array.isArray(d.writers) && d.writers.length) rows.push(["编剧", d.writers.join(" · ")]);
+  if (Array.isArray(d.actors) && d.actors.length) rows.push(["主演", d.actors.slice(0, 10).join(" · ")]);
+  if (!rows.length) return "";
+  const html = rows
+    .map(
+      ([k, v]) =>
+        `<div class="detail-meta-row"><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd></div>`,
+    )
+    .join("");
+  return `<dl class="detail-meta">${html}</dl>`;
+}
+
+function renderDoubanInterestPanel(doubanId, currentInterest = "", currentRating = null, currentTags = "") {
+  if (!doubanId) return "";
+  const interest = currentInterest === "wish" || currentInterest === "collect" ? currentInterest : "";
+  const rating = currentRating != null ? String(currentRating) : "";
+  const tags = normalizeDoubanTags(currentTags);
+  return `<section class="douban-mark-panel" data-douban-id="${escapeHtml(String(doubanId))}" data-interest="${escapeHtml(interest)}">
+    <div class="douban-mark-head">
+      <h4>豆瓣标记</h4>
+      <span class="douban-mark-status subtle" aria-live="polite">${
+        interest === "wish" ? "已想看" : interest === "collect" ? "已看过" : ""
+      }</span>
+    </div>
+    <div class="douban-mark-controls">
+      <div class="douban-mark-mode" role="group" aria-label="豆瓣标记状态">
+        <button type="button" class="mteam-tab${interest === "wish" ? " is-active" : ""}" data-douban-interest="wish">想看</button>
+        <button type="button" class="mteam-tab${interest === "collect" ? " is-active" : ""}" data-douban-interest="collect">看过</button>
+      </div>
+      <label class="douban-rating-select">
+        <span>评分</span>
+        <select data-douban-rating>
+          <option value="">未评分</option>
+          <option value="5"${rating === "5" ? " selected" : ""}>5 星</option>
+          <option value="4"${rating === "4" ? " selected" : ""}>4 星</option>
+          <option value="3"${rating === "3" ? " selected" : ""}>3 星</option>
+          <option value="2"${rating === "2" ? " selected" : ""}>2 星</option>
+          <option value="1"${rating === "1" ? " selected" : ""}>1 星</option>
+        </select>
+      </label>
+      <button type="button" class="btn btn-mini primary" data-douban-mark-save>保存</button>
+    </div>
+    <label class="douban-tag-input">
+      <span>标签</span>
+      <input type="text" data-douban-tags autocomplete="off" spellcheck="false" placeholder="可选，例如：想补、冷门、家人一起看" value="${escapeHtml(tags)}" />
+    </label>
+    <div class="douban-tag-history hidden" data-douban-tag-history aria-live="polite"></div>
+  </section>`;
+}
+
+function normalizeDoubanTags(value) {
+  return String(value || "")
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function mergeDoubanTagText(current, tag) {
+  const next = normalizeDoubanTags(tag);
+  if (!next) return normalizeDoubanTags(current);
+  const parts = normalizeDoubanTags(current).split(/\s+/).filter(Boolean);
+  if (!parts.includes(next)) parts.push(next);
+  return parts.join(" ");
+}
+
+async function loadDoubanTagHistory(forceRefresh = false) {
+  if (doubanTagHistoryCache && !forceRefresh) return doubanTagHistoryCache;
+  if (doubanTagHistoryPromise && !forceRefresh) return doubanTagHistoryPromise;
+  const params = new URLSearchParams({ limit: "80" });
+  if (forceRefresh) params.set("force_refresh", "true");
+  doubanTagHistoryPromise = api(`/api/douban/tags?${params}`)
+    .then((data) => {
+      doubanTagHistoryCache = Array.isArray(data?.tags) ? data.tags.filter(Boolean) : [];
+      return doubanTagHistoryCache;
+    })
+    .finally(() => {
+      doubanTagHistoryPromise = null;
+    });
+  return doubanTagHistoryPromise;
+}
+
+function rememberDoubanTags(tagsText) {
+  const tags = normalizeDoubanTags(tagsText).split(/\s+/).filter(Boolean);
+  if (!tags.length) return;
+  const existing = Array.isArray(doubanTagHistoryCache) ? doubanTagHistoryCache : [];
+  doubanTagHistoryCache = [...tags, ...existing.filter((tag) => !tags.includes(tag))];
+}
+
+function renderDoubanTagHistory(root, tags) {
+  const box = root?.querySelector("[data-douban-tag-history]");
+  if (!box) return;
+  const visible = Array.isArray(tags) ? tags.slice(0, 24) : [];
+  if (!visible.length) {
+    box.innerHTML = "";
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML = visible
+    .map(
+      (tag) =>
+        `<button type="button" class="douban-tag-chip" data-douban-tag-suggestion="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`,
+    )
+    .join("");
+}
+
+function setupDoubanTagHistory(root) {
+  const box = root?.querySelector("[data-douban-tag-history]");
+  const input = root?.querySelector("[data-douban-tags]");
+  if (!box || !input) return;
+  box.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-douban-tag-suggestion]");
+    if (!btn) return;
+    input.value = mergeDoubanTagText(input.value, btn.dataset.doubanTagSuggestion || "");
+    input.focus();
+  });
+  loadDoubanTagHistory()
+    .then((tags) => renderDoubanTagHistory(root, tags))
+    .catch(() => {
+      box.innerHTML = "";
+      box.classList.add("hidden");
+    });
+}
+
+function applyDoubanInterestState(root, interest, currentRating = null) {
+  if (!root) return;
+  const normalized = interest === "wish" || interest === "collect" ? interest : "";
+  const buttons = [...root.querySelectorAll("[data-douban-interest]")];
+  const rating = root.querySelector("[data-douban-rating]");
+  const ratingLabel = rating?.closest(".douban-rating-select");
+  const save = root.querySelector("[data-douban-mark-save]");
+  root.dataset.interest = normalized;
+  for (const btn of buttons) {
+    const active = btn.dataset.doubanInterest === normalized;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+  if (rating) {
+    rating.disabled = normalized !== "collect";
+    ratingLabel?.classList.toggle("hidden", normalized !== "collect");
+    if (normalized === "collect" && currentRating != null) {
+      rating.value = String(currentRating);
+    } else if (normalized !== "collect") {
+      rating.value = "";
+    }
+  }
+  if (save) save.disabled = !normalized;
+}
+
+function setupDoubanInterestPanel(root) {
+  if (!root) return;
+  const buttons = [...root.querySelectorAll("[data-douban-interest]")];
+  const rating = root.querySelector("[data-douban-rating]");
+  const tags = root.querySelector("[data-douban-tags]");
+  const save = root.querySelector("[data-douban-mark-save]");
+  const status = root.querySelector(".douban-mark-status");
+
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyDoubanInterestState(root, btn.dataset.doubanInterest || "");
+      if (status) status.textContent = "";
+    });
+  });
+  applyDoubanInterestState(root, root.dataset.interest || "", rating?.value || null);
+  setupDoubanTagHistory(root);
+
+  save?.addEventListener("click", async () => {
+    const doubanId = root.dataset.doubanId || "";
+    const interest = root.dataset.interest || "";
+    if (!doubanId) return;
+    if (!interest) {
+      if (status) status.textContent = "请选择想看或看过";
+      return;
+    }
+    if (save) save.disabled = true;
+    if (status) status.textContent = "保存中…";
+    try {
+      const ratingValue = rating && !rating.disabled && rating.value ? Number(rating.value) : undefined;
+      const tagsValue = normalizeDoubanTags(tags?.value || "");
+      await api(`/api/douban/subject/${encodeURIComponent(doubanId)}/interest`, {
+        method: "POST",
+        body: JSON.stringify({
+          interest,
+          rating: ratingValue,
+          tags: tagsValue,
+        }),
+      });
+      if (status) status.textContent = interest === "wish" ? "已标记想看" : "已标记看过";
+      rememberDoubanTags(tagsValue);
+      showToast(status?.textContent || "已保存", "ok");
+      if (currentView === "douban-library") {
+        if (status) status.textContent = "已保存，正在刷新列表…";
+        loadDoubanLibrary(true).catch(() => {});
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (status) status.textContent = msg;
+      showToast(msg, "err");
+    } finally {
+      if (save) save.disabled = false;
+    }
+  });
+}
+
+async function hydrateDoubanInterestPanel(root) {
+  if (!root?.dataset?.doubanId) return;
+  const status = root.querySelector(".douban-mark-status");
+  if (status && !status.textContent) status.textContent = "读取豆瓣状态…";
+  try {
+    const data = await api(`/api/douban/subject/${encodeURIComponent(root.dataset.doubanId)}`);
+    applyDoubanInterestState(root, data.user_interest || "", data.user_rating ?? null);
+    if (status) {
+      status.textContent =
+        data.user_interest === "wish"
+          ? "已想看"
+          : data.user_interest === "collect"
+            ? "已看过"
+            : "";
+    }
+  } catch (err) {
+    if (status && status.textContent === "读取豆瓣状态…") status.textContent = "";
+  }
+}
+
+async function openDoubanDetail(id, options = {}) {
+  clearErr();
+  const drawer = $("#detail");
+  const body = $("#detail-body");
+  drawer.classList.remove("is-off");
+  body.innerHTML = `
+    <div class="detail-loading" role="status">
+      <div class="spinner" aria-hidden="true"></div>
+      <p>加载详情…</p>
+    </div>`;
+
+  let d;
+  try {
+    d = await api(`/api/douban/subject/${encodeURIComponent(id)}`);
+  } catch (e) {
+    body.innerHTML = `<p class="empty-hint">加载失败：${escapeHtml(e.message)}</p>`;
+    showErr(e.message);
+    return;
+  }
+
+  const title = d.title || "";
+  const doubanId = d.subject_id || d.id || id;
+  const doubanUrl = d.url || `https://movie.douban.com/subject/${doubanId}/`;
+  const metaHtml = renderDoubanMeta(d);
+  const externalIdsHtml = `<div class="detail-external-ids"><a class="detail-ext-link tag" href="${escapeHtml(doubanUrl)}" target="_blank" rel="noopener noreferrer">豆瓣 · ${escapeHtml(String(doubanId))}</a></div>`;
+  const currentTags =
+    options.doubanTags ||
+    (Array.isArray(d.tags) ? normalizeDoubanTags(d.tags.join(" ")) : normalizeDoubanTags(d.tags || ""));
+  const doubanMarkHtml = renderDoubanInterestPanel(doubanId, d.user_interest || "", d.user_rating, currentTags);
+
+  body.innerHTML = `
+    <div class="d-head">
+      ${
+        d.poster_url || d.image
+          ? `<img src="${escapeHtml(d.poster_url || d.image)}" alt="" />`
+          : ""
+      }
+      <h3>${escapeHtml(title)}</h3>
+      <div class="detail-type-line">
+        <span class="tag">豆瓣</span>
+      </div>
+      ${externalIdsHtml}
+      ${doubanMarkHtml}
+      ${metaHtml}
+      <p class="overview">${escapeHtml(d.summary || "")}</p>
+      <div class="row-actions mteam-actions">
+        <span class="mteam-actions-label subtle">M-Team</span>
+        <div id="mteam-tablist" class="mteam-tablist" role="tablist" aria-label="M-Team 检索路径"></div>
+      </div>
+      <div id="torrent-box" class="torrent-list"></div>
+    </div>`;
+
+  setupDoubanInterestPanel(body.querySelector(".douban-mark-panel"));
+
+  const tablist = $("#mteam-tablist");
+  const box = $("#torrent-box");
+  if (tablist && box) {
+    setupMteamSourceTabs(tablist, box, { doubanId, keyword: title });
+  }
+}
+
+async function openDetail(mediaType, id, options = {}) {
+  if (mediaType === "douban") {
+    await openDoubanDetail(id, options);
+    return;
+  }
+
   clearErr();
   const drawer = $("#detail");
   const body = $("#detail-body");
@@ -354,6 +719,7 @@ async function openDetail(mediaType, id) {
     const date = d.release_date || d.first_air_date || "";
     const metaHtml = renderDetailMeta(d, mediaType);
     const externalIdsHtml = renderExternalIdsBar(d, mediaType, id);
+    const doubanMarkHtml = renderDoubanInterestPanel(doubanId);
     const tagline = d.tagline ? `<p class="tagline-block">${escapeHtml(d.tagline)}</p>` : "";
     const tvEpMount = mediaType === "tv" ? '<div id="tv-seasons-mount" class="tv-seasons-mount"></div>' : "";
 
@@ -372,6 +738,7 @@ async function openDetail(mediaType, id) {
         ${date ? `<span class="tag">${escapeHtml(date)}</span>` : ""}
       </div>
       ${externalIdsHtml}
+      ${doubanMarkHtml}
       ${tagline}
       ${metaHtml}
       ${tvEpMount}
@@ -390,6 +757,10 @@ async function openDetail(mediaType, id) {
     if (mediaType === "tv") {
       mountTvEpisodesBrowser(id, d);
     }
+
+    const doubanPanel = body.querySelector(".douban-mark-panel");
+    setupDoubanInterestPanel(doubanPanel);
+    hydrateDoubanInterestPanel(doubanPanel).catch(() => {});
 
     if (canMteam) {
       const tablist = $("#mteam-tablist");
@@ -831,18 +1202,162 @@ function collectQbServersFromDom() {
     .filter((x) => x.base_url !== "");
 }
 
+function clearDoubanQrTimer() {
+  if (doubanQrTimer) {
+    clearInterval(doubanQrTimer);
+    doubanQrTimer = null;
+  }
+}
+
+function resetDoubanQrUi() {
+  clearDoubanQrTimer();
+  doubanQrSessionId = "";
+  const box = $("#douban-qr-box");
+  const img = $("#douban-qr-img");
+  const status = $("#douban-qr-status");
+  if (box) box.classList.add("hidden");
+  if (img) img.removeAttribute("src");
+  if (status) status.textContent = "";
+}
+
+async function pollDoubanQrLogin() {
+  if (!doubanQrSessionId) return;
+  const statusEl = $("#douban-qr-status");
+  try {
+    const data = await api(
+      `/api/douban/qr/poll?${new URLSearchParams({ session_id: doubanQrSessionId })}`,
+    );
+    if (statusEl) {
+      statusEl.textContent = data.description || data.message || data.login_status || "等待扫码…";
+    }
+    if (data.done) {
+      clearDoubanQrTimer();
+      if (data.cookie_header) {
+        $("#f-douban-cookie").value = data.cookie_header;
+      }
+      if (statusEl) statusEl.textContent = "已获取 Cookie";
+      showToast("豆瓣 Cookie 已保存", "ok");
+    }
+  } catch (err) {
+    clearDoubanQrTimer();
+    const msg = err instanceof Error ? err.message : String(err);
+    if (statusEl) statusEl.textContent = msg;
+    showToast(msg, "err");
+  }
+}
+
+async function startDoubanQrLogin() {
+  clearErr();
+  resetDoubanQrUi();
+  const btn = $("#btn-douban-qr");
+  const statusEl = $("#douban-qr-status");
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = "正在生成二维码…";
+  try {
+    const data = await api("/api/douban/qr/start", { method: "POST", body: "{}" });
+    doubanQrSessionId = data.session_id || "";
+    if (!doubanQrSessionId || !data.image_url) {
+      throw new Error("豆瓣 QR 登录响应缺少会话信息");
+    }
+    const box = $("#douban-qr-box");
+    const img = $("#douban-qr-img");
+    if (img) img.src = `${data.image_url}&t=${Date.now()}`;
+    if (box) box.classList.remove("hidden");
+    if (statusEl) statusEl.textContent = "等待扫码确认…";
+    doubanQrTimer = setInterval(() => {
+      pollDoubanQrLogin().catch(() => {});
+    }, 2000);
+    await pollDoubanQrLogin();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (statusEl) statusEl.textContent = msg;
+    showToast(msg, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function formatUnixSeconds(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return new Date(n * 1000).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function setLibraryCacheStatus(data) {
+  const el = $("#library-cache-status");
+  if (!el) return;
+  const wishCount = Array.isArray(data?.wish?.items) ? data.wish.items.length : 0;
+  const collectCount = Array.isArray(data?.collect?.items) ? data.collect.items.length : 0;
+  const source = data?.cached ? "本地缓存" : "刚刚刷新";
+  const fetched = formatUnixSeconds(data?.fetched_at);
+  const ttl = Number(data?.ttl_seconds);
+  const ttlText = Number.isFinite(ttl) && ttl > 0 ? `TTL ${Math.round(ttl / 3600)} 小时` : "";
+  el.textContent = [
+    source,
+    fetched ? `抓取于 ${fetched}` : "",
+    `想看 ${wishCount}`,
+    `看过 ${collectCount}`,
+    ttlText,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+async function loadDoubanLibrary(forceRefresh = false) {
+  clearErr();
+  currentView = "douban-library";
+  setResultSectionsForLibrary();
+  setSearchLoading(true, forceRefresh ? "正在刷新豆瓣列表…" : "正在加载豆瓣列表…");
+  const mainBtn = $("#btn-douban-library");
+  const refreshBtn = $("#btn-douban-library-refresh");
+  if (mainBtn) mainBtn.disabled = true;
+  if (refreshBtn) refreshBtn.disabled = true;
+  try {
+    const params = new URLSearchParams({ limit: "200" });
+    if (forceRefresh) params.set("force_refresh", "true");
+    const data = await api(`/api/douban/library?${params}`);
+    renderCards($("#movies"), data?.wish?.items || [], "douban");
+    renderCards($("#tv"), data?.collect?.items || [], "douban");
+    setLibraryCacheStatus(data);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    showErr(msg);
+    $("#movies").innerHTML = `<p class="empty-hint">加载失败：${escapeHtml(msg)}</p>`;
+    $("#tv").innerHTML = "";
+    const status = $("#library-cache-status");
+    if (status) status.textContent = "";
+  } finally {
+    setSearchLoading(false);
+    if (mainBtn) mainBtn.disabled = false;
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
 async function runSearch() {
   clearErr();
+  currentView = "search";
   const q = $("#q").value.trim();
   if (!q) {
     showErr("请输入搜索词");
     return;
   }
-  setSearchLoading(true);
+  const source = searchSource;
+  setResultSectionsForSource(source);
+  setSearchLoading(true, source === "douban" ? "正在搜索豆瓣…" : "正在搜索 TMDB…");
   try {
-    const data = await api(`/api/search?${new URLSearchParams({ q })}`);
-    renderCards($("#movies"), data.movies || [], "movie");
-    renderCards($("#tv"), data.tv || [], "tv");
+    if (source === "douban") {
+      const data = await api(`/api/douban/search?${new URLSearchParams({ q, limit: "20" })}`);
+      renderCards($("#movies"), data.items || data.movies || [], "douban");
+    } else {
+      const data = await api(`/api/search?${new URLSearchParams({ q })}`);
+      renderCards($("#movies"), data.movies || [], "movie");
+      renderCards($("#tv"), data.tv || [], "tv");
+    }
   } catch (e) {
     showErr(e.message);
   } finally {
@@ -859,6 +1374,7 @@ function openSettings() {
 }
 
 function closeSettings() {
+  resetDoubanQrUi();
   $("#modal-bg").classList.add("hidden");
   const d = $("#settings");
   if (d.close) d.close();
@@ -870,6 +1386,7 @@ async function loadSettings() {
     const c = await api("/api/config");
     $("#f-tmdb").value = c.tmdb_api_key || "";
     $("#f-mteam").value = c.mteam_api_key || "";
+    $("#f-douban-cookie").value = c.douban_cookie || "";
     renderQbServersEditor(c.qb_servers);
     qbServersCache = Array.isArray(c.qb_servers) ? c.qb_servers : [];
   } catch {
@@ -880,6 +1397,12 @@ async function loadSettings() {
 $("#btn-search").addEventListener("click", runSearch);
 $("#q").addEventListener("keydown", (e) => {
   if (e.key === "Enter") runSearch();
+});
+$("#btn-douban-library")?.addEventListener("click", () => {
+  loadDoubanLibrary(true).catch(() => {});
+});
+$("#btn-douban-library-refresh")?.addEventListener("click", () => {
+  loadDoubanLibrary(true).catch(() => {});
 });
 $("#btn-settings").addEventListener("click", async () => {
   await loadSettings();
@@ -893,6 +1416,14 @@ $("#btn-qb-add")?.addEventListener("click", () => {
   if (!list) return;
   list.querySelector(".qb-empty")?.remove();
   list.appendChild(makeQbServerRowEl({}));
+});
+
+document.querySelectorAll("[data-search-source]").forEach((btn) => {
+  btn.addEventListener("click", () => setSearchSource(btn.dataset.searchSource));
+});
+
+$("#btn-douban-qr")?.addEventListener("click", () => {
+  startDoubanQrLogin().catch(() => {});
 });
 
 $("#detail-close").addEventListener("click", () => $("#detail").classList.add("is-off"));
@@ -946,6 +1477,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   clearErr();
   const tmdb = $("#f-tmdb").value;
   const mteam = $("#f-mteam").value;
+  const doubanCookie = $("#f-douban-cookie").value;
   const qbServers = collectQbServersFromDom();
   const submitBtn = e.target.querySelector('button[type="submit"]');
   if (submitBtn) submitBtn.disabled = true;
@@ -955,6 +1487,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
       body: JSON.stringify({
         tmdb_api_key: tmdb,
         mteam_api_key: mteam,
+        douban_cookie: doubanCookie,
         qb_servers: qbServers,
       }),
     });
@@ -967,4 +1500,5 @@ $("#settings-form").addEventListener("submit", async (e) => {
   }
 });
 
+setSearchSource("tmdb");
 loadSettings();

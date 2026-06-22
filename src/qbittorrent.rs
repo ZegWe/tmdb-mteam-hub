@@ -1,7 +1,7 @@
 //! qBittorrent Web API v2 — 连接自检与添加任务。
 
-use crate::ApiError;
 use crate::config::QbServerEntry;
+use crate::ApiError;
 use axum::http::StatusCode;
 
 const QB_HTTP_UA: &str =
@@ -23,7 +23,10 @@ fn join_url(base: &str, tail: &str) -> String {
     format!("{}{}", base.trim_end_matches('/'), tail)
 }
 
-pub async fn qb_login_session(client: &reqwest::Client, server: &QbServerEntry) -> Result<(), ApiError> {
+pub async fn qb_login_session(
+    client: &reqwest::Client,
+    server: &QbServerEntry,
+) -> Result<(), ApiError> {
     let base = server.base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err(ApiError::bad_request("qB 服务器 Web UI 地址为空"));
@@ -45,7 +48,9 @@ pub async fn qb_login_session(client: &reqwest::Client, server: &QbServerEntry) 
         ])
         .send()
         .await
-        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 登录请求失败: {e}")))?;
+        .map_err(|e| {
+            ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 登录请求失败: {e}"))
+        })?;
     let lst = login.status();
     let ltext = login
         .text()
@@ -72,9 +77,14 @@ pub async fn test_connection(server: &QbServerEntry) -> Result<String, ApiError>
         .header("Referer", &referer)
         .send()
         .await
-        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 版本请求失败: {e}")))?;
+        .map_err(|e| {
+            ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 版本请求失败: {e}"))
+        })?;
     let vst = ver.status();
-    let vtext = ver.text().await.map_err(|e| ApiError::internal(e.to_string()))?;
+    let vtext = ver
+        .text()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     if !vst.is_success() {
         return Err(ApiError::upstream(
             StatusCode::BAD_GATEWAY,
@@ -125,7 +135,9 @@ pub async fn add_torrent_from_url(
         .multipart(form)
         .send()
         .await
-        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 添加任务请求失败: {e}")))?;
+        .map_err(|e| {
+            ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 添加任务请求失败: {e}"))
+        })?;
     let st = add.status();
     let body = add
         .text()

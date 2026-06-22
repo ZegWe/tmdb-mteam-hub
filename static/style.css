@@ -15,6 +15,10 @@
   box-sizing: border-box;
 }
 
+.hidden {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -42,13 +46,46 @@ body {
 
 .actions {
   margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .search-bar {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
   padding: 1rem 1.5rem;
-  max-width: 720px;
+  max-width: 900px;
+}
+
+.source-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.18rem;
+  background: var(--surface);
+}
+
+.source-pill {
+  min-width: 4.2rem;
+  padding: 0.43rem 0.65rem;
+  border: 0;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+
+.source-pill:hover {
+  color: var(--text);
+}
+
+.source-pill.is-active {
+  background: color-mix(in srgb, var(--accent) 24%, var(--surface));
+  color: var(--text);
 }
 
 #q {
@@ -181,6 +218,7 @@ body {
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-auto-rows: 1fr;
   gap: 0.75rem;
 }
 
@@ -191,6 +229,9 @@ body {
   overflow: hidden;
   cursor: pointer;
   transition: border-color 0.15s, transform 0.12s;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .card:hover {
@@ -204,10 +245,15 @@ body {
   object-fit: cover;
   display: block;
   background: #000;
+  flex: 0 0 auto;
 }
 
 .card .meta {
   padding: 0.5rem 0.6rem 0.65rem;
+  flex: 1 1 auto;
+  min-height: 4.55rem;
+  display: flex;
+  flex-direction: column;
 }
 
 .card .title {
@@ -223,6 +269,10 @@ body {
   font-size: 0.72rem;
   color: var(--muted);
   margin-top: 0.2rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .banner {
@@ -267,6 +317,31 @@ body {
   background: rgba(240, 113, 120, 0.14);
   border: 1px solid rgba(240, 113, 120, 0.42);
   color: #ffb4b8;
+}
+
+.library-bar {
+  margin: 0 1.5rem 1rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.library-bar h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.library-bar .hint {
+  margin-top: 0.2rem;
+}
+
+.library-bar .btn {
+  flex-shrink: 0;
 }
 
 .drawer {
@@ -399,6 +474,110 @@ a.tag:hover {
 
 .detail-ext-link.tag {
   margin-right: 0;
+}
+
+.douban-mark-panel {
+  margin: 0.85rem 0 0;
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.douban-mark-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.douban-mark-head h4 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.douban-mark-status {
+  text-align: right;
+}
+
+.douban-mark-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.douban-mark-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.douban-rating-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.douban-rating-select select {
+  min-width: 5.5rem;
+  padding: 0.34rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.douban-rating-select select:disabled {
+  opacity: 0.5;
+}
+
+.douban-tag-input {
+  margin-top: 0.55rem;
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.douban-tag-input input {
+  width: 100%;
+  padding: 0.44rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.douban-tag-input input:focus {
+  outline: 2px solid var(--accent-dim);
+  outline-offset: 2px;
+}
+
+.douban-tag-history {
+  margin-top: 0.45rem;
+  min-height: 1.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.douban-tag-chip {
+  padding: 0.22rem 0.48rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.76rem;
+}
+
+.douban-tag-chip:hover {
+  border-color: var(--accent-dim);
 }
 
 .tv-seasons-mount {
@@ -719,6 +898,7 @@ a.torrent-card-link:visited {
 }
 
 #settings-form input,
+#settings-form textarea,
 #qb-push-form input,
 #qb-push-form select {
   width: 100%;
@@ -730,6 +910,14 @@ a.torrent-card-link:visited {
   color: var(--text);
 }
 
+#settings-form textarea {
+  min-height: 5.2rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 #settings-form input[type="checkbox"],
 #settings-form input[type="radio"] {
   width: auto;
@@ -737,6 +925,36 @@ a.torrent-card-link:visited {
   margin-top: 0;
   padding: 0;
   vertical-align: middle;
+}
+
+.douban-login-tools {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.douban-login-tools .hint {
+  min-height: 1.25rem;
+}
+
+.douban-qr-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  width: fit-content;
+}
+
+.douban-qr-box img {
+  display: block;
+  width: 180px;
+  height: 180px;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 8px;
 }
 
 .qb-servers-fieldset {
@@ -861,4 +1079,15 @@ code {
 .subtle {
   font-size: 0.85rem;
   color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .library-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .library-bar .btn {
+    width: 100%;
+  }
 }

@@ -9,13 +9,18 @@
 <body>
   <header class="top">
     <h1>影视检索</h1>
-    <p class="sub">TMDB 资料与 M-Team 种子（需自行配置 API Key）</p>
+    <p class="sub">TMDB / 豆瓣资料与 M-Team 种子（需自行配置 API Key）</p>
     <div class="actions">
+      <button type="button" id="btn-douban-library" class="btn secondary">豆瓣列表</button>
       <button type="button" id="btn-settings" class="btn secondary">API 设置</button>
     </div>
   </header>
 
   <section class="search-bar">
+    <div class="source-switch" role="group" aria-label="搜索来源">
+      <button type="button" class="source-pill is-active" data-search-source="tmdb">TMDB</button>
+      <button type="button" class="source-pill" data-search-source="douban">豆瓣</button>
+    </div>
     <input type="search" id="q" placeholder="搜索电影或剧集标题…" autocomplete="off" />
     <button type="button" id="btn-search" class="btn primary">搜索</button>
   </section>
@@ -23,17 +28,25 @@
   <div id="err" class="banner err hidden" role="alert"></div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
+  <section id="library-bar" class="library-bar hidden" aria-live="polite">
+    <div>
+      <h2>豆瓣列表</h2>
+      <p id="library-cache-status" class="hint"></p>
+    </div>
+    <button type="button" id="btn-douban-library-refresh" class="btn secondary">刷新缓存</button>
+  </section>
+
   <main class="layout" id="main-layout" aria-live="polite">
     <div id="layout-loading" class="layout-loading hidden" aria-hidden="true" role="status">
       <div class="spinner" aria-hidden="true"></div>
       <span class="loading-text">正在搜索 TMDB…</span>
     </div>
-    <section>
-      <h2>电影</h2>
+    <section id="movies-section">
+      <h2 id="movies-title">电影</h2>
       <div id="movies" class="grid"></div>
     </section>
-    <section>
-      <h2>剧集</h2>
+    <section id="tv-section">
+      <h2 id="tv-title">剧集</h2>
       <div id="tv" class="grid"></div>
     </section>
   </main>
@@ -56,6 +69,17 @@
         M-Team OpenAPI Key
         <input type="password" name="mteam_api_key" id="f-mteam" autocomplete="off" />
       </label>
+      <label>
+        豆瓣 Cookie
+        <textarea name="douban_cookie" id="f-douban-cookie" rows="3" autocomplete="off" spellcheck="false" placeholder="dbcl2=...; ck=..."></textarea>
+      </label>
+      <div class="douban-login-tools">
+        <button type="button" class="btn secondary" id="btn-douban-qr">QR 登录获取 Cookie</button>
+        <span class="hint subtle" id="douban-qr-status" aria-live="polite"></span>
+      </div>
+      <div id="douban-qr-box" class="douban-qr-box hidden">
+        <img id="douban-qr-img" alt="豆瓣登录二维码" />
+      </div>
 
       <fieldset class="qb-servers-fieldset">
         <legend>qBittorrent</legend>

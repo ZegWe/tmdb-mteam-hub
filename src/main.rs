@@ -1,22 +1,23 @@
 mod config;
+mod douban;
 mod qbittorrent;
 mod tmdb_cache;
-mod wikidata;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Path as PathParam, Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Json},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use config::{FileConfig, QbServerEntry};
-use tmdb_cache::TmdbDiskCache;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tmdb_cache::TmdbDiskCache;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -27,6 +28,9 @@ struct AppState {
     config_path: PathBuf,
     config: std::sync::Arc<RwLock<FileConfig>>,
     tmdb_cache: TmdbDiskCache,
+    douban_cache: TmdbDiskCache,
+    douban_cache_ttl_secs: u64,
+    douban_qr_sessions: std::sync::Arc<RwLock<HashMap<String, douban::QrSession>>>,
 }
 
 #[tokio::main]
@@ -39,15 +43,17 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
-            |_| "tmdb_mteam_server=info,tower_http=info,axum=debug".into(),
-        ))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "tmdb_mteam_server=info,tower_http=info,axum=debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     let config_path = resolve_config_path();
     tracing::info!("config path: {}", config_path.display());
     let file_cfg = FileConfig::load_or_create(&config_path)?;
+    let listen_addr = file_cfg.listen_addr()?;
 
     let cache_dir = resolve_tmdb_cache_dir();
     let cache_ttl_secs: u64 = std::env::var("TMDB_CACHE_TTL_SECS")
@@ -62,15 +68,43 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cache_ttl_secs
     );
 
+    let douban_cache_dir = resolve_douban_cache_dir();
+    let douban_cache_ttl_secs: u64 = std::env::var("DOUBAN_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(86_400);
+    let douban_cache = TmdbDiskCache::new(
+        douban_cache_dir.clone(),
+        Duration::from_secs(douban_cache_ttl_secs),
+    );
+    douban_cache.ensure_dir().await?;
+    tracing::info!(
+        "douban cache: dir={} ttl={}s",
+        douban_cache_dir.display(),
+        douban_cache_ttl_secs
+    );
+
     let state = AppState {
         config_path,
         config: std::sync::Arc::new(RwLock::new(file_cfg)),
         tmdb_cache,
+        douban_cache,
+        douban_cache_ttl_secs,
+        douban_qr_sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
     };
 
     let api = Router::new()
         .route("/config", get(get_config).put(put_config))
         .route("/search", get(search_tmdb))
+        .route("/douban/search", get(douban_search))
+        .route("/douban/library", get(douban_library))
+        .route("/douban/tags", get(douban_tag_history))
+        .route("/douban/subject/{id}", get(douban_subject_detail))
+        .route("/douban/subject/{id}/interest", post(douban_mark_interest))
+        .route("/douban/image", get(douban_image))
+        .route("/douban/qr/start", post(douban_qr_start))
+        .route("/douban/qr/poll", get(douban_qr_poll))
+        .route("/douban/qr/image", get(douban_qr_image))
         .route("/tmdb/movie/{id}", get(tmdb_movie_detail))
         .route("/tmdb/tv/{id}/season/{season}", get(tmdb_tv_season_detail))
         .route("/tmdb/tv/{id}", get(tmdb_tv_detail))
@@ -94,13 +128,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .fallback_service(static_svc)
         .layer(cors);
 
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8787);
-    let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("listen http://{addr}");
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    tracing::info!("listen http://{listen_addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -118,9 +147,15 @@ fn resolve_config_path() -> PathBuf {
 }
 
 fn resolve_tmdb_cache_dir() -> PathBuf {
-    std::env::var("TMDB_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-        cwd_or_dot().join("cache").join("tmdb")
-    })
+    std::env::var("TMDB_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| cwd_or_dot().join("cache").join("tmdb"))
+}
+
+fn resolve_douban_cache_dir() -> PathBuf {
+    std::env::var("DOUBAN_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| cwd_or_dot().join("cache").join("douban"))
 }
 
 fn static_dir() -> std::io::Result<PathBuf> {
@@ -138,16 +173,25 @@ fn static_dir() -> std::io::Result<PathBuf> {
 async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
     Json(json!({
+        "listen_ip": cfg.listen_ip,
+        "listen_port": cfg.listen_port,
         "tmdb_api_key": cfg.tmdb_api_key,
         "mteam_api_key": cfg.mteam_api_key,
+        "douban_cookie": cfg.douban_cookie,
         "qb_servers": cfg.qb_servers,
     }))
 }
 
 #[derive(Deserialize)]
 struct PutConfigBody {
+    #[serde(default)]
+    listen_ip: Option<String>,
+    #[serde(default)]
+    listen_port: Option<u16>,
     tmdb_api_key: String,
     mteam_api_key: String,
+    #[serde(default)]
+    douban_cookie: String,
     #[serde(default)]
     qb_servers: Vec<QbServerEntry>,
 }
@@ -156,11 +200,20 @@ async fn put_config(
     State(state): State<AppState>,
     Json(body): Json<PutConfigBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let new_cfg = FileConfig {
-        tmdb_api_key: body.tmdb_api_key,
-        mteam_api_key: body.mteam_api_key,
-        qb_servers: body.qb_servers,
-    };
+    let mut new_cfg = state.config.read().await.clone();
+    if let Some(listen_ip) = body.listen_ip {
+        new_cfg.listen_ip = listen_ip;
+    }
+    if let Some(listen_port) = body.listen_port {
+        new_cfg.listen_port = listen_port;
+    }
+    new_cfg.tmdb_api_key = body.tmdb_api_key;
+    new_cfg.mteam_api_key = body.mteam_api_key;
+    new_cfg.douban_cookie = douban::normalize_cookie_header(&body.douban_cookie);
+    new_cfg.qb_servers = body.qb_servers;
+    new_cfg
+        .listen_addr()
+        .map_err(|e| ApiError::bad_request(format!("监听地址配置无效: {e}")))?;
     new_cfg
         .save(&state.config_path)
         .map_err(|e| ApiError::internal(format!("写入配置失败: {e}")))?;
@@ -288,7 +341,11 @@ fn tmdb_uses_bearer_token(credential: &str) -> bool {
     s.starts_with("eyJ") && s.contains('.')
 }
 
-async fn tmdb_v3_get(credential: &str, path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {
+async fn tmdb_v3_get(
+    credential: &str,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<Value, ApiError> {
     const BASE: &str = "https://api.themoviedb.org/3";
     let client = reqwest::Client::builder()
         .use_rustls_tls()
@@ -387,7 +444,11 @@ async fn search_tmdb(
         let tv_page = tmdb_v3_get(
             cred,
             "/search/tv",
-            &[("query", query.as_str()), ("language", lang.as_str()), ("page", "1")],
+            &[
+                ("query", query.as_str()),
+                ("language", lang.as_str()),
+                ("page", "1"),
+            ],
         )
         .await?;
         (
@@ -465,6 +526,343 @@ async fn search_tmdb(
     Ok(Json(json!({ "movies": movie_items, "tv": tv_items })))
 }
 
+#[derive(Deserialize)]
+struct DoubanSearchQuery {
+    q: String,
+    #[serde(default = "default_douban_limit")]
+    limit: usize,
+}
+
+fn default_douban_limit() -> usize {
+    20
+}
+
+#[derive(Deserialize)]
+struct DoubanLibraryQuery {
+    #[serde(default)]
+    force_refresh: bool,
+    #[serde(default = "default_douban_library_limit")]
+    limit: usize,
+}
+
+fn default_douban_library_limit() -> usize {
+    200
+}
+
+#[derive(Deserialize)]
+struct DoubanTagHistoryQuery {
+    #[serde(default = "default_douban_tag_history_limit")]
+    limit: usize,
+}
+
+fn default_douban_tag_history_limit() -> usize {
+    80
+}
+
+async fn douban_search(
+    State(state): State<AppState>,
+    Query(q): Query<DoubanSearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let limit = q.limit.clamp(1, 50);
+    let items = douban::search(&cookie, &q.q, limit)
+        .await
+        .map_err(ApiError::douban)?;
+    let items_value =
+        serde_json::to_value(&items).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(json!({
+        "items": items_value.clone(),
+        "movies": items_value,
+        "tv": [],
+    })))
+}
+
+async fn douban_library(
+    State(state): State<AppState>,
+    Query(q): Query<DoubanLibraryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
+    let limit = q.limit.clamp(1, 1200);
+    let cache_key = format!("library_{account_key}_limit_{limit}");
+
+    if !q.force_refresh {
+        if let Some(mut cached) = state.douban_cache.get(&cache_key).await {
+            mark_cache_hit(&mut cached);
+            return Ok(Json(cached));
+        }
+    }
+
+    let (wish, collect) = tokio::try_join!(
+        douban::library(&cookie, douban::DoubanLibraryStatus::Wish, limit),
+        douban::library(&cookie, douban::DoubanLibraryStatus::Collect, limit),
+    )
+    .map_err(ApiError::douban)?;
+
+    let value = json!({
+        "source": "douban",
+        "cached": false,
+        "fetched_at": unix_now_secs(),
+        "ttl_seconds": state.douban_cache_ttl_secs,
+        "limit": limit,
+        "wish": wish,
+        "collect": collect,
+    });
+    if let Err(e) = state.douban_cache.put(&cache_key, &value).await {
+        tracing::warn!("douban library cache write failed: {e}");
+    }
+    Ok(Json(value))
+}
+
+async fn douban_tag_history(
+    State(state): State<AppState>,
+    Query(q): Query<DoubanTagHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
+    let limit = q.limit.clamp(1, 1200);
+    let mut value = load_douban_tag_history_value(&state, &account_key).await;
+    truncate_douban_tag_history(&mut value, limit);
+    Ok(Json(value))
+}
+
+fn mark_cache_hit(value: &mut Value) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("cached".to_string(), Value::Bool(true));
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+async fn douban_subject_detail(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let detail = douban::subject_detail(&cookie, &id)
+        .await
+        .map_err(ApiError::douban)?;
+    Ok(Json(
+        serde_json::to_value(detail).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct DoubanMarkInterestBody {
+    interest: douban::DoubanInterest,
+    #[serde(default)]
+    rating: Option<u8>,
+    #[serde(default)]
+    tags: String,
+}
+
+async fn douban_mark_interest(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+    Json(body): Json<DoubanMarkInterestBody>,
+) -> Result<Json<Value>, ApiError> {
+    let cookie = state.config.read().await.douban_cookie.clone();
+    let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
+    let result = douban::mark_interest(&cookie, &id, body.interest, body.rating, &body.tags)
+        .await
+        .map_err(ApiError::douban)?;
+    if let Err(e) = state
+        .douban_cache
+        .remove_prefix(&format!("library_{account_key}_"))
+        .await
+    {
+        tracing::warn!("douban library cache invalidation failed: {e}");
+    }
+    if let Err(e) = update_douban_tag_history(&state, &account_key, &result.tags).await {
+        tracing::warn!("douban tag history update failed: {e}");
+    }
+    Ok(Json(
+        serde_json::to_value(result).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+fn douban_tag_history_cache_key(account_key: &str) -> String {
+    format!("tag_history_manual_{account_key}")
+}
+
+async fn load_douban_tag_history_value(state: &AppState, account_key: &str) -> Value {
+    let key = douban_tag_history_cache_key(account_key);
+    state.douban_cache.get_any(&key).await.unwrap_or_else(|| {
+        json!({
+            "source": "local-cache",
+            "cached": true,
+            "updated_at": null,
+            "tags": [],
+            "tag_counts": [],
+        })
+    })
+}
+
+fn truncate_douban_tag_history(value: &mut Value, limit: usize) {
+    if let Some(tags) = value.get_mut("tags").and_then(|v| v.as_array_mut()) {
+        tags.truncate(limit);
+    }
+    if let Some(tag_counts) = value.get_mut("tag_counts").and_then(|v| v.as_array_mut()) {
+        tag_counts.truncate(limit);
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("cached".to_string(), Value::Bool(true));
+    }
+}
+
+async fn update_douban_tag_history(
+    state: &AppState,
+    account_key: &str,
+    tags_text: &str,
+) -> std::io::Result<()> {
+    let tags = tags_text
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    if tags.is_empty() {
+        return Ok(());
+    }
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let current = load_douban_tag_history_value(state, account_key).await;
+    if let Some(items) = current.get("tag_counts").and_then(|v| v.as_array()) {
+        for item in items {
+            let Some(tag) = item.get("tag").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let count = item.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if !tag.trim().is_empty() {
+                counts.insert(tag.trim().to_string(), count.max(1));
+            }
+        }
+    } else if let Some(items) = current.get("tags").and_then(|v| v.as_array()) {
+        for tag in items.iter().filter_map(|v| v.as_str()) {
+            if !tag.trim().is_empty() {
+                counts.entry(tag.trim().to_string()).or_insert(1);
+            }
+        }
+    }
+
+    for tag in tags {
+        *counts.entry(tag.to_string()).or_default() += 1;
+    }
+
+    let mut ranked = counts.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|(tag_a, count_a), (tag_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| tag_a.cmp(tag_b))
+    });
+
+    let tags = ranked
+        .iter()
+        .map(|(tag, _)| tag.clone())
+        .collect::<Vec<_>>();
+    let tag_counts = ranked
+        .iter()
+        .map(|(tag, count)| json!({ "tag": tag, "count": count }))
+        .collect::<Vec<_>>();
+
+    let value = json!({
+        "source": "local-cache",
+        "cached": true,
+        "updated_at": unix_now_secs(),
+        "tags": tags,
+        "tag_counts": tag_counts,
+    });
+    state
+        .douban_cache
+        .put(&douban_tag_history_cache_key(account_key), &value)
+        .await
+}
+
+#[derive(Deserialize)]
+struct DoubanImageQuery {
+    url: String,
+}
+
+async fn douban_image(Query(q): Query<DoubanImageQuery>) -> Result<Response, ApiError> {
+    let (content_type, bytes) = douban::fetch_image(&q.url)
+        .await
+        .map_err(ApiError::douban)?;
+    let mut headers = HeaderMap::new();
+    let content_type = HeaderValue::from_str(&content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("image/jpeg"));
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+    Ok((headers, axum::body::Body::from(bytes)).into_response())
+}
+
+async fn douban_qr_start(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let (session_id, session, result) = douban::qr_start().await.map_err(ApiError::douban)?;
+    state
+        .douban_qr_sessions
+        .write()
+        .await
+        .insert(session_id, session);
+    Ok(Json(
+        serde_json::to_value(result).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct DoubanQrQuery {
+    session_id: String,
+}
+
+async fn douban_qr_image(
+    State(state): State<AppState>,
+    Query(q): Query<DoubanQrQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let image = state
+        .douban_qr_sessions
+        .read()
+        .await
+        .get(q.session_id.trim())
+        .map(|s| s.image.clone())
+        .ok_or_else(|| ApiError::bad_request("豆瓣 QR 登录会话不存在或已过期"))?;
+    Ok((
+        [(header::CONTENT_TYPE, "image/png")],
+        image.as_ref().clone(),
+    ))
+}
+
+async fn douban_qr_poll(
+    State(state): State<AppState>,
+    Query(q): Query<DoubanQrQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = q.session_id.trim().to_string();
+    let session = state
+        .douban_qr_sessions
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("豆瓣 QR 登录会话不存在或已过期"))?;
+
+    let result = douban::qr_poll(&session).await.map_err(ApiError::douban)?;
+    if let Some(cookie_header) = result.cookie_header.clone() {
+        let mut new_cfg = state.config.read().await.clone();
+        new_cfg.douban_cookie = douban::normalize_cookie_header(&cookie_header);
+        new_cfg
+            .save(&state.config_path)
+            .map_err(|e| ApiError::internal(format!("写入豆瓣 Cookie 失败: {e}")))?;
+        *state.config.write().await = new_cfg;
+        state.douban_qr_sessions.write().await.remove(&session_id);
+    }
+
+    Ok(Json(
+        serde_json::to_value(result).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
 async fn tmdb_movie_detail(
     State(state): State<AppState>,
     PathParam(id): PathParam<i32>,
@@ -479,11 +877,6 @@ async fn tmdb_movie_detail(
     if !dq.force_refresh {
         if let Some(mut v) = state.tmdb_cache.get(&cache_key).await {
             enrich_posters(&mut v);
-            if wikidata::enrich_detail_with_douban(&mut v).await {
-                if let Err(e) = state.tmdb_cache.put(&cache_key, &v).await {
-                    tracing::warn!("tmdb movie cache write (douban) failed: {e}");
-                }
-            }
             return Ok(Json(v));
         }
     }
@@ -502,12 +895,9 @@ async fn tmdb_movie_detail(
         let detail = tokio::task::spawn_blocking(move || {
             use tmdb_client::apis::client::APIClient;
             let client = APIClient::new_with_api_key(key);
-            client.movies_api().get_movie_details(
-                id,
-                Some("zh-CN"),
-                None,
-                Some("external_ids"),
-            )
+            client
+                .movies_api()
+                .get_movie_details(id, Some("zh-CN"), None, Some("external_ids"))
         })
         .await
         .map_err(|e| ApiError::internal(format!("TMDB 请求失败: {e}")))?
@@ -515,7 +905,6 @@ async fn tmdb_movie_detail(
         serde_json::to_value(&detail).map_err(|e| ApiError::internal(e.to_string()))?
     };
     enrich_posters(&mut v);
-    let _ = wikidata::enrich_detail_with_douban(&mut v).await;
     if let Err(e) = state.tmdb_cache.put(&cache_key, &v).await {
         tracing::warn!("tmdb movie cache write failed: {e}");
     }
@@ -536,11 +925,6 @@ async fn tmdb_tv_detail(
     if !dq.force_refresh {
         if let Some(mut v) = state.tmdb_cache.get(&cache_key).await {
             enrich_posters(&mut v);
-            if wikidata::enrich_detail_with_douban(&mut v).await {
-                if let Err(e) = state.tmdb_cache.put(&cache_key, &v).await {
-                    tracing::warn!("tmdb tv cache write (douban) failed: {e}");
-                }
-            }
             return Ok(Json(v));
         }
     }
@@ -569,7 +953,6 @@ async fn tmdb_tv_detail(
         serde_json::to_value(&detail).map_err(|e| ApiError::internal(e.to_string()))?
     };
     enrich_posters(&mut v);
-    let _ = wikidata::enrich_detail_with_douban(&mut v).await;
     if let Err(e) = state.tmdb_cache.put(&cache_key, &v).await {
         tracing::warn!("tmdb tv cache write failed: {e}");
     }
@@ -604,9 +987,13 @@ async fn tmdb_tv_season_detail(
         let detail = tokio::task::spawn_blocking(move || {
             use tmdb_client::apis::client::APIClient;
             let client = APIClient::new_with_api_key(key);
-            client
-                .tv_seasons_api()
-                .get_tv_season_details(tv_id, season_number, Some("zh-CN"), None, None)
+            client.tv_seasons_api().get_tv_season_details(
+                tv_id,
+                season_number,
+                Some("zh-CN"),
+                None,
+                None,
+            )
         })
         .await
         .map_err(|e| ApiError::internal(format!("TMDB 请求失败: {e}")))?
@@ -751,8 +1138,8 @@ async fn mteam_search(
             mteam_search_post(&client, &key, &body).await?
         }
         MteamSource::Keyword => {
-            let k =
-                keyword_raw.ok_or_else(|| ApiError::bad_request("使用关键字路径时请提供 keyword"))?;
+            let k = keyword_raw
+                .ok_or_else(|| ApiError::bad_request("使用关键字路径时请提供 keyword"))?;
             let body = json!({
                 "pageNumber": q.page,
                 "pageSize": q.page_size,
@@ -860,6 +1247,13 @@ impl ApiError {
         Self::Other {
             status: StatusCode::BAD_GATEWAY,
             message: msg.into(),
+        }
+    }
+
+    fn douban(err: douban::DoubanError) -> Self {
+        Self::Other {
+            status: err.status,
+            message: err.message,
         }
     }
 }
