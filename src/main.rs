@@ -4,7 +4,7 @@ mod qbittorrent;
 mod subscription;
 mod tmdb_cache;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1373,7 +1373,15 @@ async fn record_push_failure(
 struct EpisodeMarker {
     season_number: Option<u32>,
     episode_number: Option<u32>,
+    episode_end_number: Option<u32>,
     label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EpisodeGroupKey {
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    label: String,
 }
 
 fn apply_qb_progress_to_push(
@@ -1405,11 +1413,15 @@ fn apply_qb_progress_to_push(
 fn torrent_file_progress_records(
     files: &[qbittorrent::QbTorrentFile],
 ) -> Vec<subscription::TorrentFileProgressRecord> {
-    files
+    let media_files = files
         .iter()
         .filter(|file| should_link_media_file(&file.name))
+        .collect::<Vec<_>>();
+    let media_file_count = media_files.len();
+    media_files
+        .into_iter()
         .map(|file| {
-            let episode = episode_marker_from_name(&file.name);
+            let episode = episode_marker_for_file_name(&file.name, media_file_count);
             subscription::TorrentFileProgressRecord {
                 name: file.name.clone(),
                 size: file.size,
@@ -1417,6 +1429,7 @@ fn torrent_file_progress_records(
                 priority: file.priority,
                 season_number: episode.season_number,
                 episode_number: episode.episode_number,
+                episode_end_number: episode.episode_end_number,
                 episode_label: episode.label,
             }
         })
@@ -1428,14 +1441,22 @@ fn episode_records_from_file_progress(
 ) -> Vec<subscription::EpisodeProgressRecord> {
     let mut grouped: BTreeMap<String, Vec<&subscription::TorrentFileProgressRecord>> =
         BTreeMap::new();
+    let mut metadata: BTreeMap<String, (Option<u32>, Option<u32>)> = BTreeMap::new();
     for file in files {
-        if let Some(label) = file.episode_label.as_deref() {
-            grouped.entry(label.to_string()).or_default().push(file);
+        for key in episode_group_keys_for_progress_file(file) {
+            metadata
+                .entry(key.label.clone())
+                .or_insert((key.season_number, key.episode_number));
+            grouped.entry(key.label).or_default().push(file);
         }
     }
+    add_missing_episode_groups(&mut grouped, &mut metadata);
+    let conflict_seasons = conflicted_episode_seasons(&metadata);
     grouped
         .into_iter()
         .map(|(label, rows)| {
+            let (season_number, episode_number) =
+                metadata.get(&label).copied().unwrap_or((None, None));
             let file_count = rows.len();
             let completed_file_count = rows
                 .iter()
@@ -1446,23 +1467,23 @@ fn episode_records_from_file_progress(
             } else {
                 rows.iter().map(|file| file.progress).sum::<f64>() / file_count as f64
             };
-            let first = rows[0];
             subscription::EpisodeProgressRecord {
-                season_number: first.season_number,
-                episode_number: first.episode_number,
+                season_number,
+                episode_number,
                 label,
                 file_count,
                 completed_file_count,
                 linked_file_count: 0,
                 failed_file_count: 0,
                 progress,
-                status: if completed_file_count == file_count {
-                    "downloaded".to_string()
-                } else if progress > 0.0 {
-                    "downloading".to_string()
-                } else {
-                    "pending".to_string()
-                },
+                status: progress_episode_status(
+                    season_number,
+                    episode_number,
+                    &rows,
+                    completed_file_count,
+                    progress,
+                    &conflict_seasons,
+                ),
             }
         })
         .collect()
@@ -1472,15 +1493,27 @@ fn episode_records_from_hardlink_files(
     files: &[subscription::HardlinkFileRecord],
 ) -> Vec<subscription::EpisodeProgressRecord> {
     let mut grouped: BTreeMap<String, Vec<&subscription::HardlinkFileRecord>> = BTreeMap::new();
+    let mut metadata: BTreeMap<String, (Option<u32>, Option<u32>)> = BTreeMap::new();
     for file in files {
-        if let Some(label) = file.episode_label.as_deref() {
-            grouped.entry(label.to_string()).or_default().push(file);
+        for key in episode_group_keys_for_hardlink_file(file) {
+            metadata
+                .entry(key.label.clone())
+                .or_insert((key.season_number, key.episode_number));
+            grouped.entry(key.label).or_default().push(file);
         }
     }
+    add_missing_episode_groups(&mut grouped, &mut metadata);
+    let conflict_seasons = conflicted_episode_seasons(&metadata);
     grouped
         .into_iter()
         .map(|(label, rows)| {
+            let (season_number, episode_number) =
+                metadata.get(&label).copied().unwrap_or((None, None));
             let file_count = rows.len();
+            let planned_file_count = rows
+                .iter()
+                .filter(|file| file.status.as_str() == "planned")
+                .count();
             let linked_file_count = rows
                 .iter()
                 .filter(|file| {
@@ -1494,10 +1527,9 @@ fn episode_records_from_hardlink_files(
                 .iter()
                 .filter(|file| file.status.as_str() == "failed")
                 .count();
-            let first = rows[0];
             subscription::EpisodeProgressRecord {
-                season_number: first.season_number,
-                episode_number: first.episode_number,
+                season_number,
+                episode_number,
                 label,
                 file_count,
                 completed_file_count: linked_file_count,
@@ -1508,16 +1540,207 @@ fn episode_records_from_hardlink_files(
                 } else {
                     linked_file_count as f64 / file_count as f64
                 },
-                status: if failed_file_count > 0 {
-                    "failed".to_string()
-                } else if linked_file_count == file_count {
-                    "linked".to_string()
-                } else {
-                    "pending".to_string()
-                },
+                status: hardlink_episode_status(
+                    season_number,
+                    episode_number,
+                    &rows,
+                    planned_file_count,
+                    linked_file_count,
+                    failed_file_count,
+                    &conflict_seasons,
+                ),
             }
         })
         .collect()
+}
+
+const UNKNOWN_EPISODE_LABEL: &str = "未识别分集";
+
+fn episode_group_keys_for_progress_file(
+    file: &subscription::TorrentFileProgressRecord,
+) -> Vec<EpisodeGroupKey> {
+    episode_group_keys(
+        file.season_number,
+        file.episode_number,
+        file.episode_end_number,
+        file.episode_label.as_deref(),
+    )
+}
+
+fn episode_group_keys_for_hardlink_file(
+    file: &subscription::HardlinkFileRecord,
+) -> Vec<EpisodeGroupKey> {
+    episode_group_keys(
+        file.season_number,
+        file.episode_number,
+        file.episode_end_number,
+        file.episode_label.as_deref(),
+    )
+}
+
+fn episode_group_keys(
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    episode_end_number: Option<u32>,
+    episode_label: Option<&str>,
+) -> Vec<EpisodeGroupKey> {
+    if let Some(start) = episode_number {
+        let end = episode_end_number
+            .filter(|end| *end >= start)
+            .map(|end| end.min(start.saturating_add(200)))
+            .unwrap_or(start);
+        return (start..=end)
+            .map(|episode| EpisodeGroupKey {
+                season_number,
+                episode_number: Some(episode),
+                label: episode_number_label(season_number, episode),
+            })
+            .collect();
+    }
+    episode_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(|label| {
+            vec![EpisodeGroupKey {
+                season_number,
+                episode_number,
+                label: label.to_string(),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn episode_number_label(season_number: Option<u32>, episode_number: u32) -> String {
+    if let Some(season) = season_number {
+        format!("S{season:02}E{episode_number:02}")
+    } else {
+        format!("E{episode_number:02}")
+    }
+}
+
+fn add_missing_episode_groups<T>(
+    grouped: &mut BTreeMap<String, Vec<T>>,
+    metadata: &mut BTreeMap<String, (Option<u32>, Option<u32>)>,
+) {
+    let mut by_season: BTreeMap<Option<u32>, BTreeSet<u32>> = BTreeMap::new();
+    for (season, episode) in metadata.values().copied() {
+        if let Some(episode) = episode {
+            by_season.entry(season).or_default().insert(episode);
+        }
+    }
+    for (season, episodes) in by_season {
+        if episodes.len() < 2 {
+            continue;
+        }
+        let Some(first) = episodes.iter().next().copied() else {
+            continue;
+        };
+        let Some(last) = episodes.iter().next_back().copied() else {
+            continue;
+        };
+        for episode in first..=last {
+            if episodes.contains(&episode) {
+                continue;
+            }
+            let label = episode_number_label(season, episode);
+            metadata
+                .entry(label.clone())
+                .or_insert((season, Some(episode)));
+            grouped.entry(label).or_default();
+        }
+    }
+}
+
+fn conflicted_episode_seasons(
+    metadata: &BTreeMap<String, (Option<u32>, Option<u32>)>,
+) -> BTreeSet<u32> {
+    let mut season_packs = BTreeSet::new();
+    let mut numbered = BTreeSet::new();
+    for (label, (season, episode)) in metadata {
+        if let Some(season) = season {
+            if episode.is_some() {
+                numbered.insert(*season);
+            } else if label.contains("全季") {
+                season_packs.insert(*season);
+            }
+        }
+    }
+    season_packs.intersection(&numbered).copied().collect()
+}
+
+fn progress_episode_status(
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    rows: &[&subscription::TorrentFileProgressRecord],
+    completed_file_count: usize,
+    progress: f64,
+    conflict_seasons: &BTreeSet<u32>,
+) -> String {
+    if rows.is_empty() {
+        return "missing".to_string();
+    }
+    if rows
+        .iter()
+        .any(|file| file.episode_label.as_deref() == Some(UNKNOWN_EPISODE_LABEL))
+    {
+        return "needs_review".to_string();
+    }
+    if season_number.is_some_and(|season| conflict_seasons.contains(&season)) {
+        return "conflict".to_string();
+    }
+    if episode_number.is_some() && rows.len() > 1 {
+        return "duplicate".to_string();
+    }
+    if completed_file_count == rows.len() {
+        "downloaded".to_string()
+    } else if progress > 0.0 {
+        "downloading".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+fn hardlink_episode_status(
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    rows: &[&subscription::HardlinkFileRecord],
+    planned_file_count: usize,
+    linked_file_count: usize,
+    failed_file_count: usize,
+    conflict_seasons: &BTreeSet<u32>,
+) -> String {
+    if rows.is_empty() {
+        return "missing".to_string();
+    }
+    if rows
+        .iter()
+        .any(|file| file.episode_label.as_deref() == Some(UNKNOWN_EPISODE_LABEL))
+    {
+        return "needs_review".to_string();
+    }
+    if season_number.is_some_and(|season| conflict_seasons.contains(&season)) {
+        return "conflict".to_string();
+    }
+    if episode_number.is_some() && rows.len() > 1 {
+        return "duplicate".to_string();
+    }
+    if failed_file_count > 0 {
+        "failed".to_string()
+    } else if planned_file_count == rows.len() {
+        "planned".to_string()
+    } else if linked_file_count == rows.len() {
+        "linked".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+fn episode_marker_for_file_name(name: &str, media_file_count: usize) -> EpisodeMarker {
+    let mut marker = episode_marker_from_name(name);
+    if marker.label.is_none() && should_flag_unknown_episode(name, media_file_count) {
+        marker.label = Some(UNKNOWN_EPISODE_LABEL.to_string());
+    }
+    marker
 }
 
 fn episode_marker_from_name(name: &str) -> EpisodeMarker {
@@ -1531,12 +1754,24 @@ fn episode_marker_from_name(name: &str) -> EpisodeMarker {
         return EpisodeMarker {
             season_number: Some(season),
             episode_number: Some(episode),
+            episode_end_number: last_episode.filter(|last| *last > episode),
             label: Some(label),
         };
+    }
+    if has_season_pack_keyword(&lower) {
+        if let Some(season) = find_season_pack_marker(&lower) {
+            return EpisodeMarker {
+                season_number: Some(season),
+                episode_number: None,
+                episode_end_number: None,
+                label: Some(format!("S{season:02} 全季")),
+            };
+        }
     }
     if let Some((episode, last_episode)) = find_bare_episode_marker(&lower)
         .map(|(episode, last)| (episode, last))
         .or_else(|| find_chinese_episode_marker(name).map(|episode| (episode, None)))
+        .or_else(|| find_plain_episode_marker(&lower))
     {
         let label = if let Some(last) = last_episode.filter(|last| *last > episode) {
             format!("E{episode:02}-E{last:02}")
@@ -1546,6 +1781,7 @@ fn episode_marker_from_name(name: &str) -> EpisodeMarker {
         return EpisodeMarker {
             season_number: None,
             episode_number: Some(episode),
+            episode_end_number: last_episode.filter(|last| *last > episode),
             label: Some(label),
         };
     }
@@ -1553,10 +1789,26 @@ fn episode_marker_from_name(name: &str) -> EpisodeMarker {
         return EpisodeMarker {
             season_number: Some(season),
             episode_number: None,
+            episode_end_number: None,
             label: Some(format!("S{season:02} 全季")),
         };
     }
     EpisodeMarker::default()
+}
+
+fn has_season_pack_keyword(text: &str) -> bool {
+    text.contains("season")
+        || text.contains("complete")
+        || text.contains("全季")
+        || text.contains("全集")
+}
+
+fn should_flag_unknown_episode(name: &str, media_file_count: usize) -> bool {
+    if media_file_count > 1 {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    has_season_pack_keyword(&lower) || lower.contains("episode")
 }
 
 fn find_season_episode_marker(text: &str) -> Option<(u32, u32, Option<u32>)> {
@@ -1571,7 +1823,7 @@ fn find_season_episode_marker(text: &str) -> Option<(u32, u32, Option<u32>)> {
             pos = skip_episode_separators(bytes, pos);
             if pos < bytes.len() && bytes[pos] == b'e' {
                 if let Some((episode, end)) = read_ascii_number(bytes, pos + 1) {
-                    if season > 0 && episode > 0 {
+                    if episode > 0 {
                         return Some((season, episode, read_episode_range_end(bytes, end)));
                     }
                 }
@@ -1600,6 +1852,89 @@ fn find_bare_episode_marker(text: &str) -> Option<(u32, Option<u32>)> {
         i += 1;
     }
     None
+}
+
+fn find_plain_episode_marker(text: &str) -> Option<(u32, Option<u32>)> {
+    let stem = file_stem_text(text);
+    let bytes = stem.as_bytes();
+    let mut i = 0usize;
+    let mut found = None;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() || !is_episode_token_left_boundary(bytes, i) {
+            i += 1;
+            continue;
+        }
+        let Some((episode, end)) = read_ascii_number(bytes, i) else {
+            i += 1;
+            continue;
+        };
+        let digit_count = end - i;
+        if !valid_plain_episode_number(episode, digit_count) {
+            i = end;
+            continue;
+        }
+        if let Some((last_episode, range_end)) = read_plain_episode_range_end(bytes, end) {
+            if last_episode > episode {
+                found = unique_plain_episode_match(found, (episode, Some(last_episode)))?;
+            }
+            i = range_end;
+            continue;
+        }
+        if is_episode_token_right_boundary(bytes, end) {
+            found = unique_plain_episode_match(found, (episode, None))?;
+        }
+        i = end;
+    }
+    found
+}
+
+fn file_stem_text(text: &str) -> &str {
+    let leaf = text
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .next()
+        .unwrap_or(text);
+    leaf.rsplit_once('.')
+        .map(|(stem, _extension)| stem)
+        .unwrap_or(leaf)
+}
+
+fn unique_plain_episode_match(
+    current: Option<(u32, Option<u32>)>,
+    next: (u32, Option<u32>),
+) -> Option<Option<(u32, Option<u32>)>> {
+    match current {
+        None => Some(Some(next)),
+        Some(existing) if existing == next => Some(Some(existing)),
+        Some(_) => None,
+    }
+}
+
+fn valid_plain_episode_number(value: u32, digit_count: usize) -> bool {
+    value > 0 && value <= 200 && digit_count <= 3
+}
+
+fn read_plain_episode_range_end(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
+    if pos >= bytes.len() || !matches!(bytes[pos], b'-' | b'_' | b'~') {
+        return None;
+    }
+    let next = skip_episode_range_separators(bytes, pos);
+    let (episode, end) = read_ascii_number(bytes, next)?;
+    let digit_count = end - next;
+    if valid_plain_episode_number(episode, digit_count)
+        && is_episode_token_right_boundary(bytes, end)
+    {
+        Some((episode, end))
+    } else {
+        None
+    }
+}
+
+fn is_episode_token_left_boundary(bytes: &[u8], pos: usize) -> bool {
+    pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric()
+}
+
+fn is_episode_token_right_boundary(bytes: &[u8], pos: usize) -> bool {
+    pos >= bytes.len() || !bytes[pos].is_ascii_alphanumeric()
 }
 
 fn read_episode_range_end(bytes: &[u8], pos: usize) -> Option<u32> {
@@ -1633,14 +1968,40 @@ fn find_season_pack_marker(text: &str) -> Option<u32> {
     while i < bytes.len() {
         if bytes[i] == b's' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
             if let Some((season, pos)) = read_ascii_number(bytes, i + 1) {
-                if season > 0 && (pos >= bytes.len() || bytes[pos] != b'e') {
+                if pos >= bytes.len() || bytes[pos] != b'e' {
                     return Some(season);
                 }
             }
         }
         i += 1;
     }
+    find_season_word_pack_marker(text)
+}
+
+fn find_season_word_pack_marker(text: &str) -> Option<u32> {
+    let words = ascii_words(text);
+    for (idx, word) in words.iter().enumerate() {
+        if *word != "season" {
+            continue;
+        }
+        if idx > 0 {
+            if let Ok(season) = words[idx - 1].parse::<u32>() {
+                return Some(season);
+            }
+        }
+        for next in words.iter().skip(idx + 1).take(2) {
+            if let Ok(season) = next.parse::<u32>() {
+                return Some(season);
+            }
+        }
+    }
     None
+}
+
+fn ascii_words(text: &str) -> Vec<&str> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 fn find_chinese_episode_marker(text: &str) -> Option<u32> {
@@ -1700,6 +2061,7 @@ struct HardlinkFilePlan {
     size: u64,
     season_number: Option<u32>,
     episode_number: Option<u32>,
+    episode_end_number: Option<u32>,
     episode_label: Option<String>,
 }
 
@@ -1774,16 +2136,18 @@ fn build_hardlink_plan(
     }
 
     let mut plan_files = Vec::new();
+    let selected_count = selected.len();
     for (file, relative) in selected {
         let source_path = source_path_for_qb_file(&source_root, push, torrent, &relative);
         let target_path = target_dir.join(relative);
-        let episode = episode_marker_from_name(&file.name);
+        let episode = episode_marker_for_file_name(&file.name, selected_count);
         plan_files.push(HardlinkFilePlan {
             source_path,
             target_path,
             size: file.size,
             season_number: episode.season_number,
             episode_number: episode.episode_number,
+            episode_end_number: episode.episode_end_number,
             episode_label: episode.label,
         });
     }
@@ -1860,6 +2224,7 @@ fn dry_run_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::Hardlin
                 status: "planned".to_string(),
                 season_number: file.season_number,
                 episode_number: file.episode_number,
+                episode_end_number: file.episode_end_number,
                 episode_label: file.episode_label.clone(),
                 error: None,
             })
@@ -1875,6 +2240,7 @@ fn dry_run_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::Hardlin
                     status: "planned".to_string(),
                     season_number: file.season_number,
                     episode_number: file.episode_number,
+                    episode_end_number: file.episode_end_number,
                     episode_label: file.episode_label.clone(),
                     error: None,
                 })
@@ -1926,6 +2292,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             status: "failed".to_string(),
             season_number: file.season_number,
             episode_number: file.episode_number,
+            episode_end_number: file.episode_end_number,
             episode_label: file.episode_label.clone(),
             error: Some("源文件不存在".to_string()),
         };
@@ -1939,6 +2306,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
                 status: "already_linked".to_string(),
                 season_number: file.season_number,
                 episode_number: file.episode_number,
+                episode_end_number: file.episode_end_number,
                 episode_label: file.episode_label.clone(),
                 error: None,
             };
@@ -1950,6 +2318,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             status: "failed".to_string(),
             season_number: file.season_number,
             episode_number: file.episode_number,
+            episode_end_number: file.episode_end_number,
             episode_label: file.episode_label.clone(),
             error: Some("目标文件已存在且不是同一硬链接".to_string()),
         };
@@ -1963,6 +2332,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
                 status: "failed".to_string(),
                 season_number: file.season_number,
                 episode_number: file.episode_number,
+                episode_end_number: file.episode_end_number,
                 episode_label: file.episode_label.clone(),
                 error: Some(format!("创建目标目录失败: {e}")),
             };
@@ -1976,6 +2346,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             status: "linked".to_string(),
             season_number: file.season_number,
             episode_number: file.episode_number,
+            episode_end_number: file.episode_end_number,
             episode_label: file.episode_label.clone(),
             error: None,
         },
@@ -1986,6 +2357,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             status: "failed".to_string(),
             season_number: file.season_number,
             episode_number: file.episode_number,
+            episode_end_number: file.episode_end_number,
             episode_label: file.episode_label.clone(),
             error: Some(hardlink_error_message(&e)),
         },
@@ -3654,6 +4026,7 @@ mod subscription_category_tests {
                 size: 5,
                 season_number: None,
                 episode_number: None,
+                episode_end_number: None,
                 episode_label: None,
             }],
         };
@@ -3680,6 +4053,7 @@ mod subscription_category_tests {
                 size: 5,
                 season_number: None,
                 episode_number: None,
+                episode_end_number: None,
                 episode_label: None,
             }],
         };
@@ -3711,6 +4085,7 @@ mod subscription_category_tests {
                 size: 6,
                 season_number: None,
                 episode_number: None,
+                episode_end_number: None,
                 episode_label: None,
             }],
         };
@@ -3761,6 +4136,18 @@ mod subscription_category_tests {
                 progress: 1.0,
                 priority: 1,
             },
+            qbittorrent::QbTorrentFile {
+                name: "Show.Season.3.Complete.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S00E01.Special.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
         ];
         let progress = torrent_file_progress_records(&files);
         let episodes = episode_records_from_file_progress(&progress);
@@ -3770,10 +4157,152 @@ mod subscription_category_tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec!["E03", "S01E01", "S01E02", "S01E04-E05", "S02 全季"]
+            vec![
+                "E03",
+                "S00E01",
+                "S01E01",
+                "S01E02",
+                "S01E03",
+                "S01E04",
+                "S01E05",
+                "S02 全季",
+                "S03 全季"
+            ]
         );
         assert_eq!(episodes[1].status, "downloaded");
-        assert_eq!(episodes[2].status, "downloading");
+        assert_eq!(episodes[2].status, "downloaded");
+        assert_eq!(episodes[3].status, "downloading");
+        assert_eq!(episodes[4].status, "missing");
+    }
+
+    #[test]
+    fn episode_progress_expands_ranges_and_plain_episode_tokens() {
+        let files = vec![
+            qbittorrent::QbTorrentFile {
+                name: "Show/01.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show/1-3.mkv".to_string(),
+                size: 10,
+                progress: 0.5,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E04-E05.mkv".to_string(),
+                size: 10,
+                progress: 0.0,
+                priority: 1,
+            },
+        ];
+
+        let progress = torrent_file_progress_records(&files);
+        let labels = episode_records_from_file_progress(&progress)
+            .into_iter()
+            .map(|episode| (episode.label, episode.status))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                ("E01".to_string(), "duplicate".to_string()),
+                ("E02".to_string(), "downloading".to_string()),
+                ("E03".to_string(), "downloading".to_string()),
+                ("S01E04".to_string(), "pending".to_string()),
+                ("S01E05".to_string(), "pending".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn episode_progress_marks_unknown_missing_and_season_conflicts() {
+        let files = vec![
+            qbittorrent::QbTorrentFile {
+                name: "Show/ambiguous-part-a.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E01.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01E03.mkv".to_string(),
+                size: 10,
+                progress: 0.0,
+                priority: 1,
+            },
+            qbittorrent::QbTorrentFile {
+                name: "Show.S01.Complete.mkv".to_string(),
+                size: 10,
+                progress: 1.0,
+                priority: 1,
+            },
+        ];
+
+        let progress = torrent_file_progress_records(&files);
+        let by_label = episode_records_from_file_progress(&progress)
+            .into_iter()
+            .map(|episode| (episode.label, episode.status))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            by_label.get(UNKNOWN_EPISODE_LABEL),
+            Some(&"needs_review".to_string())
+        );
+        assert_eq!(by_label.get("S01 全季"), Some(&"conflict".to_string()));
+        assert_eq!(by_label.get("S01E01"), Some(&"conflict".to_string()));
+        assert_eq!(by_label.get("S01E02"), Some(&"missing".to_string()));
+        assert_eq!(by_label.get("S01E03"), Some(&"conflict".to_string()));
+    }
+
+    #[test]
+    fn episode_progress_keeps_single_movie_file_without_episode_records() {
+        let files = vec![qbittorrent::QbTorrentFile {
+            name: "Movie.2024.2160p.mkv".to_string(),
+            size: 10,
+            progress: 1.0,
+            priority: 1,
+        }];
+
+        let progress = torrent_file_progress_records(&files);
+
+        assert_eq!(progress.len(), 1);
+        assert!(progress[0].episode_label.is_none());
+        assert!(episode_records_from_file_progress(&progress).is_empty());
+    }
+
+    #[test]
+    fn hardlink_episode_records_expand_range_and_preserve_link_status() {
+        let files = vec![subscription::HardlinkFileRecord {
+            source_path: "source/Show.S01E01-E02.mkv".to_string(),
+            target_path: "target/Show.S01E01-E02.mkv".to_string(),
+            size: 10,
+            status: "linked".to_string(),
+            season_number: Some(1),
+            episode_number: Some(1),
+            episode_end_number: Some(2),
+            episode_label: Some("S01E01-E02".to_string()),
+            error: None,
+        }];
+
+        let episodes = episode_records_from_hardlink_files(&files)
+            .into_iter()
+            .map(|episode| (episode.label, episode.status, episode.linked_file_count))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            episodes,
+            vec![
+                ("S01E01".to_string(), "linked".to_string(), 1),
+                ("S01E02".to_string(), "linked".to_string(), 1),
+            ]
+        );
     }
 
     #[test]

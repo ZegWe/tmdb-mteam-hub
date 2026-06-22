@@ -1637,6 +1637,12 @@ const PUSH_STATUS_LABELS = {
   failed: "失败",
   dry_run: "预演",
   pending: "等待完成",
+  planned: "计划链接",
+  linked: "已链接",
+  missing: "缺集",
+  duplicate: "重复",
+  conflict: "冲突",
+  needs_review: "需确认",
 };
 
 function normalizedStatus(value) {
@@ -1860,6 +1866,9 @@ function renderSubscriptionDetail(record) {
         detailRow("检查时间", formatUnixSeconds(push.checked_at)),
       ].join("")
     : "";
+  const downloadSection = pushRows
+    ? `<section class="subscription-detail-section"><h4>下载</h4><dl class="detail-meta">${pushRows}</dl></section>`
+    : '<section class="subscription-detail-section"><h4>下载</h4><p class="empty-hint">尚未推送，暂无下载进度</p></section>';
   const completionRows = completion
     ? [
         detailRow("链接状态", PUSH_STATUS_LABELS[normalizedStatus(completion.status)] || completion.status),
@@ -1881,7 +1890,7 @@ function renderSubscriptionDetail(record) {
       ${push ? `<button type="button" class="btn primary" data-sub-action="completion" data-subscription-id="${escapeHtml(record.subject_id)}">检查完成并硬链接</button>` : ""}
     </div>
     ${record.last_error ? `<p class="subscription-detail-error">${escapeHtml(record.last_error)}</p>` : ""}
-    ${pushRows ? `<section class="subscription-detail-section"><h4>下载</h4><dl class="detail-meta">${pushRows}</dl></section>` : ""}
+    ${downloadSection}
     ${renderSubscriptionEpisodeRows((completion?.episodes?.length ? completion.episodes : push?.episodes) || [])}
     ${completionRows ? `<section class="subscription-detail-section"><h4>硬链接</h4><dl class="detail-meta">${completionRows}</dl></section>` : ""}
     ${renderSubscriptionFileRows(push?.files || [])}

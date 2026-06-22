@@ -152,6 +152,8 @@ pub struct TorrentFileProgressRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_end_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode_label: Option<String>,
 }
 
@@ -184,6 +186,8 @@ pub struct HardlinkFileRecord {
     pub season_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_end_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
