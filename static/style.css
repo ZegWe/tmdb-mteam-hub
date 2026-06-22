@@ -27,6 +27,69 @@ body {
   line-height: 1.5;
 }
 
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.side-nav {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  min-height: 100vh;
+  padding: 1.25rem 0.9rem;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 650;
+}
+
+.brand .sub {
+  font-size: 0.78rem;
+}
+
+.nav-list {
+  margin-top: 1.25rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.nav-item {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+
+.nav-item:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.nav-item.is-active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  border-color: var(--accent-dim);
+}
+
+.app-content {
+  min-width: 0;
+}
+
+.app-page {
+  min-height: 100vh;
+}
+
 .top {
   padding: 1.5rem 1.5rem 0.5rem;
   border-bottom: 1px solid var(--border);
@@ -543,7 +606,8 @@ a.tag:hover {
   font-size: 0.82rem;
 }
 
-.douban-tag-input input {
+.douban-tag-input input,
+.douban-tag-input select {
   width: 100%;
   padding: 0.44rem 0.55rem;
   border-radius: 6px;
@@ -552,7 +616,8 @@ a.tag:hover {
   color: var(--text);
 }
 
-.douban-tag-input input:focus {
+.douban-tag-input input:focus,
+.douban-tag-input select:focus {
   outline: 2px solid var(--accent-dim);
   outline-offset: 2px;
 }
@@ -844,17 +909,6 @@ a.torrent-card-link:visited {
   white-space: nowrap;
 }
 
-.modal-bg {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  z-index: 50;
-}
-
-.modal-bg.hidden {
-  display: none;
-}
-
 .modal {
   position: fixed;
   top: 50%;
@@ -885,9 +939,27 @@ a.torrent-card-link:visited {
   font-size: 1.15rem;
 }
 
-#settings-form,
 #qb-push-form {
   padding: 1.25rem;
+}
+
+.settings-page-form {
+  max-width: 1120px;
+  padding: 1rem 1.5rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-section {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.settings-section h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
 }
 
 #settings-form label,
@@ -899,6 +971,7 @@ a.torrent-card-link:visited {
 
 #settings-form input,
 #settings-form textarea,
+#settings-form select,
 #qb-push-form input,
 #qb-push-form select {
   width: 100%;
@@ -957,19 +1030,19 @@ a.torrent-card-link:visited {
   border-radius: 8px;
 }
 
+.subscription-categories-fieldset,
 .qb-servers-fieldset {
-  margin-top: 0.85rem;
-  padding: 0.65rem 0.85rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  margin-top: 0;
 }
 
+.subscription-categories-fieldset legend,
 .qb-servers-fieldset legend {
   padding: 0 0.25rem;
   font-size: 0.88rem;
   font-weight: 600;
 }
 
+.subscription-categories-list,
 .qb-servers-list {
   margin-top: 0.5rem;
   display: flex;
@@ -977,6 +1050,7 @@ a.torrent-card-link:visited {
   gap: 0.75rem;
 }
 
+.subscription-category-row,
 .qb-server-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -987,6 +1061,7 @@ a.torrent-card-link:visited {
   background: var(--bg);
 }
 
+.subscription-category-row label,
 .qb-server-row label {
   display: flex;
   flex-direction: column;
@@ -995,6 +1070,7 @@ a.torrent-card-link:visited {
   color: var(--muted);
 }
 
+.subscription-category-row input[type="text"],
 .qb-server-row input[type="text"],
 .qb-server-row input[type="password"] {
   width: 100%;
@@ -1004,6 +1080,19 @@ a.torrent-card-link:visited {
   background: var(--surface);
   color: var(--text);
   font-size: 0.85rem;
+}
+
+.subscription-category-row .subscription-category-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.subscription-category-row .subscription-category-actions .hint {
+  flex: 1 1 280px;
 }
 
 .qb-server-row .qb-row-actions {
@@ -1082,6 +1171,32 @@ code {
 }
 
 @media (max-width: 640px) {
+  .app-shell {
+    display: block;
+  }
+
+  .side-nav {
+    position: sticky;
+    z-index: 20;
+    min-height: 0;
+    padding: 0.75rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .brand {
+    display: none;
+  }
+
+  .nav-list {
+    margin-top: 0;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .nav-item {
+    text-align: center;
+  }
+
   .library-bar {
     align-items: stretch;
     flex-direction: column;
@@ -1089,5 +1204,10 @@ code {
 
   .library-bar .btn {
     width: 100%;
+  }
+
+  .subscription-category-row,
+  .qb-server-row {
+    grid-template-columns: 1fr;
   }
 }

@@ -3,7 +3,7 @@ mod douban;
 mod qbittorrent;
 mod tmdb_cache;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use config::{FileConfig, QbServerEntry};
+use config::{FileConfig, QbServerEntry, SubscriptionCategory};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tmdb_cache::TmdbDiskCache;
@@ -179,6 +179,7 @@ async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
         "mteam_api_key": cfg.mteam_api_key,
         "douban_cookie": cfg.douban_cookie,
         "qb_servers": cfg.qb_servers,
+        "subscription_categories": cfg.subscription_categories,
     }))
 }
 
@@ -194,6 +195,8 @@ struct PutConfigBody {
     douban_cookie: String,
     #[serde(default)]
     qb_servers: Vec<QbServerEntry>,
+    #[serde(default)]
+    subscription_categories: Option<Vec<SubscriptionCategory>>,
 }
 
 async fn put_config(
@@ -211,6 +214,10 @@ async fn put_config(
     new_cfg.mteam_api_key = body.mteam_api_key;
     new_cfg.douban_cookie = douban::normalize_cookie_header(&body.douban_cookie);
     new_cfg.qb_servers = body.qb_servers;
+    if let Some(subscription_categories) = body.subscription_categories {
+        new_cfg.subscription_categories =
+            normalize_subscription_categories(subscription_categories)?;
+    }
     new_cfg
         .listen_addr()
         .map_err(|e| ApiError::bad_request(format!("监听地址配置无效: {e}")))?;
@@ -219,6 +226,108 @@ async fn put_config(
         .map_err(|e| ApiError::internal(format!("写入配置失败: {e}")))?;
     *state.config.write().await = new_cfg;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn normalize_subscription_categories(
+    categories: Vec<SubscriptionCategory>,
+) -> Result<Vec<SubscriptionCategory>, ApiError> {
+    let mut out = Vec::new();
+    let mut names = HashSet::new();
+    let mut wanted_tags = HashSet::new();
+
+    for (idx, category) in categories.into_iter().enumerate() {
+        let n = idx + 1;
+        let normalized = SubscriptionCategory {
+            name: category.name.trim().to_string(),
+            wanted_tag: category.wanted_tag.trim().to_string(),
+            qb_category: category.qb_category.trim().to_string(),
+            qb_save_dir_name: category.qb_save_dir_name.trim().to_string(),
+            download_dir: category.download_dir.trim().to_string(),
+            link_target_dir: category.link_target_dir.trim().to_string(),
+        };
+
+        if normalized.name.is_empty() {
+            return Err(ApiError::bad_request(format!("订阅分类 #{n} 缺少分类名")));
+        }
+        if normalized.wanted_tag.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 缺少想看标签文本",
+                normalized.name
+            )));
+        }
+        if normalized.wanted_tag.split_whitespace().count() != 1 {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 的想看标签不能包含空白字符",
+                normalized.name
+            )));
+        }
+        if normalized.qb_category.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 缺少 qB 下载分类",
+                normalized.name
+            )));
+        }
+        if normalized.qb_save_dir_name.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 缺少 qB 保存目录名",
+                normalized.name
+            )));
+        }
+        if normalized.download_dir.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 缺少真实下载目录",
+                normalized.name
+            )));
+        }
+        if normalized.link_target_dir.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 缺少硬链接目标目录",
+                normalized.name
+            )));
+        }
+        if !names.insert(normalized.name.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类名重复: {}",
+                normalized.name
+            )));
+        }
+        if !wanted_tags.insert(normalized.wanted_tag.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "想看标签文本重复: {}",
+                normalized.wanted_tag
+            )));
+        }
+        out.push(normalized);
+    }
+
+    Ok(out)
+}
+
+fn normalize_wanted_tag_from_categories(
+    raw: &str,
+    categories: &[SubscriptionCategory],
+) -> Result<String, ApiError> {
+    if categories.is_empty() {
+        return Err(ApiError::bad_request("请先在设置中配置订阅分类"));
+    }
+    let parts = raw
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() != 1 {
+        return Err(ApiError::bad_request("标记想看时必须选择一个订阅分类"));
+    }
+    let selected = parts[0];
+    if categories
+        .iter()
+        .any(|category| category.wanted_tag.trim() == selected)
+    {
+        return Ok(selected.to_string());
+    }
+    Err(ApiError::bad_request(format!(
+        "标记想看的标签必须来自订阅分类: {selected}"
+    )))
 }
 
 async fn qb_test(Json(server): Json<QbServerEntry>) -> Result<Json<Value>, ApiError> {
@@ -618,11 +727,12 @@ async fn douban_tag_history(
     State(state): State<AppState>,
     Query(q): Query<DoubanTagHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let cookie = state.config.read().await.douban_cookie.clone();
+    let cfg = state.config.read().await.clone();
+    let cookie = cfg.douban_cookie.clone();
     let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
     let limit = q.limit.clamp(1, 1200);
     let mut value = load_douban_tag_history_value(&state, &account_key).await;
-    truncate_douban_tag_history(&mut value, limit);
+    constrain_douban_tag_history(&mut value, &cfg.subscription_categories, limit);
     Ok(Json(value))
 }
 
@@ -666,9 +776,15 @@ async fn douban_mark_interest(
     PathParam(id): PathParam<String>,
     Json(body): Json<DoubanMarkInterestBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let cookie = state.config.read().await.douban_cookie.clone();
+    let cfg = state.config.read().await.clone();
+    let cookie = cfg.douban_cookie.clone();
     let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
-    let result = douban::mark_interest(&cookie, &id, body.interest, body.rating, &body.tags)
+    let tags = if matches!(body.interest, douban::DoubanInterest::Wish) {
+        normalize_wanted_tag_from_categories(&body.tags, &cfg.subscription_categories)?
+    } else {
+        body.tags
+    };
+    let result = douban::mark_interest(&cookie, &id, body.interest, body.rating, &tags)
         .await
         .map_err(ApiError::douban)?;
     if let Err(e) = state
@@ -712,6 +828,74 @@ fn truncate_douban_tag_history(value: &mut Value, limit: usize) {
     }
     if let Some(obj) = value.as_object_mut() {
         obj.insert("cached".to_string(), Value::Bool(true));
+    }
+}
+
+fn constrain_douban_tag_history(
+    value: &mut Value,
+    categories: &[SubscriptionCategory],
+    limit: usize,
+) {
+    if categories.is_empty() {
+        truncate_douban_tag_history(value, 0);
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "subscription_categories".to_string(),
+                Value::Array(Vec::new()),
+            );
+        }
+        return;
+    }
+
+    let mut counts = HashMap::<String, u64>::new();
+    if let Some(tag_counts) = value.get("tag_counts").and_then(|v| v.as_array()) {
+        for item in tag_counts {
+            let Some(tag) = item.get("tag").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let count = item.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
+            counts.insert(tag.trim().to_string(), count.max(1));
+        }
+    }
+
+    let mut rows = categories
+        .iter()
+        .filter_map(|category| {
+            let tag = category.wanted_tag.trim();
+            if tag.is_empty() {
+                return None;
+            }
+            Some((
+                tag.to_string(),
+                counts.get(tag).copied().unwrap_or(0),
+                category.name.trim().to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|(tag_a, count_a, name_a), (tag_b, count_b, name_b)| {
+        count_b
+            .cmp(count_a)
+            .then_with(|| name_a.cmp(name_b))
+            .then_with(|| tag_a.cmp(tag_b))
+    });
+    rows.truncate(limit);
+
+    let tags = rows
+        .iter()
+        .map(|(tag, _, _)| Value::String(tag.clone()))
+        .collect::<Vec<_>>();
+    let tag_counts = rows
+        .iter()
+        .map(|(tag, count, name)| json!({ "tag": tag, "count": count, "category": name }))
+        .collect::<Vec<_>>();
+    let categories_value =
+        serde_json::to_value(categories).unwrap_or_else(|_| Value::Array(vec![]));
+
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("cached".to_string(), Value::Bool(true));
+        obj.insert("tags".to_string(), Value::Array(tags));
+        obj.insert("tag_counts".to_string(), Value::Array(tag_counts));
+        obj.insert("subscription_categories".to_string(), categories_value);
     }
 }
 
@@ -1215,6 +1399,75 @@ fn normalize_douban_url(s: &str) -> String {
         .trim()
         .trim_start_matches("subject/");
     format!("https://movie.douban.com/subject/{tail}/")
+}
+
+#[cfg(test)]
+mod subscription_category_tests {
+    use super::*;
+
+    fn category(name: &str, wanted_tag: &str) -> SubscriptionCategory {
+        SubscriptionCategory {
+            name: name.to_string(),
+            wanted_tag: wanted_tag.to_string(),
+            qb_category: format!("qb-{name}"),
+            qb_save_dir_name: format!("save-{name}"),
+            download_dir: format!("/downloads/{name}"),
+            link_target_dir: format!("/media/{name}"),
+        }
+    }
+
+    #[test]
+    fn subscription_categories_reject_duplicate_wanted_tags() {
+        let res = normalize_subscription_categories(vec![
+            category("电影", "影视"),
+            category("剧集", "影视"),
+        ]);
+        assert!(matches!(res, Err(ApiError::BadRequest { .. })));
+    }
+
+    #[test]
+    fn wanted_tag_must_match_one_configured_category() {
+        let categories = vec![category("电影", "电影"), category("剧集", "剧集")];
+        let Ok(selected) = normalize_wanted_tag_from_categories("电影", &categories) else {
+            panic!("configured wanted tag should be accepted");
+        };
+        assert_eq!(selected, "电影");
+        assert!(matches!(
+            normalize_wanted_tag_from_categories("电影 剧集", &categories),
+            Err(ApiError::BadRequest { .. })
+        ));
+        assert!(matches!(
+            normalize_wanted_tag_from_categories("纪录片", &categories),
+            Err(ApiError::BadRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn douban_tag_history_is_constrained_to_subscription_categories() {
+        let mut value = json!({
+            "source": "local-cache",
+            "cached": true,
+            "tags": ["外部"],
+            "tag_counts": [
+                { "tag": "剧集", "count": 5 },
+                { "tag": "外部", "count": 99 },
+                { "tag": "电影", "count": 2 }
+            ],
+        });
+        constrain_douban_tag_history(
+            &mut value,
+            &[category("电影", "电影"), category("剧集", "剧集")],
+            10,
+        );
+        let tags = value
+            .get("tags")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(tags, vec!["剧集", "电影"]);
+    }
 }
 
 pub(crate) enum ApiError {

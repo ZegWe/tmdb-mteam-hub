@@ -18,3 +18,13 @@ douban_cookie = ""
 # username = "admin"
 # password = ""
 # insecure_tls = false
+
+# 订阅分类。`wanted_tag` 是标记豆瓣“想看”时唯一允许选择的文本；
+# 后续自动推送 qB 和硬链接任务会复用这里的 qB 分类/目录字段。
+# [[subscription_categories]]
+# name = "电影"
+# wanted_tag = "电影"
+# qb_category = "movie"
+# qb_save_dir_name = "movies"
+# download_dir = "/downloads/movies"
+# link_target_dir = "/media/movies"

@@ -14,6 +14,22 @@ pub struct QbServerEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionCategory {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub wanted_tag: String,
+    #[serde(default)]
+    pub qb_category: String,
+    #[serde(default)]
+    pub qb_save_dir_name: String,
+    #[serde(default)]
+    pub download_dir: String,
+    #[serde(default)]
+    pub link_target_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileConfig {
     #[serde(default = "default_listen_ip")]
     pub listen_ip: String,
@@ -27,6 +43,8 @@ pub struct FileConfig {
     pub douban_cookie: String,
     #[serde(default)]
     pub qb_servers: Vec<QbServerEntry>,
+    #[serde(default)]
+    pub subscription_categories: Vec<SubscriptionCategory>,
 }
 
 fn default_listen_ip() -> String {
@@ -46,6 +64,7 @@ impl Default for FileConfig {
             mteam_api_key: String::new(),
             douban_cookie: String::new(),
             qb_servers: Vec::new(),
+            subscription_categories: Vec::new(),
         }
     }
 }

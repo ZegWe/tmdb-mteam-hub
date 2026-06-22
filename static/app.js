@@ -2,8 +2,11 @@ const IMG_BASE = "https://image.tmdb.org/t/p/w342";
 
 /** @type {{ name?: string, base_url?: string, username?: string, password?: string, insecure_tls?: boolean }[] | null} */
 let qbServersCache = null;
+/** @type {{ name?: string, wanted_tag?: string, qb_category?: string, qb_save_dir_name?: string, download_dir?: string, link_target_dir?: string }[] | null} */
+let subscriptionCategoriesCache = null;
 let searchSource = "tmdb";
 let currentView = "search";
+let currentAppPage = "main";
 let doubanQrTimer = null;
 let doubanQrSessionId = "";
 let doubanTagHistoryCache = null;
@@ -87,6 +90,17 @@ async function resolveQbServers() {
   return qbServersCache;
 }
 
+async function resolveSubscriptionCategories() {
+  if (subscriptionCategoriesCache) return subscriptionCategoriesCache;
+  try {
+    const c = await api("/api/config");
+    subscriptionCategoriesCache = Array.isArray(c.subscription_categories) ? c.subscription_categories : [];
+  } catch {
+    subscriptionCategoriesCache = [];
+  }
+  return subscriptionCategoriesCache;
+}
+
 function setSearchLoading(on, text = "正在搜索…") {
   const overlay = $("#layout-loading");
   const btn = $("#btn-search");
@@ -138,6 +152,23 @@ function setResultSectionsForLibrary() {
   if (moviesTitle) moviesTitle.textContent = "想看";
   if (tvTitle) tvTitle.textContent = "看过";
   if (tvSection) tvSection.classList.remove("hidden");
+}
+
+function setAppPage(page) {
+  currentAppPage = page === "settings" ? "settings" : "main";
+  for (const section of document.querySelectorAll(".app-page")) {
+    const active = section.id === `page-${currentAppPage}`;
+    section.classList.toggle("hidden", !active);
+    section.classList.toggle("is-active", active);
+  }
+  for (const btn of document.querySelectorAll("[data-app-page-target]")) {
+    const active = btn.dataset.appPageTarget === currentAppPage;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-current", active ? "page" : "false");
+  }
+  if (currentAppPage === "settings") {
+    $("#detail")?.classList.add("is-off");
+  }
 }
 
 async function api(path, opts = {}) {
@@ -411,7 +442,7 @@ function renderDoubanInterestPanel(doubanId, currentInterest = "", currentRating
   const interest = currentInterest === "wish" || currentInterest === "collect" ? currentInterest : "";
   const rating = currentRating != null ? String(currentRating) : "";
   const tags = normalizeDoubanTags(currentTags);
-  return `<section class="douban-mark-panel" data-douban-id="${escapeHtml(String(doubanId))}" data-interest="${escapeHtml(interest)}">
+  return `<section class="douban-mark-panel" data-douban-id="${escapeHtml(String(doubanId))}" data-interest="${escapeHtml(interest)}" data-current-tags="${escapeHtml(tags)}">
     <div class="douban-mark-head">
       <h4>豆瓣标记</h4>
       <span class="douban-mark-status subtle" aria-live="polite">${
@@ -437,7 +468,8 @@ function renderDoubanInterestPanel(doubanId, currentInterest = "", currentRating
       <button type="button" class="btn btn-mini primary" data-douban-mark-save>保存</button>
     </div>
     <label class="douban-tag-input">
-      <span>标签</span>
+      <span data-douban-tag-label>标签</span>
+      <select data-douban-category></select>
       <input type="text" data-douban-tags autocomplete="off" spellcheck="false" placeholder="可选，例如：想补、冷门、家人一起看" value="${escapeHtml(tags)}" />
     </label>
     <div class="douban-tag-history hidden" data-douban-tag-history aria-live="polite"></div>
@@ -479,8 +511,12 @@ async function loadDoubanTagHistory(forceRefresh = false) {
 function rememberDoubanTags(tagsText) {
   const tags = normalizeDoubanTags(tagsText).split(/\s+/).filter(Boolean);
   if (!tags.length) return;
+  const allowed = new Set((subscriptionCategoriesCache || []).map((category) => String(category.wanted_tag || "").trim()).filter(Boolean));
+  if (!allowed.size) return;
+  const allowedTags = tags.filter((tag) => allowed.has(tag));
+  if (!allowedTags.length) return;
   const existing = Array.isArray(doubanTagHistoryCache) ? doubanTagHistoryCache : [];
-  doubanTagHistoryCache = [...tags, ...existing.filter((tag) => !tags.includes(tag))];
+  doubanTagHistoryCache = [...allowedTags, ...existing.filter((tag) => !allowedTags.includes(tag))];
 }
 
 function renderDoubanTagHistory(root, tags) {
@@ -504,12 +540,20 @@ function renderDoubanTagHistory(root, tags) {
 function setupDoubanTagHistory(root) {
   const box = root?.querySelector("[data-douban-tag-history]");
   const input = root?.querySelector("[data-douban-tags]");
-  if (!box || !input) return;
+  const select = root?.querySelector("[data-douban-category]");
+  if (!box || (!input && !select)) return;
   box.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-douban-tag-suggestion]");
     if (!btn) return;
-    input.value = mergeDoubanTagText(input.value, btn.dataset.doubanTagSuggestion || "");
-    input.focus();
+    const tag = btn.dataset.doubanTagSuggestion || "";
+    if (root.dataset.interest === "wish" && select) {
+      select.value = tag;
+      select.focus();
+      applyDoubanInterestState(root, "wish");
+    } else if (input) {
+      input.value = mergeDoubanTagText(input.value, tag);
+      input.focus();
+    }
   });
   loadDoubanTagHistory()
     .then((tags) => renderDoubanTagHistory(root, tags))
@@ -519,12 +563,62 @@ function setupDoubanTagHistory(root) {
     });
 }
 
+function renderDoubanCategorySelect(root, categories) {
+  const select = root?.querySelector("[data-douban-category]");
+  if (!select) return;
+  const currentTags = normalizeDoubanTags(root.dataset.currentTags || "");
+  const currentFirst = currentTags.split(/\s+/).filter(Boolean)[0] || "";
+  const rows = Array.isArray(categories) ? categories.filter((category) => String(category.wanted_tag || "").trim()) : [];
+  select.innerHTML = "";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = rows.length ? "选择订阅分类" : "未配置订阅分类";
+  select.appendChild(blank);
+  let hasCurrent = !currentFirst;
+  for (const category of rows) {
+    const tag = String(category.wanted_tag || "").trim();
+    const opt = document.createElement("option");
+    opt.value = tag;
+    opt.textContent = `${category.name || tag} · ${tag}`;
+    if (tag === currentFirst) hasCurrent = true;
+    select.appendChild(opt);
+  }
+  if (!hasCurrent) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = `未配置：${currentFirst}`;
+    opt.disabled = true;
+    opt.selected = true;
+    select.appendChild(opt);
+  } else {
+    select.value = currentFirst;
+  }
+}
+
+function setupDoubanCategorySelect(root) {
+  const select = root?.querySelector("[data-douban-category]");
+  if (!select) return;
+  select.addEventListener("change", () => applyDoubanInterestState(root, root.dataset.interest || ""));
+  resolveSubscriptionCategories()
+    .then((categories) => {
+      renderDoubanCategorySelect(root, categories);
+      applyDoubanInterestState(root, root.dataset.interest || "");
+    })
+    .catch(() => {
+      renderDoubanCategorySelect(root, []);
+      applyDoubanInterestState(root, root.dataset.interest || "");
+    });
+}
+
 function applyDoubanInterestState(root, interest, currentRating = null) {
   if (!root) return;
   const normalized = interest === "wish" || interest === "collect" ? interest : "";
   const buttons = [...root.querySelectorAll("[data-douban-interest]")];
   const rating = root.querySelector("[data-douban-rating]");
   const ratingLabel = rating?.closest(".douban-rating-select");
+  const tagLabel = root.querySelector("[data-douban-tag-label]");
+  const tagInput = root.querySelector("[data-douban-tags]");
+  const categorySelect = root.querySelector("[data-douban-category]");
   const save = root.querySelector("[data-douban-mark-save]");
   root.dataset.interest = normalized;
   for (const btn of buttons) {
@@ -541,7 +635,17 @@ function applyDoubanInterestState(root, interest, currentRating = null) {
       rating.value = "";
     }
   }
-  if (save) save.disabled = !normalized;
+  if (tagLabel) tagLabel.textContent = normalized === "wish" ? "订阅分类" : "标签";
+  if (categorySelect) {
+    const hasCategoryOption = [...categorySelect.options].some((option) => option.value && !option.disabled);
+    categorySelect.classList.toggle("hidden", normalized !== "wish");
+    categorySelect.disabled = normalized !== "wish" || !hasCategoryOption;
+  }
+  if (tagInput) {
+    tagInput.classList.toggle("hidden", normalized === "wish");
+    tagInput.disabled = normalized === "wish";
+  }
+  if (save) save.disabled = !normalized || (normalized === "wish" && !categorySelect?.value);
 }
 
 function setupDoubanInterestPanel(root) {
@@ -549,6 +653,7 @@ function setupDoubanInterestPanel(root) {
   const buttons = [...root.querySelectorAll("[data-douban-interest]")];
   const rating = root.querySelector("[data-douban-rating]");
   const tags = root.querySelector("[data-douban-tags]");
+  const category = root.querySelector("[data-douban-category]");
   const save = root.querySelector("[data-douban-mark-save]");
   const status = root.querySelector(".douban-mark-status");
 
@@ -559,6 +664,7 @@ function setupDoubanInterestPanel(root) {
     });
   });
   applyDoubanInterestState(root, root.dataset.interest || "", rating?.value || null);
+  setupDoubanCategorySelect(root);
   setupDoubanTagHistory(root);
 
   save?.addEventListener("click", async () => {
@@ -573,7 +679,10 @@ function setupDoubanInterestPanel(root) {
     if (status) status.textContent = "保存中…";
     try {
       const ratingValue = rating && !rating.disabled && rating.value ? Number(rating.value) : undefined;
-      const tagsValue = normalizeDoubanTags(tags?.value || "");
+      const tagsValue = interest === "wish" ? normalizeDoubanTags(category?.value || "") : normalizeDoubanTags(tags?.value || "");
+      if (interest === "wish" && !tagsValue) {
+        throw new Error("请选择订阅分类");
+      }
       await api(`/api/douban/subject/${encodeURIComponent(doubanId)}/interest`, {
         method: "POST",
         body: JSON.stringify({
@@ -1202,6 +1311,75 @@ function collectQbServersFromDom() {
     .filter((x) => x.base_url !== "");
 }
 
+function subscriptionCategoryPayloadFromRow(row) {
+  return {
+    name: row.querySelector('[data-sub-cat="name"]')?.value?.trim() ?? "",
+    wanted_tag: row.querySelector('[data-sub-cat="wanted_tag"]')?.value?.trim() ?? "",
+    qb_category: row.querySelector('[data-sub-cat="qb_category"]')?.value?.trim() ?? "",
+    qb_save_dir_name: row.querySelector('[data-sub-cat="qb_save_dir_name"]')?.value?.trim() ?? "",
+    download_dir: row.querySelector('[data-sub-cat="download_dir"]')?.value?.trim() ?? "",
+    link_target_dir: row.querySelector('[data-sub-cat="link_target_dir"]')?.value?.trim() ?? "",
+  };
+}
+
+function categoryPayloadHasAnyValue(category) {
+  return Object.values(category).some((value) => String(value || "").trim() !== "");
+}
+
+function makeSubscriptionCategoryRowEl(category = {}) {
+  const row = document.createElement("div");
+  row.className = "subscription-category-row";
+  row.innerHTML = `
+    <label>分类名<input type="text" data-sub-cat="name" placeholder="如 电影" /></label>
+    <label>想看文本<input type="text" data-sub-cat="wanted_tag" placeholder="如 电影" /></label>
+    <label>qB 下载分类<input type="text" data-sub-cat="qb_category" placeholder="如 movie" /></label>
+    <label>qB 保存目录名<input type="text" data-sub-cat="qb_save_dir_name" placeholder="如 movies" /></label>
+    <label>真实下载目录<input type="text" data-sub-cat="download_dir" placeholder="/downloads/movies" /></label>
+    <label>硬链接目标目录<input type="text" data-sub-cat="link_target_dir" placeholder="/media/movies" /></label>
+    <div class="subscription-category-actions">
+      <p class="hint subtle">修改想看文本后，已有订阅记录可能仍保留旧文本；后续状态迁移需按订阅记录处理。</p>
+      <button type="button" class="btn btn-mini subscription-category-remove">移除</button>
+    </div>`;
+
+  row.querySelector('[data-sub-cat="name"]').value = category.name ?? "";
+  row.querySelector('[data-sub-cat="wanted_tag"]').value = category.wanted_tag ?? "";
+  row.querySelector('[data-sub-cat="qb_category"]').value = category.qb_category ?? "";
+  row.querySelector('[data-sub-cat="qb_save_dir_name"]').value = category.qb_save_dir_name ?? "";
+  row.querySelector('[data-sub-cat="download_dir"]').value = category.download_dir ?? "";
+  row.querySelector('[data-sub-cat="link_target_dir"]').value = category.link_target_dir ?? "";
+
+  row.querySelector(".subscription-category-remove")?.addEventListener("click", () => {
+    row.remove();
+    const list = $("#subscription-categories-list");
+    if (list && !list.querySelector(".subscription-category-row")) {
+      list.innerHTML = '<p class="subtle subscription-category-empty">未配置订阅分类，可点下方「添加分类」</p>';
+    }
+  });
+  return row;
+}
+
+function renderSubscriptionCategoriesEditor(categories) {
+  const list = $("#subscription-categories-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const arr = Array.isArray(categories) ? categories : [];
+  if (!arr.length) {
+    list.innerHTML = '<p class="subtle subscription-category-empty">未配置订阅分类，可点下方「添加分类」</p>';
+    return;
+  }
+  for (const category of arr) {
+    list.appendChild(makeSubscriptionCategoryRowEl(category));
+  }
+}
+
+function collectSubscriptionCategoriesFromDom() {
+  const list = $("#subscription-categories-list");
+  if (!list) return [];
+  return [...list.querySelectorAll(".subscription-category-row")]
+    .map((row) => subscriptionCategoryPayloadFromRow(row))
+    .filter(categoryPayloadHasAnyValue);
+}
+
 function clearDoubanQrTimer() {
   if (doubanQrTimer) {
     clearInterval(doubanQrTimer);
@@ -1366,19 +1544,12 @@ async function runSearch() {
 }
 
 function openSettings() {
-  $("#modal-bg").classList.remove("hidden");
-  $("#settings").showModal?.();
-  if (!document.getElementById("settings").open) {
-    document.getElementById("settings").setAttribute("open", "");
-  }
+  setAppPage("settings");
 }
 
 function closeSettings() {
   resetDoubanQrUi();
-  $("#modal-bg").classList.add("hidden");
-  const d = $("#settings");
-  if (d.close) d.close();
-  else d.removeAttribute("open");
+  setAppPage("main");
 }
 
 async function loadSettings() {
@@ -1387,6 +1558,8 @@ async function loadSettings() {
     $("#f-tmdb").value = c.tmdb_api_key || "";
     $("#f-mteam").value = c.mteam_api_key || "";
     $("#f-douban-cookie").value = c.douban_cookie || "";
+    renderSubscriptionCategoriesEditor(c.subscription_categories);
+    subscriptionCategoriesCache = Array.isArray(c.subscription_categories) ? c.subscription_categories : [];
     renderQbServersEditor(c.qb_servers);
     qbServersCache = Array.isArray(c.qb_servers) ? c.qb_servers : [];
   } catch {
@@ -1399,16 +1572,22 @@ $("#q").addEventListener("keydown", (e) => {
   if (e.key === "Enter") runSearch();
 });
 $("#btn-douban-library")?.addEventListener("click", () => {
+  setAppPage("main");
   loadDoubanLibrary(true).catch(() => {});
 });
 $("#btn-douban-library-refresh")?.addEventListener("click", () => {
   loadDoubanLibrary(true).catch(() => {});
 });
-$("#btn-settings").addEventListener("click", async () => {
-  await loadSettings();
-  openSettings();
+document.querySelectorAll("[data-app-page-target]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    if (btn.dataset.appPageTarget === "settings") {
+      await loadSettings();
+      openSettings();
+    } else {
+      closeSettings();
+    }
+  });
 });
-$("#modal-bg").addEventListener("click", closeSettings);
 $("#btn-cancel-settings").addEventListener("click", closeSettings);
 
 $("#btn-qb-add")?.addEventListener("click", () => {
@@ -1416,6 +1595,13 @@ $("#btn-qb-add")?.addEventListener("click", () => {
   if (!list) return;
   list.querySelector(".qb-empty")?.remove();
   list.appendChild(makeQbServerRowEl({}));
+});
+
+$("#btn-subscription-category-add")?.addEventListener("click", () => {
+  const list = $("#subscription-categories-list");
+  if (!list) return;
+  list.querySelector(".subscription-category-empty")?.remove();
+  list.appendChild(makeSubscriptionCategoryRowEl({}));
 });
 
 document.querySelectorAll("[data-search-source]").forEach((btn) => {
@@ -1479,6 +1665,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   const mteam = $("#f-mteam").value;
   const doubanCookie = $("#f-douban-cookie").value;
   const qbServers = collectQbServersFromDom();
+  const subscriptionCategories = collectSubscriptionCategoriesFromDom();
   const submitBtn = e.target.querySelector('button[type="submit"]');
   if (submitBtn) submitBtn.disabled = true;
   try {
@@ -1489,9 +1676,12 @@ $("#settings-form").addEventListener("submit", async (e) => {
         mteam_api_key: mteam,
         douban_cookie: doubanCookie,
         qb_servers: qbServers,
+        subscription_categories: subscriptionCategories,
       }),
     });
     qbServersCache = qbServers;
+    subscriptionCategoriesCache = subscriptionCategories;
+    doubanTagHistoryCache = null;
     closeSettings();
   } catch (err) {
     showErr(err.message);
