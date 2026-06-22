@@ -398,6 +398,28 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn update_sync_error(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        status: WantedSubscriptionStatus,
+        error: String,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        record.status = status;
+        record.last_error = (!error.trim().is_empty()).then_some(error);
+        record.updated_at = now;
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state).await?;
+        Ok(Some(record))
+    }
+
     pub async fn update_push_record(
         &self,
         account_key: &str,

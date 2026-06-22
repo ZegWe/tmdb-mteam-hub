@@ -710,6 +710,7 @@ async fn wanted_subscription_completion(
     Json(body): Json<WantedCompletionBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    let now = unix_now_secs();
     if matches!(
         record.status,
         subscription::WantedSubscriptionStatus::Completed
@@ -724,32 +725,107 @@ async fn wanted_subscription_completion(
     }
 
     let category = category_for_wanted_record(&record, &cfg.subscription_categories)?.clone();
-    let mut push = record
-        .last_push
-        .clone()
-        .ok_or_else(|| ApiError::bad_request("订阅记录缺少 qB pushed record"))?;
+    let mut push = match record.last_push.clone() {
+        Some(push) => push,
+        None => {
+            let error = "订阅记录缺少 qB pushed record".to_string();
+            persist_subscription_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                subscription::WantedSubscriptionStatus::Failed,
+                error.clone(),
+                now,
+            )
+            .await?;
+            return Err(ApiError::bad_request(error));
+        }
+    };
     if push.status == "failed" && !body.force {
-        return Err(ApiError::bad_request(
-            "最后一次 qB push 已失败；需要重新检查请传 force=true",
-        ));
+        let error = "最后一次 qB push 已失败；需要重新检查请传 force=true".to_string();
+        persist_completion_sync_error(&state, &account_key, &record.subject_id, push, &error, now)
+            .await?;
+        return Err(ApiError::bad_request(error));
     }
     if push.torrent_id.trim().is_empty() && body.qb_hash.as_deref().unwrap_or("").trim().is_empty()
     {
-        return Err(ApiError::bad_request(
-            "pushed record 缺少种子 id，且未提供 qb_hash",
-        ));
+        let error = "pushed record 缺少种子 id，且未提供 qb_hash".to_string();
+        persist_completion_sync_error(&state, &account_key, &record.subject_id, push, &error, now)
+            .await?;
+        return Err(ApiError::bad_request(error));
     }
 
-    let qb_server = select_qb_server(
+    let qb_server = match select_qb_server(
         &cfg.qb_servers,
         body.qb_server_name
             .as_deref()
             .or(Some(push.qb_server.as_str())),
-    )?;
-    let torrents = qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await?;
-    let qb_torrent = select_qb_torrent(&torrents, &push, body.qb_hash.as_deref())?;
-    let now = unix_now_secs();
-    let qb_files = qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await?;
+    ) {
+        Ok(qb_server) => qb_server,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_completion_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let torrents = match qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await {
+        Ok(torrents) => torrents,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_completion_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let qb_torrent = match select_qb_torrent(&torrents, &push, body.qb_hash.as_deref()) {
+        Ok(qb_torrent) => qb_torrent,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_completion_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let qb_files = match qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await {
+        Ok(qb_files) => qb_files,
+        Err(err) => {
+            let error = err.message().to_string();
+            push.qb_hash = Some(qb_torrent.hash.clone());
+            push.qb_name = Some(qb_torrent.name.clone());
+            persist_completion_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
 
     push.checked_at = Some(now);
     push.qb_hash = Some(qb_torrent.hash.clone());
@@ -770,36 +846,27 @@ async fn wanted_subscription_completion(
             episodes: push.episodes.clone(),
             error: None,
         };
-        if !body.dry_run {
-            let record = state
-                .wanted_store
-                .update_completion_record(
-                    &account_key,
-                    &record.subject_id,
-                    push.clone(),
-                    completion.clone(),
-                    subscription::WantedSubscriptionStatus::Downloading,
-                    None,
-                    now,
-                )
-                .await
-                .map_err(|e| ApiError::internal(format!("写入 qB 完成检查记录失败: {e}")))?
-                .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
-            return Ok(Json(json!({
-                "ok": true,
-                "completed": false,
-                "dry_run": false,
-                "completion": completion,
-                "progress": push,
-                "record": record,
-            })));
-        }
+        let record = state
+            .wanted_store
+            .update_completion_record(
+                &account_key,
+                &record.subject_id,
+                push.clone(),
+                completion.clone(),
+                subscription::WantedSubscriptionStatus::Downloading,
+                None,
+                now,
+            )
+            .await
+            .map_err(|e| ApiError::internal(format!("写入 qB 完成检查记录失败: {e}")))?
+            .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
         return Ok(Json(json!({
             "ok": true,
             "completed": false,
-            "dry_run": true,
+            "dry_run": body.dry_run,
             "completion": completion,
             "progress": push,
+            "record": record,
         })));
     }
 
@@ -821,19 +888,10 @@ async fn wanted_subscription_completion(
     push.target_dir = completion.target_dir.clone();
     push.linked_files = completion.linked_files.clone();
 
-    if body.dry_run {
-        return Ok(Json(json!({
-                "ok": true,
-                "completed": completed,
-                "dry_run": true,
-            "completion": completion,
-            "progress": push,
-            "plan_file_count": plan.files.len(),
-        })));
-    }
-
     let status = if completed {
         subscription::WantedSubscriptionStatus::Linked
+    } else if body.dry_run {
+        subscription::WantedSubscriptionStatus::Completed
     } else {
         subscription::WantedSubscriptionStatus::Failed
     };
@@ -845,7 +903,11 @@ async fn wanted_subscription_completion(
             push.clone(),
             completion.clone(),
             status,
-            completion.error.clone(),
+            if body.dry_run {
+                None
+            } else {
+                completion.error.clone()
+            },
             now,
         )
         .await
@@ -853,11 +915,12 @@ async fn wanted_subscription_completion(
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
 
     Ok(Json(json!({
-        "ok": completed,
+        "ok": completed || body.dry_run,
         "completed": completed,
-        "dry_run": false,
+        "dry_run": body.dry_run,
         "completion": completion,
         "push": push,
+        "plan_file_count": plan.files.len(),
         "record": record,
     })))
 }
@@ -868,20 +931,94 @@ async fn wanted_subscription_progress(
     Json(body): Json<WantedProgressBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
-    let mut push = record
-        .last_push
-        .clone()
-        .ok_or_else(|| ApiError::bad_request("订阅记录缺少 qB pushed record"))?;
-    let qb_server = select_qb_server(
+    let now = unix_now_secs();
+    let mut push = match record.last_push.clone() {
+        Some(push) => push,
+        None => {
+            let error = "订阅记录缺少 qB pushed record".to_string();
+            persist_subscription_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                subscription::WantedSubscriptionStatus::Failed,
+                error.clone(),
+                now,
+            )
+            .await?;
+            return Err(ApiError::bad_request(error));
+        }
+    };
+    let qb_server = match select_qb_server(
         &cfg.qb_servers,
         body.qb_server_name
             .as_deref()
             .or(Some(push.qb_server.as_str())),
-    )?;
-    let torrents = qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await?;
-    let qb_torrent = select_qb_torrent(&torrents, &push, body.qb_hash.as_deref())?;
-    let qb_files = qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await?;
-    let now = unix_now_secs();
+    ) {
+        Ok(qb_server) => qb_server,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_progress_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let torrents = match qbittorrent::list_torrents(&qb_server, Some(&push.qb_category)).await {
+        Ok(torrents) => torrents,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_progress_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let qb_torrent = match select_qb_torrent(&torrents, &push, body.qb_hash.as_deref()) {
+        Ok(qb_torrent) => qb_torrent,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_progress_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let qb_files = match qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await {
+        Ok(qb_files) => qb_files,
+        Err(err) => {
+            let error = err.message().to_string();
+            push.qb_hash = Some(qb_torrent.hash.clone());
+            push.qb_name = Some(qb_torrent.name.clone());
+            persist_progress_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
 
     push.checked_at = Some(now);
     push.qb_hash = Some(qb_torrent.hash.clone());
@@ -917,6 +1054,87 @@ async fn wanted_subscription_progress(
         "progress": push,
         "record": record,
     })))
+}
+
+async fn persist_subscription_sync_error(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    status: subscription::WantedSubscriptionStatus,
+    error: String,
+    now: u64,
+) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    state
+        .wanted_store
+        .update_sync_error(account_key, subject_id, status, error, now)
+        .await
+        .map_err(|e| ApiError::internal(format!("写入订阅同步错误失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))
+}
+
+async fn persist_progress_sync_error(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    mut push: subscription::TorrentPushRecord,
+    error: &str,
+    now: u64,
+) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    push.checked_at = Some(now);
+    push.status = "failed".to_string();
+    push.error = Some(error.to_string());
+    state
+        .wanted_store
+        .update_push_record(
+            account_key,
+            subject_id,
+            push,
+            subscription::WantedSubscriptionStatus::Failed,
+            Some(error.to_string()),
+            now,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入 qB 下载进度错误失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))
+}
+
+async fn persist_completion_sync_error(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    mut push: subscription::TorrentPushRecord,
+    error: &str,
+    now: u64,
+) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    push.checked_at = Some(now);
+    push.status = "failed".to_string();
+    push.error = Some(error.to_string());
+    let completion = subscription::HardlinkCompletionRecord {
+        status: "failed".to_string(),
+        checked_at: now,
+        completed_at: None,
+        qb_hash: push.qb_hash.clone(),
+        qb_name: push.qb_name.clone(),
+        source_path: push.source_path.clone(),
+        target_dir: push.target_dir.clone(),
+        linked_files: push.linked_files.clone(),
+        episodes: push.episodes.clone(),
+        error: Some(error.to_string()),
+    };
+    state
+        .wanted_store
+        .update_completion_record(
+            account_key,
+            subject_id,
+            push,
+            completion,
+            subscription::WantedSubscriptionStatus::Failed,
+            Some(error.to_string()),
+            now,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入 qB 完成检查错误失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))
 }
 
 async fn load_wanted_record_context(
@@ -3884,6 +4102,265 @@ mod subscription_category_tests {
         assert_eq!(push.qb_identifier, "mteam:12345");
         assert_eq!(push.status, "failed");
         assert_eq!(push.error.as_deref(), Some("qB 添加失败"));
+    }
+
+    fn test_app_state(root: &Path) -> AppState {
+        AppState {
+            config_path: root.join("config.toml"),
+            config: std::sync::Arc::new(tokio::sync::RwLock::new(FileConfig::default())),
+            tmdb_cache: TmdbDiskCache::new(root.join("tmdb"), Duration::from_secs(60)),
+            douban_cache: TmdbDiskCache::new(root.join("douban"), Duration::from_secs(60)),
+            douban_cache_ttl_secs: 60,
+            douban_qr_sessions: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            wanted_store: subscription::WantedSubscriptionStore::new(root.join("subscriptions")),
+        }
+    }
+
+    fn library_item(subject_id: &str, title: &str) -> douban::DoubanLibraryItem {
+        douban::DoubanLibraryItem {
+            source: "douban",
+            media_type: "movie",
+            id: subject_id.to_string(),
+            subject_id: subject_id.to_string(),
+            title: title.to_string(),
+            url: format!("https://movie.douban.com/subject/{subject_id}/"),
+            abstract_text: "2024 / 中国大陆".to_string(),
+            abstract_2: String::new(),
+            cover_url: String::new(),
+            poster_url: String::new(),
+            status: "wish",
+            status_label: "想看",
+            date: String::new(),
+            comment: String::new(),
+            tags: vec!["电影".to_string()],
+            user_rating: None,
+        }
+    }
+
+    async fn seed_wanted_record(
+        state: &AppState,
+        account_key: &str,
+        subject_id: &str,
+    ) -> subscription::WantedSubscriptionRecord {
+        let cfg = config::SubscriptionWatcherConfig {
+            bootstrap_existing_as_skipped: false,
+            ..config::SubscriptionWatcherConfig::default()
+        };
+        state
+            .wanted_store
+            .apply_wish_items(
+                account_key,
+                &[library_item(subject_id, "测试电影")],
+                &cfg,
+                100,
+            )
+            .await
+            .unwrap();
+        state
+            .wanted_store
+            .snapshot(account_key, 110)
+            .await
+            .unwrap()
+            .records
+            .get(subject_id)
+            .unwrap()
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn manual_sync_error_persists_without_retry_churn() {
+        let root = temp_test_dir("manual_sync_error");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-sync";
+        seed_wanted_record(&state, account_key, subject_id).await;
+
+        let record = persist_subscription_sync_error(
+            &state,
+            account_key,
+            subject_id,
+            subscription::WantedSubscriptionStatus::Failed,
+            "qB 服务器不存在".to_string(),
+            200,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{}", err.message()));
+
+        assert_eq!(
+            record.status,
+            subscription::WantedSubscriptionStatus::Failed
+        );
+        assert_eq!(record.retry_count, 0);
+        assert_eq!(record.last_error.as_deref(), Some("qB 服务器不存在"));
+        let snapshot = state.wanted_store.snapshot(account_key, 210).await.unwrap();
+        let persisted = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(persisted.retry_count, 0);
+        assert_eq!(persisted.last_error.as_deref(), Some("qB 服务器不存在"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn progress_and_completion_sync_errors_persist_snapshots() {
+        let root = temp_test_dir("sync_error_snapshots");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-progress";
+        seed_wanted_record(&state, account_key, subject_id).await;
+
+        let qb = QbServerEntry {
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let mut push = torrent_push_record(
+            subject_id,
+            &qb,
+            &category("电影", "电影"),
+            &torrent("12345", "测试电影 2160p"),
+            "downloading",
+            Some(120),
+            None,
+        );
+        push.download_progress = Some(0.4);
+        push.files = vec![subscription::TorrentFileProgressRecord {
+            name: "Movie.2024.mkv".to_string(),
+            size: 10,
+            progress: 0.4,
+            priority: 1,
+            season_number: None,
+            episode_number: None,
+            episode_end_number: None,
+            episode_label: None,
+        }];
+
+        let progress_record = persist_progress_sync_error(
+            &state,
+            account_key,
+            subject_id,
+            push.clone(),
+            "qB 中未找到已推送种子",
+            220,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{}", err.message()));
+        let progress_push = progress_record.last_push.as_ref().unwrap();
+        assert_eq!(progress_push.status, "failed");
+        assert_eq!(progress_push.checked_at, Some(220));
+        assert_eq!(progress_push.download_progress, Some(0.4));
+        assert_eq!(
+            progress_push.error.as_deref(),
+            Some("qB 中未找到已推送种子")
+        );
+
+        let completion_record = persist_completion_sync_error(
+            &state,
+            account_key,
+            subject_id,
+            push,
+            "qB 文件列表读取失败",
+            240,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{}", err.message()));
+        let completion = completion_record.last_completion.as_ref().unwrap();
+        assert_eq!(completion.status, "failed");
+        assert_eq!(completion.checked_at, 240);
+        assert_eq!(completion.error.as_deref(), Some("qB 文件列表读取失败"));
+        assert_eq!(
+            completion_record.last_error.as_deref(),
+            Some("qB 文件列表读取失败")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dry_run_completion_result_persists_planned_files_and_episodes() {
+        let root = temp_test_dir("dry_run_completion");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-dry-run";
+        seed_wanted_record(&state, account_key, subject_id).await;
+
+        let qb = QbServerEntry {
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let mut push = torrent_push_record(
+            subject_id,
+            &qb,
+            &category("剧集", "剧集"),
+            &torrent("67890", "Show.S01E01-E02"),
+            "downloaded",
+            Some(120),
+            None,
+        );
+        push.qb_hash = Some("hash-dry".to_string());
+        push.qb_name = Some("Show.S01E01-E02".to_string());
+
+        let plan = HardlinkPlan {
+            source_root: root.join("downloads"),
+            target_dir: root.join("media/测试剧.2024"),
+            qb_hash: "hash-dry".to_string(),
+            qb_name: "Show.S01E01-E02".to_string(),
+            files: vec![HardlinkFilePlan {
+                source_path: root.join("downloads/Show.S01E01-E02.mkv"),
+                target_path: root.join("media/测试剧.2024/Show.S01E01-E02.mkv"),
+                size: 10,
+                season_number: Some(1),
+                episode_number: Some(1),
+                episode_end_number: Some(2),
+                episode_label: Some("S01E01-E02".to_string()),
+            }],
+        };
+        let completion = dry_run_hardlink_plan(&plan, 260);
+        let record = state
+            .wanted_store
+            .update_completion_record(
+                account_key,
+                subject_id,
+                push,
+                completion,
+                subscription::WantedSubscriptionStatus::Completed,
+                None,
+                260,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let persisted = record.last_completion.as_ref().unwrap();
+        assert_eq!(persisted.status, "dry_run");
+        assert_eq!(persisted.linked_files[0].status, "planned");
+        let episode_rows = persisted
+            .episodes
+            .iter()
+            .map(|episode| (episode.label.as_str(), episode.status.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            episode_rows,
+            vec![("S01E01", "planned"), ("S01E02", "planned")]
+        );
+        assert!(record.last_error.is_none());
+
+        let reloaded = state.wanted_store.snapshot(account_key, 270).await.unwrap();
+        let reloaded_completion = reloaded
+            .records
+            .get(subject_id)
+            .unwrap()
+            .last_completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(reloaded_completion.status, "dry_run");
+        assert_eq!(reloaded_completion.linked_files[0].status, "planned");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn wanted_record(
