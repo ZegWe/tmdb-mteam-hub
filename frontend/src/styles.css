@@ -495,44 +495,84 @@ summary:focus-visible {
   flex-shrink: 0;
 }
 
-#detail.drawer {
+#detail.detail-drawer {
   position: fixed;
   top: 0;
   right: 0;
-  width: min(560px, 100vw);
-  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 100vw);
+  height: 100dvh;
+  min-width: 0;
+  max-width: 100vw;
   background: var(--surface);
   border-left: 1px solid var(--border);
   z-index: 40;
-  overflow-y: auto;
-  padding: 1rem 1.25rem 2rem;
+  overflow: hidden;
+  padding: 0;
   box-shadow: -12px 0 40px rgba(0, 0, 0, 0.35);
   transition: transform 0.2s ease;
+  will-change: transform;
 }
 
-#detail.drawer.is-off {
+#detail.detail-drawer.is-off {
   transform: translateX(100%);
   pointer-events: none;
 }
 
-#detail.drawer .close {
-  position: sticky;
-  top: 0;
-  float: right;
-  border: none;
-  background: transparent;
+#detail.detail-drawer .close {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
   color: var(--muted);
-  font-size: 1.75rem;
+  font-size: 1.5rem;
   line-height: 1;
   cursor: pointer;
-  padding: 0 0.25rem;
+  padding: 0;
+  box-shadow: var(--shadow-sm);
+}
+
+#detail.detail-drawer .close:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+#detail-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1.25rem 1.35rem 2rem;
+  scrollbar-gutter: stable;
+}
+
+#detail-body > article {
+  min-width: 0;
+  padding-right: 2.4rem;
+}
+
+.d-head,
+.subscription-detail {
+  min-width: 0;
 }
 
 .d-head img {
-  width: 100%;
+  width: min(180px, 48vw);
   border-radius: var(--radius);
-  max-height: 280px;
+  max-height: 270px;
   object-fit: cover;
+  display: block;
+  background: var(--bg);
+  border: 1px solid var(--border);
 }
 
 .d-head h3 {
@@ -564,6 +604,7 @@ a.tag:hover {
   margin-top: 0.75rem;
   font-size: 0.9rem;
   color: #c4c7cc;
+  overflow-wrap: anywhere;
 }
 
 .tagline-block {
@@ -580,6 +621,7 @@ a.tag:hover {
   border-radius: var(--radius);
   border: 1px solid var(--border);
   font-size: 0.8rem;
+  min-width: 0;
 }
 
 .detail-meta-row {
@@ -603,6 +645,7 @@ a.tag:hover {
 .detail-meta dd {
   margin: 0;
   color: var(--text);
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -657,6 +700,7 @@ a.tag:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.45rem;
+  min-width: 0;
 }
 
 .douban-mark-mode {
@@ -671,6 +715,7 @@ a.tag:hover {
   gap: 0.35rem;
   color: var(--muted);
   font-size: 0.82rem;
+  min-width: 0;
 }
 
 .douban-rating-select select {
@@ -803,6 +848,7 @@ a.tag:hover {
   gap: 0.65rem;
   padding: 0.55rem 0;
   border-bottom: 1px solid var(--border);
+  min-width: 0;
 }
 
 .tv-episode-row:last-child {
@@ -873,6 +919,7 @@ a.tag:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .row-actions.mteam-actions {
@@ -887,6 +934,7 @@ a.tag:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+  min-width: 0;
 }
 
 .mteam-tab {
@@ -939,6 +987,7 @@ a.tag:hover {
   gap: 0.35rem 0.65rem;
   align-items: start;
   padding: 0.6rem 0.65rem;
+  min-width: 0;
 }
 
 a.torrent-card-link {
@@ -973,6 +1022,7 @@ a.torrent-card-link:visited {
   font-weight: 600;
   margin-bottom: 0.3rem;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .torrent-stats {
@@ -1031,6 +1081,7 @@ a.torrent-card-link:visited {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.65rem;
+  min-width: 0;
 }
 
 .subscription-card h2,
@@ -1128,6 +1179,10 @@ a.torrent-card-link:visited {
   gap: 1rem;
 }
 
+.subscription-detail .row-actions .btn {
+  flex: 1 1 12rem;
+}
+
 .subscription-detail-section h4 {
   margin: 0 0 0.5rem;
   font-size: 0.9rem;
@@ -1151,6 +1206,7 @@ a.torrent-card-link:visited {
   border-radius: 8px;
   background: var(--bg);
   font-size: 0.78rem;
+  min-width: 0;
 }
 
 .subscription-episode-row .subscription-progress {
@@ -1162,6 +1218,7 @@ a.torrent-card-link:visited {
 .subscription-file-name {
   min-width: 0;
   font-weight: 600;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -1183,6 +1240,7 @@ a.torrent-card-link:visited {
 .subscription-file-note {
   color: var(--muted);
   font-size: 0.72rem;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -1497,5 +1555,116 @@ code {
   .torrent-rule-row,
   .qb-server-row {
     grid-template-columns: 1fr;
+  }
+
+  #detail.detail-drawer {
+    width: 100vw;
+    border-left: 0;
+  }
+
+  #detail.detail-drawer .close {
+    top: 0.65rem;
+    right: 0.65rem;
+    width: 2.1rem;
+    height: 2.1rem;
+  }
+
+  #detail-body {
+    padding: 0.9rem 0.85rem calc(2rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  #detail-body > article {
+    padding-right: 2.25rem;
+  }
+
+  .d-head img {
+    width: min(150px, 46vw);
+    max-height: 225px;
+  }
+
+  .d-head h3 {
+    font-size: 1.05rem;
+    padding-right: 0.25rem;
+  }
+
+  .douban-mark-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .douban-mark-status {
+    text-align: left;
+  }
+
+  .douban-mark-controls .btn,
+  .subscription-detail .row-actions .btn {
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .douban-rating-select,
+  .douban-rating-select select,
+  .mteam-tablist,
+  .mteam-tab {
+    width: 100%;
+  }
+
+  .douban-rating-select {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .detail-meta {
+    padding: 0.55rem 0.65rem;
+  }
+
+  .detail-meta-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.12rem;
+  }
+
+  .tv-season-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .tv-episode-row {
+    gap: 0.55rem;
+  }
+
+  .tv-ep-still,
+  .tv-ep-still-placeholder {
+    width: 96px;
+    height: 54px;
+  }
+
+  .torrent-card-inner {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .torrent-card-actions {
+    justify-self: stretch;
+  }
+
+  .torrent-push-trigger {
+    width: 100%;
+  }
+
+  .subscription-detail-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .subscription-episode-row,
+  .subscription-file-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .subscription-episode-state,
+  .subscription-file-status,
+  .subscription-episode-files {
+    white-space: normal;
   }
 }

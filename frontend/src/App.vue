@@ -566,7 +566,7 @@
     </div>
   </div>
 
-  <aside id="detail" class="drawer" :class="{ 'is-off': !detailOpen }">
+  <aside id="detail" class="detail-drawer" :class="{ 'is-off': !detailOpen }">
     <button type="button" class="close" aria-label="关闭" @click="closeDetail">×</button>
     <div id="detail-body">
       <div v-if="detailLoading" class="detail-loading" role="status">
