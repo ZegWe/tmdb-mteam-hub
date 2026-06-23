@@ -5,41 +5,42 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TMDB · M-Team</title>
   <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/components.css" />
 </head>
-<body>
+<body data-theme="mediahub" class="bg-base-200 text-base-content">
   <div class="app-shell">
-    <aside class="side-nav" aria-label="主导航">
+    <aside class="side-nav menu bg-base-100 text-base-content" aria-label="主导航">
       <div class="brand">
         <h1>影视检索</h1>
         <p class="sub">TMDB / 豆瓣 / M-Team</p>
       </div>
-      <nav class="nav-list">
-        <button type="button" class="nav-item is-active" data-app-page-target="main">主功能</button>
-        <button type="button" class="nav-item" id="btn-subscriptions" data-app-page-target="subscriptions">订阅</button>
-        <button type="button" class="nav-item" id="btn-settings" data-app-page-target="settings">设置</button>
+      <nav class="nav-list" aria-label="页面">
+        <button type="button" class="nav-item btn btn-ghost btn-active justify-start is-active" data-app-page-target="main">主功能</button>
+        <button type="button" class="nav-item btn btn-ghost justify-start" id="btn-subscriptions" data-app-page-target="subscriptions">订阅</button>
+        <button type="button" class="nav-item btn btn-ghost justify-start" id="btn-settings" data-app-page-target="settings">设置</button>
       </nav>
     </aside>
 
     <div class="app-content">
-      <div id="err" class="banner err hidden" role="alert"></div>
-      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+      <div id="err" class="banner err hidden alert alert-error" role="alert"></div>
+      <div id="toast" class="toast hidden alert" role="status" aria-live="polite"></div>
 
       <section id="page-main" class="app-page is-active">
         <header class="top">
           <h1>影视检索</h1>
           <p class="sub">TMDB / 豆瓣资料与 M-Team 种子</p>
           <div class="actions">
-            <button type="button" id="btn-douban-library" class="btn secondary">豆瓣列表</button>
+            <button type="button" id="btn-douban-library" class="btn btn-secondary">豆瓣列表</button>
           </div>
         </header>
 
         <section class="search-bar">
-          <div class="source-switch" role="group" aria-label="搜索来源">
-            <button type="button" class="source-pill is-active" data-search-source="tmdb">TMDB</button>
-            <button type="button" class="source-pill" data-search-source="douban">豆瓣</button>
+          <div class="source-switch tabs tabs-boxed" role="group" aria-label="搜索来源">
+            <button type="button" class="source-pill tab tab-active is-active" data-search-source="tmdb">TMDB</button>
+            <button type="button" class="source-pill tab" data-search-source="douban">豆瓣</button>
           </div>
-          <input type="search" id="q" placeholder="搜索电影或剧集标题…" autocomplete="off" />
-          <button type="button" id="btn-search" class="btn primary">搜索</button>
+          <input type="search" id="q" class="input input-bordered" placeholder="搜索电影或剧集标题…" autocomplete="off" />
+          <button type="button" id="btn-search" class="btn btn-primary">搜索</button>
         </section>
 
         <section id="library-bar" class="library-bar hidden" aria-live="polite">
@@ -47,7 +48,7 @@
             <h2>豆瓣列表</h2>
             <p id="library-cache-status" class="hint"></p>
           </div>
-          <button type="button" id="btn-douban-library-refresh" class="btn secondary">刷新缓存</button>
+          <button type="button" id="btn-douban-library-refresh" class="btn btn-secondary">刷新缓存</button>
         </section>
 
         <main class="layout" id="main-layout" aria-live="polite">
@@ -71,8 +72,8 @@
           <h1>订阅</h1>
           <p class="sub">想看订阅、下载进度与硬链接结果</p>
           <div class="actions">
-            <button type="button" id="btn-subscription-poll" class="btn secondary">轮询想看</button>
-            <button type="button" id="btn-subscription-refresh" class="btn secondary" title="只重新读取本地已保存的订阅状态">刷新本地列表</button>
+            <button type="button" id="btn-subscription-poll" class="btn btn-secondary">轮询想看</button>
+            <button type="button" id="btn-subscription-refresh" class="btn btn-secondary" title="只重新读取本地已保存的订阅状态">刷新本地列表</button>
           </div>
         </header>
         <section class="subscription-toolbar" aria-live="polite">
@@ -88,23 +89,23 @@
         </header>
 
         <form id="settings-form" class="settings-page-form">
-          <section class="settings-section">
+          <section class="settings-section card bg-base-100 border border-base-300">
             <h2>API 密钥</h2>
             <p class="hint">将写入运行目录下的 <code>config.toml</code>（或通过环境变量 <code>CONFIG_PATH</code> 指定路径）。</p>
       <label>
         TMDB API Key
-        <input type="password" name="tmdb_api_key" id="f-tmdb" autocomplete="off" />
+        <input type="password" name="tmdb_api_key" id="f-tmdb" class="input input-bordered" autocomplete="off" />
       </label>
       <label>
         M-Team OpenAPI Key
-        <input type="password" name="mteam_api_key" id="f-mteam" autocomplete="off" />
+        <input type="password" name="mteam_api_key" id="f-mteam" class="input input-bordered" autocomplete="off" />
       </label>
       <label>
         豆瓣 Cookie
-        <textarea name="douban_cookie" id="f-douban-cookie" rows="3" autocomplete="off" spellcheck="false" placeholder="dbcl2=...; ck=..."></textarea>
+        <textarea name="douban_cookie" id="f-douban-cookie" class="textarea textarea-bordered" rows="3" autocomplete="off" spellcheck="false" placeholder="dbcl2=...; ck=..."></textarea>
       </label>
       <div class="douban-login-tools">
-        <button type="button" class="btn secondary" id="btn-douban-qr">QR 登录获取 Cookie</button>
+            <button type="button" class="btn btn-secondary" id="btn-douban-qr">QR 登录获取 Cookie</button>
         <span class="hint subtle" id="douban-qr-status" aria-live="polite"></span>
       </div>
       <div id="douban-qr-box" class="douban-qr-box hidden">
@@ -112,30 +113,30 @@
       </div>
           </section>
 
-          <section class="settings-section subscription-categories-fieldset">
+          <section class="settings-section subscription-categories-fieldset card bg-base-100 border border-base-300">
             <h2>订阅分类</h2>
             <p class="hint">“想看”只能选择这里配置的文本；分类保存后会写入配置文件，后续自动下载与硬链接使用同一组字段。</p>
             <div id="subscription-categories-list" class="subscription-categories-list"></div>
-            <button type="button" class="btn secondary" id="btn-subscription-category-add">添加分类</button>
+            <button type="button" class="btn btn-secondary" id="btn-subscription-category-add">添加分类</button>
           </section>
 
-          <section class="settings-section torrent-rules-fieldset">
+          <section class="settings-section torrent-rules-fieldset card bg-base-100 border border-base-300">
             <h2>种子匹配规则</h2>
             <p class="hint">数字越大越先尝试；高优先级没有候选命中时才尝试低优先级。关键词用逗号分隔。</p>
             <div id="torrent-rules-list" class="torrent-rules-list"></div>
-            <button type="button" class="btn secondary" id="btn-torrent-rule-add">添加规则</button>
+            <button type="button" class="btn btn-secondary" id="btn-torrent-rule-add">添加规则</button>
           </section>
 
-          <section class="settings-section qb-servers-fieldset">
+          <section class="settings-section qb-servers-fieldset card bg-base-100 border border-base-300">
             <h2>qBittorrent</h2>
             <p class="hint">在本机可访问的 qB Web UI；保存后会写入配置文件，下次打开设置会从此处加载。</p>
             <div id="qb-servers-list" class="qb-servers-list"></div>
-            <button type="button" class="btn secondary" id="btn-qb-add">添加服务器</button>
+            <button type="button" class="btn btn-secondary" id="btn-qb-add">添加服务器</button>
           </section>
 
       <div class="form-actions">
-            <button type="button" class="btn secondary" id="btn-cancel-settings">返回主功能</button>
-        <button type="submit" class="btn primary">保存</button>
+        <p id="settings-save-status" class="form-status" role="status" aria-live="polite"></p>
+        <button type="submit" class="btn btn-primary">保存设置</button>
       </div>
     </form>
       </section>
@@ -148,24 +149,24 @@
   </aside>
 
   <dialog id="qb-push" class="modal">
-    <form id="qb-push-form">
+    <form id="qb-push-form" class="modal-box">
       <h2>推送到 qBittorrent</h2>
       <p class="hint subtle" id="qb-push-torrent-label"></p>
       <label>
         qB 服务器
-        <select id="qb-push-server"></select>
+        <select id="qb-push-server" class="select select-bordered"></select>
       </label>
       <label>
         分类（可选）
-        <input type="text" id="qb-push-category" autocomplete="off" placeholder="留空则用 qB 默认" />
+        <input type="text" id="qb-push-category" class="input input-bordered" autocomplete="off" placeholder="留空则用 qB 默认" />
       </label>
       <label>
         保存路径（可选）
-        <input type="text" id="qb-push-savepath" autocomplete="off" placeholder="留空则用 qB 默认保存目录" />
+        <input type="text" id="qb-push-savepath" class="input input-bordered" autocomplete="off" placeholder="留空则用 qB 默认保存目录" />
       </label>
       <div class="form-actions">
-        <button type="button" class="btn secondary" id="qb-push-cancel">取消</button>
-        <button type="submit" class="btn primary" id="qb-push-submit">确认推送</button>
+        <button type="button" class="btn btn-secondary" id="qb-push-cancel">取消</button>
+        <button type="submit" class="btn btn-primary" id="qb-push-submit">确认推送</button>
       </div>
     </form>
   </dialog>

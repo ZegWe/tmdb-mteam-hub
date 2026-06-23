@@ -1,4 +1,5 @@
 /target/
 /cache/
+/node_modules/
 config.toml
 *.toml.tmp

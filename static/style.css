@@ -1,14 +1,37 @@
 :root {
-  --bg: #0f1115;
-  --surface: #171a21;
-  --border: #2a3040;
-  --text: #e8eaed;
-  --muted: #9aa0a6;
-  --accent: #6c9cff;
-  --accent-dim: #4a6eae;
-  --danger: #f07178;
-  --radius: 10px;
-  font-family: "Segoe UI", system-ui, sans-serif;
+  --background: #f7f8f7;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --secondary: #eff1f2;
+  --secondary-foreground: #27272a;
+  --muted-bg: #f1f3f3;
+  --muted-foreground: #6f7479;
+  --accent-bg: #e7f6f1;
+  --accent-foreground: #0f5f54;
+  --destructive: #b42318;
+  --destructive-foreground: #ffffff;
+  --border: #d9dedc;
+  --input: #cfd6d3;
+  --ring: #0f766e;
+  --success: #047857;
+  --warning: #b45309;
+  --info: #2563eb;
+  --radius: 8px;
+  --shadow-sm: 0 1px 2px rgba(24, 24, 27, 0.06);
+  --shadow-md: 0 12px 32px rgba(24, 24, 27, 0.12);
+  --bg: var(--background);
+  --surface: var(--card);
+  --text: var(--foreground);
+  --muted: var(--muted-foreground);
+  --accent: var(--ring);
+  --accent-dim: #0d9488;
+  --danger: var(--destructive);
+  font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 * {
@@ -22,9 +45,27 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
+  background: var(--background);
   color: var(--text);
   line-height: 1.5;
+  letter-spacing: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .app-shell {
@@ -40,7 +81,7 @@ body {
   min-height: 100vh;
   padding: 1.25rem 0.9rem;
   border-right: 1px solid var(--border);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--card) 92%, var(--muted-bg));
 }
 
 .brand h1 {
@@ -51,6 +92,7 @@ body {
 
 .brand .sub {
   font-size: 0.78rem;
+  color: var(--muted-foreground);
 }
 
 .nav-list {
@@ -61,25 +103,28 @@ body {
 
 .nav-item {
   width: 100%;
-  padding: 0.55rem 0.65rem;
+  min-height: 2.25rem;
+  padding: 0.5rem 0.65rem;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: var(--muted);
   text-align: left;
   cursor: pointer;
-  font-size: 0.92rem;
+  font-size: 0.9rem;
+  font-weight: 500;
 }
 
 .nav-item:hover {
   color: var(--text);
   border-color: var(--border);
+  background: var(--muted-bg);
 }
 
 .nav-item.is-active {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
-  border-color: var(--accent-dim);
+  color: var(--accent-foreground);
+  background: var(--accent-bg);
+  border-color: color-mix(in srgb, var(--ring) 34%, var(--border));
 }
 
 .app-content {
@@ -91,14 +136,16 @@ body {
 }
 
 .top {
-  padding: 1.5rem 1.5rem 0.5rem;
+  padding: 1.5rem 1.5rem 0.75rem;
   border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--background) 88%, var(--card));
 }
 
 .top h1 {
   margin: 0;
   font-size: 1.5rem;
-  font-weight: 600;
+  font-weight: 650;
+  letter-spacing: 0;
 }
 
 .sub {
@@ -127,19 +174,21 @@ body {
   display: inline-flex;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 0.18rem;
-  background: var(--surface);
+  padding: 0.2rem;
+  background: var(--muted-bg);
 }
 
 .source-pill {
   min-width: 4.2rem;
-  padding: 0.43rem 0.65rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
   border: 0;
-  border-radius: calc(var(--radius) - 3px);
+  border-radius: 6px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
   font-size: 0.88rem;
+  font-weight: 500;
 }
 
 .source-pill:hover {
@@ -147,43 +196,66 @@ body {
 }
 
 .source-pill.is-active {
-  background: color-mix(in srgb, var(--accent) 24%, var(--surface));
+  background: var(--card);
   color: var(--text);
+  box-shadow: var(--shadow-sm);
 }
 
 #q {
   flex: 1;
-  padding: 0.65rem 0.85rem;
+  min-width: min(18rem, 100%);
+  min-height: 2.4rem;
+  padding: 0.55rem 0.75rem;
   border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border: 1px solid var(--input);
+  background: var(--card);
   color: var(--text);
-  font-size: 1rem;
+  font-size: 0.95rem;
 }
 
 #q:focus {
-  outline: 2px solid var(--accent-dim);
-  outline-offset: 2px;
+  border-color: var(--ring);
 }
 
 .btn {
-  padding: 0.55rem 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.85rem;
   border-radius: var(--radius);
   border: 1px solid var(--border);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
+  font-weight: 500;
   cursor: pointer;
-  background: var(--surface);
+  background: var(--card);
   color: var(--text);
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
 }
 
 .btn.primary {
-  background: linear-gradient(160deg, var(--accent), var(--accent-dim));
-  border-color: transparent;
-  font-weight: 500;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .btn.secondary {
-  background: transparent;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--ring) 34%, var(--border));
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 88%, var(--ring));
 }
 
 .btn:disabled {
@@ -407,7 +479,7 @@ body {
   flex-shrink: 0;
 }
 
-.drawer {
+#detail.drawer {
   position: fixed;
   top: 0;
   right: 0;
@@ -422,12 +494,12 @@ body {
   transition: transform 0.2s ease;
 }
 
-.drawer.is-off {
+#detail.drawer.is-off {
   transform: translateX(100%);
   pointer-events: none;
 }
 
-.drawer .close {
+#detail.drawer .close {
   position: sticky;
   top: 0;
   float: right;

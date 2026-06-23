@@ -76,8 +76,8 @@ function showToast(message, kind = "ok") {
     return;
   }
   el.textContent = message;
-  el.classList.remove("hidden", "toast-ok", "toast-err");
-  el.classList.add(kind === "err" ? "toast-err" : "toast-ok");
+  el.classList.remove("hidden", "toast-ok", "toast-err", "alert-success", "alert-error");
+  el.classList.add(kind === "err" ? "toast-err" : "toast-ok", kind === "err" ? "alert-error" : "alert-success");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, 3800);
 }
@@ -124,6 +124,7 @@ function setSearchSource(source) {
   for (const btn of document.querySelectorAll("[data-search-source]")) {
     const active = btn.dataset.searchSource === searchSource;
     btn.classList.toggle("is-active", active);
+    btn.classList.toggle("tab-active", active);
     btn.setAttribute("aria-pressed", active ? "true" : "false");
   }
   const q = $("#q");
@@ -167,6 +168,7 @@ function setAppPage(page) {
   for (const btn of document.querySelectorAll("[data-app-page-target]")) {
     const active = btn.dataset.appPageTarget === currentAppPage;
     btn.classList.toggle("is-active", active);
+    btn.classList.toggle("btn-active", active);
     btn.setAttribute("aria-current", active ? "page" : "false");
   }
   if (currentAppPage === "settings") {
@@ -207,7 +209,7 @@ function renderCards(container, items, type) {
   }
   for (const it of items) {
     const div = document.createElement("div");
-    div.className = "card";
+    div.className = "card media-card bg-base-100 border border-base-300 shadow-sm";
     const mediaType = it.source === "douban" ? "douban" : it.media_type || type;
     div.dataset.type = mediaType;
     div.dataset.id = String(it.id ?? it.subject_id ?? "");
@@ -460,12 +462,12 @@ function renderDoubanInterestPanel(doubanId, currentInterest = "", currentRating
     </div>
     <div class="douban-mark-controls">
       <div class="douban-mark-mode" role="group" aria-label="豆瓣标记状态">
-        <button type="button" class="mteam-tab${interest === "wish" ? " is-active" : ""}" data-douban-interest="wish">想看</button>
-        <button type="button" class="mteam-tab${interest === "collect" ? " is-active" : ""}" data-douban-interest="collect">看过</button>
+        <button type="button" class="mteam-tab tab${interest === "wish" ? " is-active tab-active" : ""}" data-douban-interest="wish">想看</button>
+        <button type="button" class="mteam-tab tab${interest === "collect" ? " is-active tab-active" : ""}" data-douban-interest="collect">看过</button>
       </div>
       <label class="douban-rating-select">
         <span>评分</span>
-        <select data-douban-rating>
+        <select class="select select-bordered select-sm" data-douban-rating>
           <option value="">未评分</option>
           <option value="5"${rating === "5" ? " selected" : ""}>5 星</option>
           <option value="4"${rating === "4" ? " selected" : ""}>4 星</option>
@@ -474,12 +476,12 @@ function renderDoubanInterestPanel(doubanId, currentInterest = "", currentRating
           <option value="1"${rating === "1" ? " selected" : ""}>1 星</option>
         </select>
       </label>
-      <button type="button" class="btn btn-mini primary" data-douban-mark-save>保存</button>
+      <button type="button" class="btn btn-sm btn-primary" data-douban-mark-save>保存</button>
     </div>
     <label class="douban-tag-input">
       <span data-douban-tag-label>标签</span>
-      <select data-douban-category></select>
-      <input type="text" data-douban-tags autocomplete="off" spellcheck="false" placeholder="可选，例如：想补、冷门、家人一起看" value="${escapeHtml(tags)}" />
+      <select class="select select-bordered select-sm" data-douban-category></select>
+      <input type="text" class="input input-bordered input-sm" data-douban-tags autocomplete="off" spellcheck="false" placeholder="可选，例如：想补、冷门、家人一起看" value="${escapeHtml(tags)}" />
     </label>
     <div class="douban-tag-history hidden" data-douban-tag-history aria-live="polite"></div>
   </section>`;
@@ -633,6 +635,7 @@ function applyDoubanInterestState(root, interest, currentRating = null) {
   for (const btn of buttons) {
     const active = btn.dataset.doubanInterest === normalized;
     btn.classList.toggle("is-active", active);
+    btn.classList.toggle("tab-active", active);
     btn.setAttribute("aria-pressed", active ? "true" : "false");
   }
   if (rating) {
@@ -784,7 +787,7 @@ async function openDoubanDetail(id, options = {}) {
       <p class="overview">${escapeHtml(d.summary || "")}</p>
       <div class="row-actions mteam-actions">
         <span class="mteam-actions-label subtle">M-Team</span>
-        <div id="mteam-tablist" class="mteam-tablist" role="tablist" aria-label="M-Team 检索路径"></div>
+        <div id="mteam-tablist" class="mteam-tablist tabs tabs-boxed" role="tablist" aria-label="M-Team 检索路径"></div>
       </div>
       <div id="torrent-box" class="torrent-list"></div>
     </div>`;
@@ -865,7 +868,7 @@ async function openDetail(mediaType, id, options = {}) {
         ${
           canMteam
             ? `<span class="mteam-actions-label subtle">M-Team</span>
-        <div id="mteam-tablist" class="mteam-tablist" role="tablist" aria-label="M-Team 检索路径"></div>`
+        <div id="mteam-tablist" class="mteam-tablist tabs tabs-boxed" role="tablist" aria-label="M-Team 检索路径"></div>`
             : `<span class="subtle">缺少 IMDb / 豆瓣 ID，且无原标题，无法在 M-Team 检索</span>`
         }
       </div>
@@ -1028,6 +1031,7 @@ function setupMteamSourceTabs(tablistEl, torrentBoxEl, opts) {
     for (const btn of tablistEl.querySelectorAll('[role="tab"]')) {
       const on = btn.dataset.source === source;
       btn.classList.toggle("is-active", !!on);
+      btn.classList.toggle("tab-active", !!on);
       btn.setAttribute("aria-selected", on ? "true" : "false");
       btn.tabIndex = on ? 0 : -1;
     }
@@ -1056,7 +1060,7 @@ function setupMteamSourceTabs(tablistEl, torrentBoxEl, opts) {
   for (const s of sources) {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "mteam-tab";
+    b.className = "mteam-tab tab";
     b.dataset.source = s.source;
     b.setAttribute("role", "tab");
     b.textContent = s.label;
@@ -1143,7 +1147,7 @@ async function renderTorrents(container, res) {
     } else {
       const pushBtn = document.createElement("button");
       pushBtn.type = "button";
-      pushBtn.className = "btn btn-mini primary torrent-push-trigger";
+      pushBtn.className = "btn btn-sm btn-primary torrent-push-trigger";
       pushBtn.textContent = "推送 qB";
       pushBtn.title = "推送到 qBittorrent";
       const titleStr = String(name.textContent || "").trim();
@@ -1228,16 +1232,16 @@ function makeQbServerRowEl(s = {}) {
   const row = document.createElement("div");
   row.className = "qb-server-row";
   row.innerHTML = `
-    <label>显示名<input type="text" data-qb="name" placeholder="如 家用 NAS" /></label>
-    <label>Web UI 根地址<input type="text" data-qb="base_url" placeholder="http://127.0.0.1:8080" /></label>
-    <label>用户名<input type="text" data-qb="username" autocomplete="off" /></label>
-    <label>密码<input type="password" data-qb="password" autocomplete="off" /></label>
+    <label>显示名<input type="text" class="input input-bordered input-sm" data-qb="name" placeholder="如 家用 NAS" /></label>
+    <label>Web UI 根地址<input type="text" class="input input-bordered input-sm" data-qb="base_url" placeholder="http://127.0.0.1:8080" /></label>
+    <label>用户名<input type="text" class="input input-bordered input-sm" data-qb="username" autocomplete="off" /></label>
+    <label>密码<input type="password" class="input input-bordered input-sm" data-qb="password" autocomplete="off" /></label>
     <div class="qb-row-actions">
-      <label class="qb-insecure"><input type="checkbox" data-qb="insecure_tls" /> 忽略 HTTPS 证书错误</label>
+      <label class="qb-insecure"><input type="checkbox" class="checkbox checkbox-sm" data-qb="insecure_tls" /> 忽略 HTTPS 证书错误</label>
       <div class="qb-row-tail">
-        <button type="button" class="btn btn-mini secondary qb-test-qb-server">测试连接</button>
+        <button type="button" class="btn btn-sm btn-secondary qb-test-qb-server">测试连接</button>
         <span class="qb-test-msg subtle" aria-live="polite"></span>
-        <button type="button" class="btn btn-mini qb-remove-server">移除</button>
+        <button type="button" class="btn btn-sm btn-ghost qb-remove-server">移除</button>
       </div>
     </div>`;
 
@@ -1339,15 +1343,15 @@ function makeSubscriptionCategoryRowEl(category = {}) {
   const row = document.createElement("div");
   row.className = "subscription-category-row";
   row.innerHTML = `
-    <label>分类名<input type="text" data-sub-cat="name" placeholder="如 电影" /></label>
-    <label>想看文本<input type="text" data-sub-cat="wanted_tag" placeholder="如 电影" /></label>
-    <label>qB 下载分类<input type="text" data-sub-cat="qb_category" placeholder="如 movie" /></label>
-    <label>qB 保存目录名<input type="text" data-sub-cat="qb_save_dir_name" placeholder="如 movies" /></label>
-    <label>真实下载目录<input type="text" data-sub-cat="download_dir" placeholder="/downloads/movies" /></label>
-    <label>硬链接目标目录<input type="text" data-sub-cat="link_target_dir" placeholder="/media/movies" /></label>
+    <label>分类名<input type="text" class="input input-bordered input-sm" data-sub-cat="name" placeholder="如 电影" /></label>
+    <label>想看文本<input type="text" class="input input-bordered input-sm" data-sub-cat="wanted_tag" placeholder="如 电影" /></label>
+    <label>qB 下载分类<input type="text" class="input input-bordered input-sm" data-sub-cat="qb_category" placeholder="如 movie" /></label>
+    <label>qB 保存目录名<input type="text" class="input input-bordered input-sm" data-sub-cat="qb_save_dir_name" placeholder="如 movies" /></label>
+    <label>真实下载目录<input type="text" class="input input-bordered input-sm" data-sub-cat="download_dir" placeholder="/downloads/movies" /></label>
+    <label>硬链接目标目录<input type="text" class="input input-bordered input-sm" data-sub-cat="link_target_dir" placeholder="/media/movies" /></label>
     <div class="subscription-category-actions">
       <p class="hint subtle">修改想看文本后，已有订阅记录可能仍保留旧文本；后续状态迁移需按订阅记录处理。</p>
-      <button type="button" class="btn btn-mini subscription-category-remove">移除</button>
+      <button type="button" class="btn btn-sm btn-ghost subscription-category-remove">移除</button>
     </div>`;
 
   row.querySelector('[data-sub-cat="name"]').value = category.name ?? "";
@@ -1425,20 +1429,20 @@ function makeTorrentRuleRowEl(rule = {}) {
   const row = document.createElement("div");
   row.className = "torrent-rule-row";
   row.innerHTML = `
-    <label>规则名<input type="text" data-torrent-rule="name" placeholder="如 优先 2160p BluRay" /></label>
-    <label>优先级<input type="number" data-torrent-rule="priority" step="1" placeholder="100" /></label>
+    <label>规则名<input type="text" class="input input-bordered input-sm" data-torrent-rule="name" placeholder="如 优先 2160p BluRay" /></label>
+    <label>优先级<input type="number" class="input input-bordered input-sm" data-torrent-rule="priority" step="1" placeholder="100" /></label>
     <label>匹配模式
-      <select data-torrent-rule="mode">
+      <select class="select select-bordered select-sm" data-torrent-rule="mode">
         <option value="all">全部满足</option>
         <option value="any">任一满足</option>
       </select>
     </label>
-    <label>标题关键词<input type="text" data-torrent-rule="title_keywords" placeholder="2160p, 4K" /></label>
-    <label>分辨率关键词<input type="text" data-torrent-rule="resolution_keywords" placeholder="1080p, 2160p" /></label>
-    <label>版本/来源关键词<input type="text" data-torrent-rule="source_keywords" placeholder="BluRay, REMUX, WEB-DL" /></label>
+    <label>标题关键词<input type="text" class="input input-bordered input-sm" data-torrent-rule="title_keywords" placeholder="2160p, 4K" /></label>
+    <label>分辨率关键词<input type="text" class="input input-bordered input-sm" data-torrent-rule="resolution_keywords" placeholder="1080p, 2160p" /></label>
+    <label>版本/来源关键词<input type="text" class="input input-bordered input-sm" data-torrent-rule="source_keywords" placeholder="BluRay, REMUX, WEB-DL" /></label>
     <div class="torrent-rule-actions">
       <p class="hint subtle">保存后自动订阅推送会按优先级生成可解释的候选匹配结果。</p>
-      <button type="button" class="btn btn-mini torrent-rule-remove">移除</button>
+      <button type="button" class="btn btn-sm btn-ghost torrent-rule-remove">移除</button>
     </div>`;
 
   row.querySelector('[data-torrent-rule="name"]').value = rule.name ?? "";
@@ -1767,10 +1771,10 @@ function renderSubscriptionCards(state) {
       const episodeCount = Array.isArray(push.episodes) && push.episodes.length
         ? `<span class="subscription-episode-count">${push.episodes.length} 集</span>`
         : "";
-      return `<article class="subscription-card" data-subscription-id="${escapeHtml(record.subject_id)}">
+      return `<article class="subscription-card card bg-base-100 border border-base-300 shadow-sm" data-subscription-id="${escapeHtml(record.subject_id)}">
         <div class="subscription-card-head">
           <h2>${escapeHtml(record.title || record.subject_id)}</h2>
-          <span class="subscription-status subscription-status-${escapeHtml(status.key)}">${escapeHtml(status.text)}</span>
+          <span class="subscription-status badge subscription-status-${escapeHtml(status.key)}">${escapeHtml(status.text)}</span>
         </div>
         <div class="subscription-card-meta">${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}${episodeCount}</div>
         ${progressBarHtml(progress)}
@@ -1920,13 +1924,13 @@ function renderSubscriptionDetail(record) {
   return `<article class="subscription-detail" data-subscription-detail-id="${escapeHtml(record.subject_id)}">
     <div class="subscription-detail-head">
       <h3>${escapeHtml(record.title || record.subject_id)}</h3>
-      <span class="subscription-status subscription-status-${escapeHtml(status.key)}">${escapeHtml(status.text)}</span>
+      <span class="subscription-status badge subscription-status-${escapeHtml(status.key)}">${escapeHtml(status.text)}</span>
     </div>
     ${progressBarHtml(progress)}
     <dl class="detail-meta">${metaRows}</dl>
     <div class="row-actions">
-      ${push ? `<button type="button" class="btn secondary" data-sub-action="progress" data-subscription-id="${escapeHtml(record.subject_id)}">刷新下载进度</button>` : ""}
-      ${push ? `<button type="button" class="btn primary" data-sub-action="completion" data-subscription-id="${escapeHtml(record.subject_id)}">检查完成并硬链接</button>` : ""}
+      ${push ? `<button type="button" class="btn btn-secondary" data-sub-action="progress" data-subscription-id="${escapeHtml(record.subject_id)}">刷新下载进度</button>` : ""}
+      ${push ? `<button type="button" class="btn btn-primary" data-sub-action="completion" data-subscription-id="${escapeHtml(record.subject_id)}">检查完成并硬链接</button>` : ""}
     </div>
     ${record.last_error ? `<p class="subscription-detail-error">${escapeHtml(record.last_error)}</p>` : ""}
     ${downloadSection}
@@ -2003,8 +2007,17 @@ function closeSettings() {
   setAppPage("main");
 }
 
+function setSettingsSaveStatus(message = "", kind = "") {
+  const el = $("#settings-save-status");
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove("is-ok", "is-err", "is-pending");
+  if (kind) el.classList.add(`is-${kind}`);
+}
+
 async function loadSettings() {
   try {
+    setSettingsSaveStatus();
     const c = await api("/api/config");
     $("#f-tmdb").value = c.tmdb_api_key || "";
     $("#f-mteam").value = c.mteam_api_key || "";
@@ -2045,7 +2058,7 @@ document.querySelectorAll("[data-app-page-target]").forEach((btn) => {
     }
   });
 });
-$("#btn-cancel-settings").addEventListener("click", closeSettings);
+$("#btn-cancel-settings")?.addEventListener("click", closeSettings);
 
 $("#btn-subscription-refresh")?.addEventListener("click", () => {
   loadSubscriptions().catch(() => {});
@@ -2166,6 +2179,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   const torrentMatchRules = collectTorrentRulesFromDom();
   const submitBtn = e.target.querySelector('button[type="submit"]');
   if (submitBtn) submitBtn.disabled = true;
+  setSettingsSaveStatus("正在保存设置…", "pending");
   try {
     await api("/api/config", {
       method: "PUT",
@@ -2182,9 +2196,13 @@ $("#settings-form").addEventListener("submit", async (e) => {
     subscriptionCategoriesCache = subscriptionCategories;
     torrentMatchRulesCache = torrentMatchRules;
     doubanTagHistoryCache = null;
-    closeSettings();
+    setSettingsSaveStatus("设置已保存", "ok");
+    showToast("设置已保存", "ok");
   } catch (err) {
-    showErr(err.message);
+    const msg = err instanceof Error ? err.message : String(err);
+    setSettingsSaveStatus(`保存失败：${msg}`, "err");
+    showErr(`保存设置失败：${msg}`);
+    showToast(`保存失败：${msg}`, "err");
   } finally {
     if (submitBtn) submitBtn.disabled = false;
   }

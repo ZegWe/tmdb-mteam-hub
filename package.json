@@ -1,0 +1,11 @@
+{
+  "name": "tmdb-mteam-hub-frontend",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i ./static/tailwind.css -o ./static/components.css --minify"
+  },
+  "devDependencies": {
+    "daisyui": "4.12.24",
+    "tailwindcss": "3.4.17"
+  }
+}
