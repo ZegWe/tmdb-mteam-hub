@@ -175,10 +175,16 @@ function setAppPage(page) {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, {
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    ...opts,
-  });
+  let r;
+  try {
+    r = await fetch(path, {
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      ...opts,
+    });
+  } catch (err) {
+    const detail = err instanceof Error && err.message ? err.message : String(err);
+    throw new Error(`请求未收到服务端响应：${path}。请检查服务是否仍在运行；原始错误：${detail}`);
+  }
   const text = await r.text();
   let data;
   try {
@@ -188,7 +194,7 @@ async function api(path, opts = {}) {
   }
   if (!r.ok) {
     const msg = data?.error || r.statusText || "请求失败";
-    throw new Error(msg);
+    throw new Error(`${msg}（HTTP ${r.status}）`);
   }
   return data;
 }
@@ -1759,6 +1765,16 @@ function renderSubscriptionCards(state) {
     .join("");
 }
 
+function subscriptionPollToast(outcome) {
+  if (!outcome || typeof outcome !== "object") return "订阅轮询完成";
+  const parts = [
+    `新增待处理 ${Number(outcome.created_unprocessed || 0)}`,
+    `跳过旧想看 ${Number(outcome.created_skipped || 0)}`,
+    `更新已有 ${Number(outcome.updated_existing || 0)}`,
+  ];
+  return `订阅轮询完成：${parts.join(" · ")}`;
+}
+
 async function loadSubscriptions({ poll = false, silent = false } = {}) {
   clearErr();
   const refreshBtn = $("#btn-subscription-refresh");
@@ -1766,19 +1782,24 @@ async function loadSubscriptions({ poll = false, silent = false } = {}) {
   if (refreshBtn) refreshBtn.disabled = true;
   if (pollBtn) pollBtn.disabled = true;
   try {
+    let pollOutcome = null;
     if (poll) {
-      await api("/api/subscriptions/wanted/poll", { method: "POST", body: "{}" });
+      pollOutcome = await api("/api/subscriptions/wanted/poll", { method: "POST", body: "{}" });
     }
     const state = await api("/api/subscriptions/wanted");
     subscriptionStateCache = state;
     renderSubscriptionCards(state);
-    if (!silent) showToast(poll ? "订阅轮询完成" : "订阅已刷新", "ok");
+    if (!silent) showToast(poll ? subscriptionPollToast(pollOutcome) : "本地订阅列表已刷新", "ok");
     return state;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    showErr(msg);
-    $("#subscription-list").innerHTML = `<p class="empty-hint">加载失败：${escapeHtml(msg)}</p>`;
-    throw err;
+    const detail = `${poll ? "轮询想看失败" : "刷新本地订阅列表失败"}：${msg}`;
+    showErr(detail);
+    const mount = $("#subscription-list");
+    if (mount && !subscriptionRecordsFromState(subscriptionStateCache).length) {
+      mount.innerHTML = `<p class="empty-hint">加载失败：${escapeHtml(detail)}</p>`;
+    }
+    throw new Error(detail);
   } finally {
     if (refreshBtn) refreshBtn.disabled = false;
     if (pollBtn) pollBtn.disabled = false;

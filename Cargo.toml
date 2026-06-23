@@ -9,7 +9,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-limbo = "0.0.22"
+rusqlite = "0.32"
 tmdb_client = { version = "1.8", features = ["native-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "multipart"] }
 tracing = "0.1"

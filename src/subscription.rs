@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use limbo::{Builder, Connection, Row, Value};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -348,7 +348,7 @@ impl WantedSubscriptionStore {
             self.db_path.display().to_string(),
             now,
         );
-        self.save_state_unlocked(account_key, &state).await?;
+        self.save_state_unlocked(account_key, &state)?;
         Ok(outcome)
     }
 
@@ -371,7 +371,7 @@ impl WantedSubscriptionStore {
             return Ok(None);
         };
         state.updated_at = now;
-        self.save_state_unlocked(account_key, &state).await?;
+        self.save_state_unlocked(account_key, &state)?;
         Ok(Some(WantedStatusUpdateOutcome {
             record,
             retry_exhausted,
@@ -394,7 +394,7 @@ impl WantedSubscriptionStore {
         record.updated_at = now;
         state.updated_at = now;
         let record = record.clone();
-        self.save_state_unlocked(account_key, &state).await?;
+        self.save_state_unlocked(account_key, &state)?;
         Ok(Some(record))
     }
 
@@ -416,7 +416,7 @@ impl WantedSubscriptionStore {
         record.updated_at = now;
         state.updated_at = now;
         let record = record.clone();
-        self.save_state_unlocked(account_key, &state).await?;
+        self.save_state_unlocked(account_key, &state)?;
         Ok(Some(record))
     }
 
@@ -440,7 +440,7 @@ impl WantedSubscriptionStore {
         record.updated_at = now;
         state.updated_at = now;
         let record = record.clone();
-        self.save_state_unlocked(account_key, &state).await?;
+        self.save_state_unlocked(account_key, &state)?;
         Ok(Some(record))
     }
 
@@ -466,7 +466,7 @@ impl WantedSubscriptionStore {
         record.updated_at = now;
         state.updated_at = now;
         let record = record.clone();
-        self.save_state_unlocked(account_key, &state).await?;
+        self.save_state_unlocked(account_key, &state)?;
         Ok(Some(record))
     }
 
@@ -475,15 +475,21 @@ impl WantedSubscriptionStore {
             .join(format!("wanted_{}.json", safe_account_key(account_key)))
     }
 
-    async fn connection_unlocked(&self) -> std::io::Result<Connection> {
-        tokio::fs::create_dir_all(&self.root).await?;
-        let db_path = self.db_path.to_string_lossy().to_string();
-        let db = Builder::new_local(&db_path)
-            .build()
-            .await
-            .map_err(limbo_io)?;
-        let conn = db.connect().map_err(limbo_io)?;
-        init_schema(&conn).await?;
+    fn connection_unlocked(&self) -> std::io::Result<Connection> {
+        std::fs::create_dir_all(&self.root)?;
+        match self.open_initialized_connection() {
+            Ok(conn) => Ok(conn),
+            Err(err) if is_sqlite_recoverable_corruption(&err) => {
+                backup_corrupt_db(&self.db_path)?;
+                self.open_initialized_connection()
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn open_initialized_connection(&self) -> std::io::Result<Connection> {
+        let conn = Connection::open(&self.db_path).map_err(sqlite_io)?;
+        init_schema(&conn)?;
         Ok(conn)
     }
 
@@ -492,28 +498,30 @@ impl WantedSubscriptionStore {
         account_key: &str,
         now: u64,
     ) -> std::io::Result<WantedSubscriptionState> {
-        let conn = self.connection_unlocked().await?;
-        if let Some(mut state) = load_state_from_db(&conn, account_key).await? {
-            repair_state_defaults(&mut state, account_key, now);
-            return Ok(state);
+        {
+            let conn = self.connection_unlocked()?;
+            if let Some(mut state) = load_state_from_db(&conn, account_key)? {
+                repair_state_defaults(&mut state, account_key, now);
+                return Ok(state);
+            }
         }
 
         if let Some(mut state) = self.load_legacy_json_state(account_key).await? {
             repair_state_defaults(&mut state, account_key, now);
-            save_state_to_db(&conn, account_key, &state).await?;
+            self.save_state_unlocked(account_key, &state)?;
             return Ok(state);
         }
 
         Ok(WantedSubscriptionState::new(account_key, now))
     }
 
-    async fn save_state_unlocked(
+    fn save_state_unlocked(
         &self,
         account_key: &str,
         state: &WantedSubscriptionState,
     ) -> std::io::Result<()> {
-        let conn = self.connection_unlocked().await?;
-        save_state_to_db(&conn, account_key, state).await
+        let mut conn = self.connection_unlocked()?;
+        save_state_to_db(&mut conn, account_key, state)
     }
 
     async fn load_legacy_json_state(
@@ -537,16 +545,15 @@ impl WantedSubscriptionStore {
     }
 }
 
-async fn init_schema(conn: &Connection) -> std::io::Result<()> {
+fn init_schema(conn: &Connection) -> std::io::Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS subscription_schema_meta (
             key TEXT NOT NULL,
             value INTEGER NOT NULL
         )",
-        (),
+        [],
     )
-    .await
-    .map_err(limbo_io)?;
+    .map_err(sqlite_io)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS subscription_meta (
             account_key TEXT NOT NULL,
@@ -556,10 +563,9 @@ async fn init_schema(conn: &Connection) -> std::io::Result<()> {
             updated_at INTEGER NOT NULL,
             last_poll_at INTEGER
         )",
-        (),
+        [],
     )
-    .await
-    .map_err(limbo_io)?;
+    .map_err(sqlite_io)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS wanted_subscription_records (
             account_key TEXT NOT NULL,
@@ -570,16 +576,24 @@ async fn init_schema(conn: &Connection) -> std::io::Result<()> {
             updated_at INTEGER NOT NULL,
             record_json TEXT NOT NULL
         )",
-        (),
+        [],
     )
-    .await
-    .map_err(limbo_io)?;
-    ensure_schema_version(conn).await?;
+    .map_err(sqlite_io)?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_state_blobs (
+            account_key TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )
+    .map_err(sqlite_io)?;
+    ensure_schema_version(conn)?;
     Ok(())
 }
 
-async fn ensure_schema_version(conn: &Connection) -> std::io::Result<()> {
-    let current = read_schema_version(conn).await?;
+fn ensure_schema_version(conn: &Connection) -> std::io::Result<()> {
+    let current = read_schema_version(conn)?;
     if current > DB_SCHEMA_VERSION {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -591,69 +605,76 @@ async fn ensure_schema_version(conn: &Connection) -> std::io::Result<()> {
     }
     conn.execute(
         "DELETE FROM subscription_schema_meta WHERE key = 'schema_version'",
-        (),
+        [],
     )
-    .await
-    .map_err(limbo_io)?;
+    .map_err(sqlite_io)?;
     conn.execute(
         "INSERT INTO subscription_schema_meta (key, value) VALUES ('schema_version', ?1)",
-        [DB_SCHEMA_VERSION],
+        params![DB_SCHEMA_VERSION],
     )
-    .await
-    .map_err(limbo_io)?;
+    .map_err(sqlite_io)?;
     Ok(())
 }
 
-async fn read_schema_version(conn: &Connection) -> std::io::Result<i64> {
-    let mut rows = conn
-        .query(
-            "SELECT value FROM subscription_schema_meta WHERE key = 'schema_version'",
-            (),
-        )
-        .await
-        .map_err(limbo_io)?;
-    match rows.next().await.map_err(limbo_io)? {
-        Some(row) => row_i64(&row, 0),
-        None => Ok(0),
-    }
+fn read_schema_version(conn: &Connection) -> std::io::Result<i64> {
+    conn.query_row(
+        "SELECT value FROM subscription_schema_meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(sqlite_io)
+    .map(|value| value.unwrap_or_default())
 }
 
-async fn load_state_from_db(
+fn load_state_from_db(
     conn: &Connection,
     account_key: &str,
 ) -> std::io::Result<Option<WantedSubscriptionState>> {
-    let mut meta_rows = conn
-        .query(
+    let Some((version, bootstrap_completed, created_at, updated_at, last_poll_at)) = conn
+        .query_row(
             "SELECT version, bootstrap_completed, created_at, updated_at, last_poll_at
                 FROM subscription_meta WHERE account_key = ?1",
-            [account_key],
+            params![account_key],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
         )
-        .await
-        .map_err(limbo_io)?;
-    let Some(meta) = meta_rows.next().await.map_err(limbo_io)? else {
+        .optional()
+        .map_err(sqlite_io)?
+    else {
         return Ok(None);
     };
 
+    if let Some(blob_state) = load_state_blob_from_db(conn, account_key)? {
+        return Ok(Some(blob_state));
+    }
+
     let mut state = WantedSubscriptionState {
-        version: row_i64(&meta, 0)? as u32,
+        version: version as u32,
         account_key: account_key.to_string(),
-        bootstrap_completed: row_i64(&meta, 1)? != 0,
-        created_at: i64_to_u64(row_i64(&meta, 2)?),
-        updated_at: i64_to_u64(row_i64(&meta, 3)?),
-        last_poll_at: row_opt_i64(&meta, 4)?.map(i64_to_u64),
+        bootstrap_completed,
+        created_at: i64_to_u64(created_at),
+        updated_at: i64_to_u64(updated_at),
+        last_poll_at: last_poll_at.map(i64_to_u64),
         records: BTreeMap::new(),
     };
 
-    let mut record_rows = conn
-        .query(
+    let mut stmt = conn
+        .prepare(
             "SELECT subject_id, status, title, category_text, updated_at, record_json FROM wanted_subscription_records
                 WHERE account_key = ?1 ORDER BY subject_id",
-            [account_key],
         )
-        .await
-        .map_err(limbo_io)?;
-    while let Some(row) = record_rows.next().await.map_err(limbo_io)? {
-        let mut record = parse_record_row(&row)?;
+        .map_err(sqlite_io)?;
+    let mut rows = stmt.query(params![account_key]).map_err(sqlite_io)?;
+    while let Some(row) = rows.next().map_err(sqlite_io)? {
+        let mut record = parse_record_row(row)?;
         repair_record_defaults(&mut record, state.created_at, state.updated_at, 0);
         state.records.insert(record.subject_id.clone(), record);
     }
@@ -661,13 +682,40 @@ async fn load_state_from_db(
     Ok(Some(state))
 }
 
-fn parse_record_row(row: &Row) -> std::io::Result<WantedSubscriptionRecord> {
-    let subject_id = row_text(row, 0)?;
-    let status = row_text(row, 1)?;
-    let title = row_text(row, 2)?;
-    let category_text = row_optional_text(row, 3)?;
-    let updated_at = row_opt_i64(row, 4)?.map(i64_to_u64).unwrap_or_default();
-    let raw = row_text(row, 5)?;
+fn load_state_blob_from_db(
+    conn: &Connection,
+    account_key: &str,
+) -> std::io::Result<Option<WantedSubscriptionState>> {
+    let raw = conn
+        .query_row(
+            "SELECT state_json FROM subscription_state_blobs WHERE account_key = ?1",
+            params![account_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite_io)?;
+    raw.map(|raw| {
+        serde_json::from_str(&raw).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("解析订阅 SQLite 状态快照失败: {e}"),
+            )
+        })
+    })
+    .transpose()
+}
+
+fn parse_record_row(row: &Row<'_>) -> std::io::Result<WantedSubscriptionRecord> {
+    let subject_id = row.get::<_, String>(0).map_err(sqlite_io)?;
+    let status = row.get::<_, String>(1).map_err(sqlite_io)?;
+    let title = row.get::<_, String>(2).map_err(sqlite_io)?;
+    let category_text = row.get::<_, Option<String>>(3).map_err(sqlite_io)?;
+    let updated_at = row
+        .get::<_, Option<i64>>(4)
+        .map_err(sqlite_io)?
+        .map(i64_to_u64)
+        .unwrap_or_default();
+    let raw = row.get::<_, String>(5).map_err(sqlite_io)?;
     let mut record: WantedSubscriptionRecord =
         serde_json::from_str(&raw).unwrap_or_else(|_| WantedSubscriptionRecord {
             subject_id: subject_id.clone(),
@@ -706,85 +754,57 @@ fn parse_record_row(row: &Row) -> std::io::Result<WantedSubscriptionRecord> {
     Ok(record)
 }
 
-async fn save_state_to_db(
-    conn: &Connection,
+fn save_state_to_db(
+    conn: &mut Connection,
     account_key: &str,
     state: &WantedSubscriptionState,
 ) -> std::io::Result<()> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(limbo_io)?;
-    let result = save_state_to_db_inner(conn, account_key, state).await;
-    match result {
-        Ok(()) => {
-            conn.execute("COMMIT", ()).await.map_err(limbo_io)?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(e)
-        }
-    }
-}
-
-async fn save_state_to_db_inner(
-    conn: &Connection,
-    account_key: &str,
-    state: &WantedSubscriptionState,
-) -> std::io::Result<()> {
-    conn.execute(
+    let tx = conn.transaction().map_err(sqlite_io)?;
+    tx.execute(
         "DELETE FROM subscription_meta WHERE account_key = ?1",
-        [account_key],
+        params![account_key],
     )
-    .await
-    .map_err(limbo_io)?;
-    conn.execute(
+    .map_err(sqlite_io)?;
+    tx.execute(
         "INSERT INTO subscription_meta
             (account_key, version, bootstrap_completed, created_at, updated_at, last_poll_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (
+        params![
             account_key,
             state.version as i64,
             i64::from(state.bootstrap_completed),
             u64_to_i64(state.created_at),
             u64_to_i64(state.updated_at),
-            opt_u64_value(state.last_poll_at),
-        ),
+            state.last_poll_at.map(u64_to_i64),
+        ],
     )
-    .await
-    .map_err(limbo_io)?;
+    .map_err(sqlite_io)?;
 
-    conn.execute(
+    let state_json = serde_json::to_string(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    tx.execute(
+        "DELETE FROM subscription_state_blobs WHERE account_key = ?1",
+        params![account_key],
+    )
+    .map_err(sqlite_io)?;
+    tx.execute(
+        "INSERT INTO subscription_state_blobs
+            (account_key, state_json, updated_at)
+            VALUES (?1, ?2, ?3)",
+        params![account_key, state_json, u64_to_i64(state.updated_at)],
+    )
+    .map_err(sqlite_io)?;
+
+    tx.execute(
         "DELETE FROM wanted_subscription_records WHERE account_key = ?1",
-        [account_key],
+        params![account_key],
     )
-    .await
-    .map_err(limbo_io)?;
-
-    for record in state.records.values() {
-        let record_json = serde_json::to_string(record)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        conn.execute(
-            "INSERT INTO wanted_subscription_records
-                (account_key, subject_id, status, title, category_text, updated_at, record_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            (
-                account_key,
-                record.subject_id.as_str(),
-                status_label(record.status),
-                record.title.as_str(),
-                opt_str_value(record.category_text.as_deref()),
-                u64_to_i64(record.updated_at),
-                record_json,
-            ),
-        )
-        .await
-        .map_err(limbo_io)?;
-    }
-
+    .map_err(sqlite_io)?;
+    tx.commit().map_err(sqlite_io)?;
     Ok(())
 }
 
+#[cfg(test)]
 fn status_label(status: WantedSubscriptionStatus) -> &'static str {
     match status {
         WantedSubscriptionStatus::Unprocessed => "unprocessed",
@@ -813,81 +833,6 @@ fn status_from_label(raw: &str) -> WantedSubscriptionStatus {
     }
 }
 
-fn opt_u64_value(value: Option<u64>) -> Value {
-    value
-        .map(|value| Value::Integer(u64_to_i64(value)))
-        .unwrap_or(Value::Null)
-}
-
-fn opt_str_value(value: Option<&str>) -> Value {
-    value
-        .map(|value| Value::Text(value.to_string()))
-        .unwrap_or(Value::Null)
-}
-
-fn row_text(row: &Row, index: usize) -> std::io::Result<String> {
-    match row.get_value(index).map_err(limbo_io)? {
-        Value::Text(value) => Ok(value),
-        Value::Integer(value) => Ok(value.to_string()),
-        Value::Real(value) => Ok(value.to_string()),
-        Value::Null => Ok(String::new()),
-        Value::Blob(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "SQLite 字段是 blob，无法作为文本读取",
-        )),
-    }
-}
-
-fn row_optional_text(row: &Row, index: usize) -> std::io::Result<Option<String>> {
-    match row.get_value(index).map_err(limbo_io)? {
-        Value::Null => Ok(None),
-        Value::Text(value) => {
-            let trimmed = value.trim();
-            Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
-        }
-        Value::Integer(value) => Ok(Some(value.to_string())),
-        Value::Real(value) => Ok(Some(value.to_string())),
-        Value::Blob(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "SQLite 字段是 blob，无法作为文本读取",
-        )),
-    }
-}
-
-fn row_i64(row: &Row, index: usize) -> std::io::Result<i64> {
-    match row.get_value(index).map_err(limbo_io)? {
-        Value::Integer(value) => Ok(value),
-        Value::Text(value) => value.parse().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("SQLite 整数字段解析失败: {e}"),
-            )
-        }),
-        value => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("SQLite 字段不是整数: {value:?}"),
-        )),
-    }
-}
-
-fn row_opt_i64(row: &Row, index: usize) -> std::io::Result<Option<i64>> {
-    match row.get_value(index).map_err(limbo_io)? {
-        Value::Null => Ok(None),
-        Value::Integer(value) => Ok(Some(value)),
-        Value::Text(value) if value.trim().is_empty() => Ok(None),
-        Value::Text(value) => value.parse().map(Some).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("SQLite 可空整数字段解析失败: {e}"),
-            )
-        }),
-        value => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("SQLite 字段不是可空整数: {value:?}"),
-        )),
-    }
-}
-
 fn u64_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -896,8 +841,32 @@ fn i64_to_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
 }
 
-fn limbo_io(error: limbo::Error) -> std::io::Error {
+fn sqlite_io(error: rusqlite::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
+}
+
+fn is_sqlite_recoverable_corruption(error: &std::io::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("malformed")
+        || message.contains("not a database")
+        || message.contains("invalid rootpage")
+        || message.contains("database disk image is malformed")
+}
+
+fn backup_corrupt_db(path: &PathBuf) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("wanted.sqlite");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let backup = path.with_file_name(format!("{file_name}.corrupt.{stamp}"));
+    std::fs::rename(path, backup)
 }
 
 fn repair_state_defaults(state: &mut WantedSubscriptionState, account_key: &str, now: u64) {
@@ -1272,10 +1241,10 @@ mod tests {
         };
 
         let store = WantedSubscriptionStore::new(root.clone());
-        let conn = store.connection_unlocked().await.unwrap();
-        assert_eq!(read_schema_version(&conn).await.unwrap(), DB_SCHEMA_VERSION);
-        init_schema(&conn).await.unwrap();
-        assert_eq!(read_schema_version(&conn).await.unwrap(), DB_SCHEMA_VERSION);
+        let conn = store.connection_unlocked().unwrap();
+        assert_eq!(read_schema_version(&conn).unwrap(), DB_SCHEMA_VERSION);
+        init_schema(&conn).unwrap();
+        assert_eq!(read_schema_version(&conn).unwrap(), DB_SCHEMA_VERSION);
 
         let outcome = store
             .apply_wish_items(
@@ -1295,6 +1264,55 @@ mod tests {
         assert_eq!(rec.title, "新剧");
         assert_eq!(rec.status, WantedSubscriptionStatus::Unprocessed);
         assert_eq!(rec.release_year, Some(2025));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_second_poll_adds_new_wish_as_unprocessed() {
+        let root = temp_state_dir("sqlite_poll_twice");
+        let cfg = SubscriptionWatcherConfig::default();
+        let store = WantedSubscriptionStore::new(root.clone());
+
+        let first = store
+            .apply_wish_items(
+                "acct",
+                &[item("1", "旧片", "2023 / 日本", &["日影"])],
+                &cfg,
+                200,
+            )
+            .await
+            .unwrap();
+        assert!(first.bootstrap_mode);
+        assert_eq!(first.created_skipped, 1);
+        assert_eq!(first.created_unprocessed, 0);
+
+        let second = store
+            .apply_wish_items(
+                "acct",
+                &[
+                    item("1", "旧片", "2023 / 日本", &["日影"]),
+                    item("2", "新片", "2025 / 美国", &["新订阅"]),
+                ],
+                &cfg,
+                260,
+            )
+            .await
+            .unwrap();
+        assert!(!second.bootstrap_mode);
+        assert_eq!(second.created_unprocessed, 1);
+        assert_eq!(second.created_skipped, 0);
+
+        let snapshot = store.snapshot("acct", 300).await.unwrap();
+        assert_eq!(
+            snapshot.records.get("1").unwrap().status,
+            WantedSubscriptionStatus::Skipped
+        );
+        assert_eq!(
+            snapshot.records.get("2").unwrap().status,
+            WantedSubscriptionStatus::Unprocessed
+        );
+        assert_eq!(snapshot.last_poll_at, Some(260));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1340,30 +1358,28 @@ mod tests {
     async fn malformed_db_record_has_deterministic_fallback() {
         let root = temp_state_dir("malformed");
         let store = WantedSubscriptionStore::new(root.clone());
-        let conn = store.connection_unlocked().await.unwrap();
+        let conn = store.connection_unlocked().unwrap();
         conn.execute(
             "INSERT INTO subscription_meta
                 (account_key, version, bootstrap_completed, created_at, updated_at, last_poll_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            ("acct", STATE_VERSION as i64, 1i64, 100i64, 200i64, 150i64),
+            params!["acct", STATE_VERSION as i64, 1i64, 100i64, 200i64, 150i64],
         )
-        .await
         .unwrap();
         conn.execute(
             "INSERT INTO wanted_subscription_records
                 (account_key, subject_id, status, title, category_text, updated_at, record_json)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            (
+            params![
                 "acct",
                 "bad",
                 "failed",
                 "损坏记录",
-                Value::Null,
+                Option::<String>::None,
                 200i64,
                 "{not valid json",
-            ),
+            ],
         )
-        .await
         .unwrap();
 
         let snapshot = store.snapshot("acct", 300).await.unwrap();
