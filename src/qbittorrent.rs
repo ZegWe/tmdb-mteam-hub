@@ -17,6 +17,8 @@ pub struct QbTorrentInfo {
     #[serde(default)]
     pub category: String,
     #[serde(default)]
+    pub tags: String,
+    #[serde(default)]
     pub save_path: String,
     #[serde(default)]
     pub content_path: String,
@@ -144,6 +146,17 @@ pub async fn add_torrent_from_url(
     category: Option<&str>,
     savepath: Option<&str>,
 ) -> Result<(), ApiError> {
+    add_torrent_from_url_with_tags(server, url, category, savepath, &[]).await
+}
+
+/// 通过 Web API 添加网络种子，并附加用于后续查找的 qB 标签。
+pub async fn add_torrent_from_url_with_tags(
+    server: &QbServerEntry,
+    url: &str,
+    category: Option<&str>,
+    savepath: Option<&str>,
+    tags: &[String],
+) -> Result<(), ApiError> {
     let u = url.trim();
     if u.is_empty() {
         return Err(ApiError::bad_request("下载地址为空"));
@@ -170,6 +183,14 @@ pub async fn add_torrent_from_url(
         if !t.is_empty() {
             form = form.text("savepath", t.to_string());
         }
+    }
+    let tags = tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty() && !tag.contains(','))
+        .collect::<Vec<_>>();
+    if !tags.is_empty() {
+        form = form.text("tags", tags.join(","));
     }
 
     let add = client
