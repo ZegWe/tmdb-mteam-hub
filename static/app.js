@@ -1651,8 +1651,23 @@ const PUSH_STATUS_LABELS = {
   needs_review: "需确认",
 };
 
+const SUB_SKIP_REASON_LABELS = {
+  initial_bootstrap_existing_wish: "历史想看，首次同步跳过",
+};
+
 function normalizedStatus(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function formatSubscriptionSkipReason(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const mapped = SUB_SKIP_REASON_LABELS[raw] || SUB_SKIP_REASON_LABELS[raw.toLowerCase()];
+  if (mapped) return mapped;
+  if (/^[a-z0-9_-]+$/i.test(raw)) {
+    return `跳过原因：${raw.replace(/[_-]+/g, " ")}`;
+  }
+  return raw;
 }
 
 function subscriptionDisplayStatus(record) {
@@ -1740,6 +1755,7 @@ function renderSubscriptionCards(state) {
       const progress = subscriptionProgress(record);
       const push = record.last_push || {};
       const completion = record.last_completion || {};
+      const skipReason = formatSubscriptionSkipReason(record.skip_reason);
       const meta = [
         record.release_year || "",
         record.category_text || "",
@@ -1747,7 +1763,7 @@ function renderSubscriptionCards(state) {
         push.download_state || "",
         record.updated_at ? `更新 ${formatUnixSeconds(record.updated_at)}` : "",
       ].filter(Boolean);
-      const sub = completion.error || push.error || record.last_error || record.skip_reason || "";
+      const sub = completion.error || push.error || record.last_error || skipReason || "";
       const episodeCount = Array.isArray(push.episodes) && push.episodes.length
         ? `<span class="subscription-episode-count">${push.episodes.length} 集</span>`
         : "";
@@ -1865,11 +1881,13 @@ function renderSubscriptionDetail(record) {
   const push = record.last_push || null;
   const completion = record.last_completion || null;
   const progress = subscriptionProgress(record);
+  const skipReason = formatSubscriptionSkipReason(record.skip_reason);
   const metaRows = [
     detailRow("豆瓣 ID", record.subject_id),
     detailRow("分类文本", record.category_text),
     detailRow("上映年份", record.release_year),
     detailRow("状态", status.text),
+    detailRow("跳过原因", skipReason),
     detailRow("重试", `${record.retry_count || 0}/${record.max_retries || 0}`),
     detailRow("首次看到", formatUnixSeconds(record.first_seen_at)),
     detailRow("最近更新", formatUnixSeconds(record.updated_at)),
