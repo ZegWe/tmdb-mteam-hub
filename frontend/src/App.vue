@@ -2204,8 +2204,21 @@ function subscriptionStageLabel(record) {
   return SUB_STAGE_LABELS[stage] || stage || "";
 }
 
-function subscriptionStageNote(record) {
+function subscriptionStageMessage(record) {
   const message = String(record?.stage_message || "").trim();
+  const skipReason = String(record?.skip_reason || "").trim();
+  const skipped =
+    normalizedStatus(record?.status) === "skipped" ||
+    normalizedStatus(record?.processing_stage) === "skipped";
+  if (skipped) {
+    const formatted = formatSubscriptionSkipReason(skipReason);
+    if (formatted && (!message || message === skipReason)) return formatted;
+  }
+  return message;
+}
+
+function subscriptionStageNote(record) {
+  const message = subscriptionStageMessage(record);
   const next = String(record?.next_action || "").trim();
   if (message && next) return `${message}；下一步：${next}`;
   return message || (next ? `下一步：${next}` : "");
@@ -2255,7 +2268,7 @@ function subscriptionDetailRows(record) {
     row("上映年份", record.release_year),
     row("状态", subscriptionDisplayStatus(record).text),
     row("当前阶段", subscriptionStageLabel(record)),
-    row("阶段说明", record.stage_message),
+    row("阶段说明", subscriptionStageMessage(record)),
     row("下一步", record.next_action),
     row("阶段更新时间", formatUnixSeconds(record.stage_updated_at)),
     row("跳过原因", formatSubscriptionSkipReason(record.skip_reason)),

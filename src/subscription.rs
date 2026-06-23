@@ -933,6 +933,26 @@ fn repair_record_defaults(
     if record.last_seen_at == 0 {
         record.last_seen_at = record.updated_at;
     }
+    normalize_existing_stage(record, now);
+}
+
+fn normalize_existing_stage(record: &mut WantedSubscriptionRecord, now: u64) {
+    if matches!(record.status, WantedSubscriptionStatus::Skipped) {
+        let stage = record.processing_stage.as_deref().unwrap_or_default();
+        let message = record.stage_message.as_deref().unwrap_or_default().trim();
+        let skip_reason = record.skip_reason.as_deref().unwrap_or_default().trim();
+        if stage != "skipped"
+            || message.is_empty()
+            || (!skip_reason.is_empty() && message == skip_reason)
+        {
+            let stage_time = record
+                .stage_updated_at
+                .unwrap_or_else(|| record.updated_at.max(record.created_at).max(now));
+            apply_status_stage(record, stage_time);
+        }
+        return;
+    }
+
     if record.processing_stage.is_none() && record.stage_message.is_none() {
         hydrate_stage_from_record(record);
     }
@@ -980,6 +1000,7 @@ fn apply_wish_items_to_state(
         if bootstrap_mode && bootstrap_existing_as_skipped {
             record.status = WantedSubscriptionStatus::Skipped;
             record.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
+            apply_status_stage(&mut record, now);
             created_skipped += 1;
         } else {
             record.status = WantedSubscriptionStatus::Unprocessed;
@@ -1192,13 +1213,18 @@ fn apply_status_stage(record: &mut WantedSubscriptionRecord, now: u64) {
         WantedSubscriptionStatus::Skipped => set_stage(
             record,
             "skipped",
-            &record
-                .skip_reason
-                .clone()
-                .unwrap_or_else(|| "已跳过该订阅".to_string()),
+            &subscription_skip_reason_message(record.skip_reason.as_deref()),
             None,
             now,
         ),
+    }
+}
+
+fn subscription_skip_reason_message(reason: Option<&str>) -> String {
+    match reason.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("initial_bootstrap_existing_wish") => "历史想看，首次同步跳过".to_string(),
+        Some(value) => value.to_string(),
+        None => "已跳过该订阅".to_string(),
     }
 }
 
@@ -1412,6 +1438,31 @@ mod tests {
         assert_eq!(rec.status, WantedSubscriptionStatus::Skipped);
         assert_eq!(rec.release_year, Some(2024));
         assert_eq!(rec.category_text.as_deref(), Some("家庭"));
+        assert_eq!(rec.processing_stage.as_deref(), Some("skipped"));
+        assert_eq!(rec.stage_message.as_deref(), Some("历史想看，首次同步跳过"));
+        assert_ne!(
+            rec.stage_message.as_deref(),
+            Some("initial_bootstrap_existing_wish")
+        );
+        assert_eq!(rec.next_action.as_deref(), None);
+    }
+
+    #[test]
+    fn skipped_stage_hydration_does_not_leak_raw_skip_reason() {
+        let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 3, 100);
+        rec.status = WantedSubscriptionStatus::Skipped;
+        rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
+        rec.processing_stage = Some("skipped".to_string());
+        rec.stage_message = Some("initial_bootstrap_existing_wish".to_string());
+        rec.stage_updated_at = Some(150);
+        rec.next_action = Some("raw".to_string());
+
+        repair_record_defaults(&mut rec, 100, 120, 300);
+
+        assert_eq!(rec.processing_stage.as_deref(), Some("skipped"));
+        assert_eq!(rec.stage_message.as_deref(), Some("历史想看，首次同步跳过"));
+        assert_eq!(rec.stage_updated_at, Some(150));
+        assert_eq!(rec.next_action.as_deref(), None);
     }
 
     #[test]
