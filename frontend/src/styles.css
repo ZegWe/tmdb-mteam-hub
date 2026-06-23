@@ -1310,6 +1310,205 @@ a.torrent-card-link:visited {
   word-break: break-word;
 }
 
+.logs-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem 1rem;
+}
+
+.logs-top .sub {
+  grid-column: 1 / 2;
+}
+
+.logs-top .actions {
+  grid-column: 2 / 3;
+  grid-row: 1 / span 2;
+  margin-top: 0;
+  justify-content: flex-end;
+}
+
+.operation-log-filters {
+  padding: 1rem 1.5rem;
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.8fr) minmax(8rem, 0.65fr) minmax(16rem, 1.6fr) auto;
+  align-items: end;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 86%, var(--muted-bg));
+}
+
+.operation-log-filters label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.operation-log-filters select,
+.operation-log-filters input {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.operation-log-search {
+  min-width: min(100%, 16rem);
+}
+
+.operation-log-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.operation-log-summary {
+  padding: 0.75rem 1.5rem 0;
+}
+
+.operation-log-list {
+  padding: 0.65rem 1.5rem 0;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.operation-log-card.card {
+  cursor: default;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 0.42fr);
+  gap: 0.85rem 1rem;
+  padding: 0.85rem 0.95rem;
+  overflow: visible;
+}
+
+.operation-log-card.card:hover {
+  transform: none;
+  border-color: var(--border);
+}
+
+.operation-log-main,
+.operation-log-meta {
+  min-width: 0;
+}
+
+.operation-log-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.operation-log-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.operation-log-category,
+.operation-log-status {
+  min-height: 1.45rem;
+  max-width: 100%;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted-bg);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.15;
+  white-space: normal;
+  word-break: keep-all;
+}
+
+.operation-log-status-success {
+  border-color: rgba(4, 120, 87, 0.42);
+  background: rgba(4, 120, 87, 0.1);
+  color: var(--success);
+}
+
+.operation-log-status-failed {
+  border-color: rgba(180, 35, 24, 0.42);
+  background: rgba(180, 35, 24, 0.1);
+  color: var(--danger);
+}
+
+.operation-log-status-processing {
+  border-color: rgba(37, 99, 235, 0.38);
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--info);
+}
+
+.operation-log-card h2 {
+  margin: 0.45rem 0 0;
+  min-width: 0;
+  font-size: 0.98rem;
+  line-height: 1.35;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operation-log-target {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operation-log-error {
+  margin: 0.5rem 0 0;
+  padding: 0.45rem 0.55rem;
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: rgba(180, 35, 24, 0.08);
+  color: var(--danger);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operation-log-meta {
+  align-self: start;
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.operation-log-meta div {
+  min-width: 0;
+}
+
+.operation-log-meta dt {
+  margin: 0;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--muted) 82%, var(--text));
+}
+
+.operation-log-meta dd {
+  margin: 0.12rem 0 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operation-log-pager {
+  padding: 1rem 1.5rem 3rem;
+  display: flex;
+  justify-content: center;
+}
+
 .modal {
   position: fixed;
   top: 50%;
@@ -1642,6 +1841,46 @@ code {
 
   .library-bar .btn {
     width: 100%;
+  }
+
+  .logs-top {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .logs-top .sub,
+  .logs-top .actions {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .logs-top .actions,
+  .logs-top .btn {
+    width: 100%;
+  }
+
+  .operation-log-filters {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0.85rem;
+  }
+
+  .operation-log-filter-actions {
+    justify-content: stretch;
+  }
+
+  .operation-log-filter-actions .btn {
+    flex: 1 1 8rem;
+  }
+
+  .operation-log-summary,
+  .operation-log-list,
+  .operation-log-pager {
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+  }
+
+  .operation-log-card.card {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0.75rem;
   }
 
   .subscription-category-row,

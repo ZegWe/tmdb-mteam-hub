@@ -10,6 +10,7 @@ const router = createRouter({
   routes: [
     { path: "/", name: "main", component: EmptyRoute },
     { path: "/subscriptions", name: "subscriptions", component: EmptyRoute },
+    { path: "/logs", name: "logs", component: EmptyRoute },
     { path: "/settings", name: "settings", component: EmptyRoute },
   ],
 });

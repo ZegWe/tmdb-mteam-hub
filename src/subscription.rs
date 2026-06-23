@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::config::SubscriptionWatcherConfig;
 use crate::douban::DoubanLibraryItem;
 
 const STATE_VERSION: u32 = 1;
-const DB_SCHEMA_VERSION: i64 = 1;
+const DB_SCHEMA_VERSION: i64 = 2;
 const DB_FILE_NAME: &str = "wanted.sqlite";
 
 fn default_state_version() -> u32 {
@@ -309,6 +310,60 @@ pub struct WantedStatusUpdate {
     pub skip_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationLogEntry {
+    pub id: u64,
+    #[serde(default)]
+    pub account_key: String,
+    pub created_at: u64,
+    pub category: String,
+    pub action: String,
+    pub target_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_title: Option<String>,
+    pub status: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub related: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewOperationLogEntry {
+    pub account_key: String,
+    pub created_at: u64,
+    pub category: String,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: Option<String>,
+    pub target_title: Option<String>,
+    pub status: String,
+    pub summary: String,
+    pub error: Option<String>,
+    pub related: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OperationLogQuery {
+    pub category: Option<String>,
+    pub status: Option<String>,
+    pub q: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationLogPage {
+    pub items: Vec<OperationLogEntry>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+    pub has_more: bool,
+}
+
 #[derive(Clone)]
 pub struct WantedSubscriptionStore {
     root: PathBuf,
@@ -492,6 +547,24 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn append_operation_log(
+        &self,
+        entry: NewOperationLogEntry,
+    ) -> std::io::Result<OperationLogEntry> {
+        let _guard = self.lock.lock().await;
+        let conn = self.open_initialized_connection()?;
+        append_operation_log_to_db(&conn, entry)
+    }
+
+    pub async fn query_operation_logs(
+        &self,
+        query: OperationLogQuery,
+    ) -> std::io::Result<OperationLogPage> {
+        let _guard = self.lock.lock().await;
+        let conn = self.open_initialized_connection()?;
+        query_operation_logs_from_db(&conn, query)
+    }
+
     fn path_for(&self, account_key: &str) -> PathBuf {
         self.root
             .join(format!("wanted_{}.json", safe_account_key(account_key)))
@@ -607,6 +680,36 @@ fn init_schema(conn: &Connection) -> std::io::Result<()> {
             state_json TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         )",
+        [],
+    )
+    .map_err(sqlite_io)?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS operation_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_key TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            target_title TEXT,
+            status TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            error TEXT,
+            related_json TEXT NOT NULL DEFAULT '{}'
+        )",
+        [],
+    )
+    .map_err(sqlite_io)?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS operation_logs_created_idx
+            ON operation_logs (created_at DESC, id DESC)",
+        [],
+    )
+    .map_err(sqlite_io)?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS operation_logs_category_status_idx
+            ON operation_logs (category, status, created_at DESC)",
         [],
     )
     .map_err(sqlite_io)?;
@@ -828,6 +931,138 @@ fn save_state_to_db(
     .map_err(sqlite_io)?;
     tx.commit().map_err(sqlite_io)?;
     Ok(())
+}
+
+fn append_operation_log_to_db(
+    conn: &Connection,
+    entry: NewOperationLogEntry,
+) -> std::io::Result<OperationLogEntry> {
+    let related_json = serde_json::to_string(&entry.related).unwrap_or_else(|_| "{}".to_string());
+    conn.execute(
+        "INSERT INTO operation_logs
+            (account_key, created_at, category, action, target_type, target_id, target_title, status, summary, error, related_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            entry.account_key,
+            u64_to_i64(entry.created_at),
+            entry.category,
+            entry.action,
+            entry.target_type,
+            entry.target_id,
+            entry.target_title,
+            entry.status,
+            entry.summary,
+            entry.error,
+            related_json,
+        ],
+    )
+    .map_err(sqlite_io)?;
+    load_operation_log_by_id(conn, conn.last_insert_rowid())
+}
+
+fn query_operation_logs_from_db(
+    conn: &Connection,
+    query: OperationLogQuery,
+) -> std::io::Result<OperationLogPage> {
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(30).clamp(1, 100);
+    let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+    let mut filters = String::new();
+    let mut values = Vec::<String>::new();
+
+    if let Some(category) = query.category.map(|value| value.trim().to_string()) {
+        if !category.is_empty() && category != "all" {
+            filters.push_str(" AND category = ?");
+            values.push(category);
+        }
+    }
+    if let Some(status) = query.status.map(|value| value.trim().to_string()) {
+        if !status.is_empty() && status != "all" {
+            filters.push_str(" AND status = ?");
+            values.push(status);
+        }
+    }
+    if let Some(q) = query.q.map(|value| value.trim().to_string()) {
+        if !q.is_empty() {
+            let pattern = format!("%{q}%");
+            filters.push_str(
+                " AND (
+                    summary LIKE ?
+                    OR action LIKE ?
+                    OR target_id LIKE ?
+                    OR target_title LIKE ?
+                    OR error LIKE ?
+                )",
+            );
+            values.extend([
+                pattern.clone(),
+                pattern.clone(),
+                pattern.clone(),
+                pattern.clone(),
+                pattern,
+            ]);
+        }
+    }
+
+    let count_sql = format!("SELECT COUNT(*) FROM operation_logs WHERE 1=1{filters}");
+    let total = conn
+        .query_row(&count_sql, params_from_iter(values.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(sqlite_io)
+        .map(i64_to_u64)?;
+
+    let list_sql = format!(
+        "SELECT id, account_key, created_at, category, action, target_type, target_id, target_title, status, summary, error, related_json
+            FROM operation_logs
+            WHERE 1=1{filters}
+            ORDER BY created_at DESC, id DESC
+            LIMIT {page_size} OFFSET {offset}"
+    );
+    let mut stmt = conn.prepare(&list_sql).map_err(sqlite_io)?;
+    let rows = stmt
+        .query_map(params_from_iter(values.iter()), parse_operation_log_row)
+        .map_err(sqlite_io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_io)?;
+    let shown = offset.saturating_add(rows.len() as u64);
+
+    Ok(OperationLogPage {
+        items: rows,
+        page,
+        page_size,
+        total,
+        has_more: shown < total,
+    })
+}
+
+fn load_operation_log_by_id(conn: &Connection, id: i64) -> std::io::Result<OperationLogEntry> {
+    conn.query_row(
+        "SELECT id, account_key, created_at, category, action, target_type, target_id, target_title, status, summary, error, related_json
+            FROM operation_logs WHERE id = ?1",
+        params![id],
+        parse_operation_log_row,
+    )
+    .map_err(sqlite_io)
+}
+
+fn parse_operation_log_row(row: &Row<'_>) -> rusqlite::Result<OperationLogEntry> {
+    let related_raw = row.get::<_, String>(11)?;
+    let related = serde_json::from_str(&related_raw).unwrap_or_else(|_| json!({}));
+    Ok(OperationLogEntry {
+        id: i64_to_u64(row.get::<_, i64>(0)?),
+        account_key: row.get(1)?,
+        created_at: i64_to_u64(row.get::<_, i64>(2)?),
+        category: row.get(3)?,
+        action: row.get(4)?,
+        target_type: row.get(5)?,
+        target_id: row.get(6)?,
+        target_title: row.get(7)?,
+        status: row.get(8)?,
+        summary: row.get(9)?,
+        error: row.get(10)?,
+        related,
+    })
 }
 
 #[cfg(test)]
@@ -1669,6 +1904,74 @@ mod tests {
         assert_eq!(rec.title, "新剧");
         assert_eq!(rec.status, WantedSubscriptionStatus::Unprocessed);
         assert_eq!(rec.release_year, Some(2025));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn operation_logs_persist_filter_and_paginate() {
+        let root = temp_state_dir("operation_logs");
+        let store = WantedSubscriptionStore::new(root.clone());
+
+        store
+            .append_operation_log(NewOperationLogEntry {
+                account_key: "acct".to_string(),
+                created_at: 100,
+                category: "subscription_sync".to_string(),
+                action: "poll_wanted".to_string(),
+                target_type: "subscription".to_string(),
+                target_id: Some("sub-1".to_string()),
+                target_title: Some("片一".to_string()),
+                status: "success".to_string(),
+                summary: "轮询想看完成".to_string(),
+                error: None,
+                related: json!({ "created_unprocessed": 1 }),
+            })
+            .await
+            .unwrap();
+        store
+            .append_operation_log(NewOperationLogEntry {
+                account_key: "acct".to_string(),
+                created_at: 120,
+                category: "qb_push".to_string(),
+                action: "push_torrent".to_string(),
+                target_type: "torrent".to_string(),
+                target_id: Some("tid-2".to_string()),
+                target_title: Some("片二 2160p".to_string()),
+                status: "failed".to_string(),
+                summary: "推送 qB 失败".to_string(),
+                error: Some("qB 连接失败".to_string()),
+                related: json!({ "qb_server": "nas" }),
+            })
+            .await
+            .unwrap();
+
+        let reopened = WantedSubscriptionStore::new(root.clone());
+        let page = reopened
+            .query_operation_logs(OperationLogQuery {
+                page: Some(1),
+                page_size: Some(1),
+                ..OperationLogQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.has_more);
+        assert_eq!(page.items[0].action, "push_torrent");
+
+        let filtered = reopened
+            .query_operation_logs(OperationLogQuery {
+                category: Some("qb_push".to_string()),
+                status: Some("failed".to_string()),
+                q: Some("2160p".to_string()),
+                page: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.items[0].error.as_deref(), Some("qB 连接失败"));
+        assert_eq!(filtered.items[0].related["qb_server"], "nas");
 
         let _ = std::fs::remove_dir_all(root);
     }

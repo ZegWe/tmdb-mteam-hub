@@ -123,6 +123,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/mteam/torrents", get(mteam_search))
         .route("/qb/test", post(qb_test))
         .route("/qb/push-mteam", post(qb_push_mteam))
+        .route("/operation-logs", get(operation_logs))
         .route("/subscriptions/wanted", get(wanted_subscription_state))
         .route("/subscriptions/wanted/poll", post(wanted_subscription_poll))
         .route(
@@ -270,13 +271,69 @@ async fn put_config(
     if let Some(torrent_match_rules) = body.torrent_match_rules {
         new_cfg.torrent_match_rules = normalize_torrent_match_rules(torrent_match_rules)?;
     }
-    new_cfg
-        .listen_addr()
-        .map_err(|e| ApiError::bad_request(format!("监听地址配置无效: {e}")))?;
-    new_cfg
-        .save(&state.config_path)
-        .map_err(|e| ApiError::internal(format!("写入配置失败: {e}")))?;
+    let account_key = config_account_key(&new_cfg);
+    if let Err(e) = new_cfg.listen_addr() {
+        let error = format!("监听地址配置无效: {e}");
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                account_key,
+                "configuration",
+                "save_config",
+                "config",
+                None,
+                None,
+                "failed",
+                "配置保存失败：监听地址无效",
+                Some(error.clone()),
+                json!({ "qb_server_count": new_cfg.qb_servers.len() }),
+            ),
+        )
+        .await;
+        return Err(ApiError::bad_request(error));
+    }
+    if let Err(e) = new_cfg.save(&state.config_path) {
+        let error = format!("写入配置失败: {e}");
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                account_key,
+                "configuration",
+                "save_config",
+                "config",
+                None,
+                None,
+                "failed",
+                "配置保存失败：写入配置文件失败",
+                Some(error.clone()),
+                json!({ "qb_server_count": new_cfg.qb_servers.len() }),
+            ),
+        )
+        .await;
+        return Err(ApiError::internal(error));
+    }
     *state.config.write().await = new_cfg;
+    let cfg = state.config.read().await.clone();
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            config_account_key(&cfg),
+            "configuration",
+            "save_config",
+            "config",
+            None,
+            None,
+            "success",
+            "配置已保存",
+            None,
+            json!({
+                "qb_server_count": cfg.qb_servers.len(),
+                "subscription_category_count": cfg.subscription_categories.len(),
+                "torrent_rule_count": cfg.torrent_match_rules.len(),
+            }),
+        ),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -447,7 +504,50 @@ fn normalize_keyword_list(values: Vec<String>) -> Vec<String> {
     out
 }
 
-async fn wanted_subscription_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+#[derive(Deserialize, Default)]
+struct OperationLogsQuery {
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    page: Option<u32>,
+    #[serde(default)]
+    page_size: Option<u32>,
+}
+
+async fn operation_logs(
+    State(state): State<AppState>,
+    Query(q): Query<OperationLogsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = state
+        .wanted_store
+        .query_operation_logs(subscription::OperationLogQuery {
+            category: q.category,
+            status: q.status,
+            q: q.q,
+            page: q.page,
+            page_size: q.page_size,
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("读取操作日志失败: {e}")))?;
+    Ok(Json(
+        serde_json::to_value(page).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct WantedStateQuery {
+    #[serde(default)]
+    log: bool,
+}
+
+async fn wanted_subscription_state(
+    State(state): State<AppState>,
+    Query(q): Query<WantedStateQuery>,
+) -> Result<Json<Value>, ApiError> {
     let cookie = state.config.read().await.douban_cookie.clone();
     let account_key = douban::auth_cache_key_fragment(&cookie).map_err(ApiError::douban)?;
     let snapshot = state
@@ -455,13 +555,78 @@ async fn wanted_subscription_state(State(state): State<AppState>) -> Result<Json
         .snapshot(&account_key, unix_now_secs())
         .await
         .map_err(|e| ApiError::internal(format!("读取想看订阅状态失败: {e}")))?;
+    if q.log {
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                account_key.clone(),
+                "subscription_sync",
+                "refresh_local",
+                "subscription_state",
+                None,
+                None,
+                "success",
+                format!("刷新本地订阅列表：{} 条记录", snapshot.records.len()),
+                None,
+                json!({ "record_count": snapshot.records.len() }),
+            ),
+        )
+        .await;
+    }
     Ok(Json(
         serde_json::to_value(snapshot).map_err(|e| ApiError::internal(e.to_string()))?,
     ))
 }
 
 async fn wanted_subscription_poll(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let outcome = run_wanted_watch_poll(&state).await?;
+    let outcome = match run_wanted_watch_poll(&state).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    "system",
+                    "subscription_sync",
+                    "poll_wanted",
+                    "subscription_state",
+                    None,
+                    None,
+                    "failed",
+                    "轮询想看失败",
+                    Some(err.message().to_string()),
+                    json!({ "trigger": "manual" }),
+                ),
+            )
+            .await;
+            return Err(err);
+        }
+    };
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            outcome.account_key.clone(),
+            "subscription_sync",
+            "poll_wanted",
+            "subscription_state",
+            None,
+            None,
+            "success",
+            format!(
+                "轮询想看完成：新增待处理 {}，跳过旧想看 {}，更新已有 {}",
+                outcome.created_unprocessed, outcome.created_skipped, outcome.updated_existing
+            ),
+            None,
+            json!({
+                "trigger": "manual",
+                "total_wish_items": outcome.total_wish_items,
+                "created_unprocessed": outcome.created_unprocessed,
+                "created_skipped": outcome.created_skipped,
+                "updated_existing": outcome.updated_existing,
+                "bootstrap_mode": outcome.bootstrap_mode,
+            }),
+        ),
+    )
+    .await;
     Ok(Json(
         serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
     ))
@@ -489,6 +654,39 @@ async fn wanted_subscription_status(
     let Some(outcome) = outcome else {
         return Err(ApiError::bad_request("订阅记录不存在"));
     };
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            if matches!(
+                outcome.record.status,
+                subscription::WantedSubscriptionStatus::Failed
+            ) {
+                "system_error"
+            } else {
+                "subscription_sync"
+            },
+            "update_subscription_status",
+            "subscription",
+            Some(outcome.record.subject_id.clone()),
+            Some(outcome.record.title.clone()),
+            if matches!(
+                outcome.record.status,
+                subscription::WantedSubscriptionStatus::Failed
+            ) {
+                "failed"
+            } else {
+                "success"
+            },
+            format!("订阅状态更新为 {:?}", outcome.record.status),
+            outcome.record.last_error.clone(),
+            json!({
+                "retry_count": outcome.record.retry_count,
+                "retry_exhausted": outcome.retry_exhausted,
+            }),
+        ),
+    )
+    .await;
     Ok(Json(
         serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
     ))
@@ -538,7 +736,29 @@ async fn wanted_subscription_candidates(
     let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
     let _category = category_for_wanted_record(&record, &cfg.subscription_categories)?;
     let candidates =
-        search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await?;
+        match search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await
+        {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                write_operation_log(
+                    &state,
+                    operation_log_entry(
+                        account_key.clone(),
+                        "torrent_search",
+                        "match_candidates",
+                        "subscription",
+                        Some(record.subject_id.clone()),
+                        Some(record.title.clone()),
+                        "failed",
+                        "搜索订阅候选种子失败",
+                        Some(err.message().to_string()),
+                        json!({ "page_size": body.page_size }),
+                    ),
+                )
+                .await;
+                return Err(err);
+            }
+        };
     let matches = match_torrent_candidates(&candidates, &cfg.torrent_match_rules);
     let record = state
         .wanted_store
@@ -552,10 +772,36 @@ async fn wanted_subscription_candidates(
         .map_err(|e| ApiError::internal(format!("写入候选种子记录失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
 
+    let selected = matches.iter().find(|item| item.selected).cloned();
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            "torrent_search",
+            "match_candidates",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "success",
+            format!(
+                "搜索订阅候选种子完成：{} 个候选，{} 个匹配",
+                candidates.len(),
+                matches.iter().filter(|item| item.selected).count()
+            ),
+            None,
+            json!({
+                "candidate_count": candidates.len(),
+                "match_count": matches.iter().filter(|item| item.selected).count(),
+                "selected_torrent_id": selected.as_ref().map(|item| item.candidate.torrent_id.clone()),
+            }),
+        ),
+    )
+    .await;
+
     Ok(Json(json!({
         "subscription_id": record.subject_id,
         "candidate_count": candidates.len(),
-        "selected": matches.iter().find(|item| item.selected),
+        "selected": selected,
         "matches": matches,
         "record": record,
     })))
@@ -585,7 +831,33 @@ async fn wanted_subscription_push(
     let category = category_for_wanted_record(&record, &cfg.subscription_categories)?.clone();
     let qb_server = select_qb_server(&cfg.qb_servers, body.qb_server_name.as_deref())?;
     let candidates =
-        search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await?;
+        match search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await
+        {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                write_operation_log(
+                    &state,
+                    operation_log_entry(
+                        account_key.clone(),
+                        "torrent_search",
+                        "match_candidates",
+                        "subscription",
+                        Some(record.subject_id.clone()),
+                        Some(record.title.clone()),
+                        "failed",
+                        "订阅推送前搜索候选种子失败",
+                        Some(err.message().to_string()),
+                        json!({
+                            "page_size": body.page_size,
+                            "qb_server": qb_server_label(&qb_server),
+                            "qb_category": category.qb_category,
+                        }),
+                    ),
+                )
+                .await;
+                return Err(err);
+            }
+        };
     let matches = match_torrent_candidates(&candidates, &cfg.torrent_match_rules);
     let selected = matches.iter().find(|item| item.selected).cloned();
     let now = unix_now_secs();
@@ -612,6 +884,25 @@ async fn wanted_subscription_push(
             error.clone(),
         )
         .await?;
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                account_key.clone(),
+                "qb_push",
+                "push_torrent",
+                "subscription",
+                Some(record.subject_id.clone()),
+                Some(record.title.clone()),
+                "failed",
+                "订阅推送 qB 失败：无匹配候选种子",
+                Some(error.clone()),
+                json!({
+                    "candidate_count": candidates.len(),
+                    "qb_category": category.qb_category,
+                }),
+            ),
+        )
+        .await;
         return Err(ApiError::bad_request(error));
     };
 
@@ -647,6 +938,25 @@ async fn wanted_subscription_push(
                     e.message().to_string(),
                 )
                 .await?;
+                write_operation_log(
+                    &state,
+                    operation_log_entry(
+                        account_key.clone(),
+                        "qb_push",
+                        "push_torrent",
+                        "subscription",
+                        Some(record.subject_id.clone()),
+                        Some(record.title.clone()),
+                        "failed",
+                        "订阅推送 qB 失败：M-Team 取链失败",
+                        Some(e.message().to_string()),
+                        json!({
+                            "torrent_id": selected.candidate.torrent_id,
+                            "qb_category": category.qb_category,
+                        }),
+                    ),
+                )
+                .await;
                 return Err(e);
             }
         };
@@ -671,6 +981,25 @@ async fn wanted_subscription_push(
             e.message().to_string(),
         )
         .await?;
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                account_key.clone(),
+                "qb_push",
+                "push_torrent",
+                "subscription",
+                Some(record.subject_id.clone()),
+                Some(record.title.clone()),
+                "failed",
+                "订阅推送 qB 失败：qB 添加种子失败",
+                Some(e.message().to_string()),
+                json!({
+                    "torrent_id": selected.candidate.torrent_id,
+                    "qb_category": category.qb_category,
+                }),
+            ),
+        )
+        .await;
         return Err(e);
     }
 
@@ -700,6 +1029,29 @@ async fn wanted_subscription_push(
         .await
         .map_err(|e| ApiError::internal(format!("写入 qB 推送记录失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            "qb_push",
+            "push_torrent",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "success",
+            format!("已推送订阅种子到 qB：{}", push.torrent_title),
+            None,
+            json!({
+                "torrent_id": push.torrent_id.clone(),
+                "torrent_title": push.torrent_title.clone(),
+                "qb_server": push.qb_server.clone(),
+                "qb_category": push.qb_category.clone(),
+                "qb_save_dir_name": push.qb_save_dir_name.clone(),
+            }),
+        ),
+    )
+    .await;
 
     Ok(Json(json!({
         "ok": true,
@@ -851,6 +1203,27 @@ async fn wanted_subscription_completion(
             .await
             .map_err(|e| ApiError::internal(format!("写入 qB 完成检查记录失败: {e}")))?
             .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                account_key.clone(),
+                "download_progress",
+                "check_completion",
+                "subscription",
+                Some(record.subject_id.clone()),
+                Some(record.title.clone()),
+                "processing",
+                "完成检测：qB 种子仍在下载中",
+                None,
+                json!({
+                    "dry_run": body.dry_run,
+                    "qb_hash": qb_torrent.hash,
+                    "qb_name": qb_torrent.name,
+                    "download_progress": push.download_progress,
+                }),
+            ),
+        )
+        .await;
         return Ok(Json(json!({
             "ok": true,
             "completed": false,
@@ -861,7 +1234,22 @@ async fn wanted_subscription_completion(
         })));
     }
 
-    let plan = build_hardlink_plan(&record, &category, &push, &qb_torrent, &qb_files, now)?;
+    let plan = match build_hardlink_plan(&record, &category, &push, &qb_torrent, &qb_files, now) {
+        Ok(plan) => plan,
+        Err(err) => {
+            let error = err.message().to_string();
+            persist_hardlink_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
     let completion = if body.dry_run {
         dry_run_hardlink_plan(&plan, now)
     } else {
@@ -904,6 +1292,42 @@ async fn wanted_subscription_completion(
         .await
         .map_err(|e| ApiError::internal(format!("写入硬链接结果失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            "hardlink",
+            "link_result",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            if completed || body.dry_run {
+                "success"
+            } else {
+                "failed"
+            },
+            if body.dry_run {
+                format!("硬链接 dry-run 完成：计划 {} 个文件", plan.files.len())
+            } else if completed {
+                format!("硬链接完成：{} 个文件", completion.linked_files.len())
+            } else {
+                "硬链接失败".to_string()
+            },
+            completion.error.clone(),
+            json!({
+                "dry_run": body.dry_run,
+                "completed": completed,
+                "status": completion.status.clone(),
+                "file_count": completion.linked_files.len(),
+                "plan_file_count": plan.files.len(),
+                "qb_hash": completion.qb_hash.clone(),
+                "qb_name": completion.qb_name.clone(),
+                "target_dir": completion.target_dir.clone(),
+            }),
+        ),
+    )
+    .await;
 
     Ok(Json(json!({
         "ok": completed || body.dry_run,
@@ -1024,6 +1448,32 @@ async fn wanted_subscription_progress(
         .map_err(|e| ApiError::internal(format!("写入 qB 下载进度失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
 
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            "download_progress",
+            "sync_progress",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "success",
+            format!(
+                "同步 qB 下载进度：{}",
+                format!("{:.0}%", push.download_progress.unwrap_or_default() * 100.0)
+            ),
+            None,
+            json!({
+                "completed": qb_torrent.is_complete(),
+                "download_progress": push.download_progress,
+                "download_state": push.download_state.clone(),
+                "qb_hash": push.qb_hash.clone(),
+                "qb_name": push.qb_name.clone(),
+            }),
+        ),
+    )
+    .await;
+
     Ok(Json(json!({
         "ok": true,
         "completed": qb_torrent.is_complete(),
@@ -1040,12 +1490,29 @@ async fn persist_subscription_sync_error(
     error: String,
     now: u64,
 ) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
-    state
+    let record = state
         .wanted_store
         .update_sync_error(account_key, subject_id, status, error, now)
         .await
         .map_err(|e| ApiError::internal(format!("写入订阅同步错误失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    write_operation_log(
+        state,
+        operation_log_entry(
+            account_key.to_string(),
+            "system_error",
+            "subscription_sync_error",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "failed",
+            "订阅同步状态写入失败",
+            record.last_error.clone(),
+            json!({ "status": format!("{:?}", status) }),
+        ),
+    )
+    .await;
+    Ok(record)
 }
 
 async fn persist_progress_sync_error(
@@ -1059,19 +1526,40 @@ async fn persist_progress_sync_error(
     push.checked_at = Some(now);
     push.status = "failed".to_string();
     push.error = Some(error.to_string());
-    state
+    let record = state
         .wanted_store
         .update_push_record(
             account_key,
             subject_id,
-            push,
+            push.clone(),
             subscription::WantedSubscriptionStatus::Failed,
             Some(error.to_string()),
             now,
         )
         .await
         .map_err(|e| ApiError::internal(format!("写入 qB 下载进度错误失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    write_operation_log(
+        state,
+        operation_log_entry(
+            account_key.to_string(),
+            "download_progress",
+            "sync_progress",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "failed",
+            "同步 qB 下载进度失败",
+            Some(error.to_string()),
+            json!({
+                "qb_hash": push.qb_hash,
+                "qb_name": push.qb_name,
+                "qb_category": push.qb_category,
+            }),
+        ),
+    )
+    .await;
+    Ok(record)
 }
 
 async fn persist_completion_sync_error(
@@ -1097,20 +1585,101 @@ async fn persist_completion_sync_error(
         episodes: push.episodes.clone(),
         error: Some(error.to_string()),
     };
-    state
+    let record = state
         .wanted_store
         .update_completion_record(
             account_key,
             subject_id,
-            push,
-            completion,
+            push.clone(),
+            completion.clone(),
             subscription::WantedSubscriptionStatus::Failed,
             Some(error.to_string()),
             now,
         )
         .await
         .map_err(|e| ApiError::internal(format!("写入 qB 完成检查错误失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    write_operation_log(
+        state,
+        operation_log_entry(
+            account_key.to_string(),
+            "completion",
+            "check_completion",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "failed",
+            "完成检测失败",
+            Some(error.to_string()),
+            json!({
+                "qb_hash": completion.qb_hash,
+                "qb_name": completion.qb_name,
+                "qb_category": push.qb_category,
+            }),
+        ),
+    )
+    .await;
+    Ok(record)
+}
+
+async fn persist_hardlink_sync_error(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    mut push: subscription::TorrentPushRecord,
+    error: &str,
+    now: u64,
+) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    push.checked_at = Some(now);
+    push.status = "failed".to_string();
+    push.error = Some(error.to_string());
+    let completion = subscription::HardlinkCompletionRecord {
+        status: "failed".to_string(),
+        checked_at: now,
+        completed_at: None,
+        qb_hash: push.qb_hash.clone(),
+        qb_name: push.qb_name.clone(),
+        source_path: push.source_path.clone(),
+        target_dir: push.target_dir.clone(),
+        linked_files: push.linked_files.clone(),
+        episodes: push.episodes.clone(),
+        error: Some(error.to_string()),
+    };
+    let record = state
+        .wanted_store
+        .update_completion_record(
+            account_key,
+            subject_id,
+            push.clone(),
+            completion.clone(),
+            subscription::WantedSubscriptionStatus::Failed,
+            Some(error.to_string()),
+            now,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("写入硬链接错误失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    write_operation_log(
+        state,
+        operation_log_entry(
+            account_key.to_string(),
+            "hardlink",
+            "link_result",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            "failed",
+            "硬链接失败",
+            Some(error.to_string()),
+            json!({
+                "qb_hash": completion.qb_hash,
+                "qb_name": completion.qb_name,
+                "qb_category": push.qb_category,
+            }),
+        ),
+    )
+    .await;
+    Ok(record)
 }
 
 async fn load_wanted_record_context(
@@ -3195,15 +3764,63 @@ fn spawn_wanted_watch_loop(state: AppState) {
             let interval = cfg.poll_interval_secs.clamp(60, 86_400);
             if cfg.enabled {
                 match run_wanted_watch_poll(&state).await {
-                    Ok(outcome) => tracing::info!(
-                        account_key = %outcome.account_key,
-                        total = outcome.total_wish_items,
-                        created_unprocessed = outcome.created_unprocessed,
-                        created_skipped = outcome.created_skipped,
-                        updated_existing = outcome.updated_existing,
-                        "wanted subscription poll completed"
-                    ),
-                    Err(e) => tracing::warn!("wanted subscription poll failed: {}", e.message()),
+                    Ok(outcome) => {
+                        tracing::info!(
+                            account_key = %outcome.account_key,
+                            total = outcome.total_wish_items,
+                            created_unprocessed = outcome.created_unprocessed,
+                            created_skipped = outcome.created_skipped,
+                            updated_existing = outcome.updated_existing,
+                            "wanted subscription poll completed"
+                        );
+                        write_operation_log(
+                            &state,
+                            operation_log_entry(
+                                outcome.account_key.clone(),
+                                "subscription_sync",
+                                "poll_wanted",
+                                "subscription_state",
+                                None,
+                                None,
+                                "success",
+                                format!(
+                                    "后台轮询想看完成：新增待处理 {}，跳过旧想看 {}，更新已有 {}",
+                                    outcome.created_unprocessed,
+                                    outcome.created_skipped,
+                                    outcome.updated_existing
+                                ),
+                                None,
+                                json!({
+                                    "trigger": "watcher",
+                                    "total_wish_items": outcome.total_wish_items,
+                                    "created_unprocessed": outcome.created_unprocessed,
+                                    "created_skipped": outcome.created_skipped,
+                                    "updated_existing": outcome.updated_existing,
+                                    "bootstrap_mode": outcome.bootstrap_mode,
+                                }),
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("wanted subscription poll failed: {}", e.message());
+                        write_operation_log(
+                            &state,
+                            operation_log_entry(
+                                "system",
+                                "subscription_sync",
+                                "poll_wanted",
+                                "subscription_state",
+                                None,
+                                None,
+                                "failed",
+                                "后台轮询想看失败",
+                                Some(e.message().to_string()),
+                                json!({ "trigger": "watcher" }),
+                            ),
+                        )
+                        .await;
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_secs(interval)).await;
@@ -3230,20 +3847,103 @@ async fn qb_push_mteam(
     State(state): State<AppState>,
     Json(body): Json<QbPushMteamBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mteam_key = state.config.read().await.mteam_api_key.clone();
+    let cfg = state.config.read().await.clone();
+    let mteam_key = cfg.mteam_api_key.clone();
     if mteam_key.trim().is_empty() {
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                config_account_key(&cfg),
+                "qb_push",
+                "manual_push_torrent",
+                "torrent",
+                Some(body.torrent_id.clone()),
+                None,
+                "failed",
+                "手动推送种子到 qB 失败：缺少 M-Team API Key",
+                Some("请先在设置中填写 M-Team OpenAPI Key".to_string()),
+                json!({ "torrent_id": body.torrent_id }),
+            ),
+        )
+        .await;
         return Err(ApiError::bad_request(
             "请先在设置中填写 M-Team OpenAPI Key（用于向 qB 换取可下载链接）",
         ));
     }
-    let dl_url = mteam_fetch_gen_dl_url(mteam_key.trim(), &body.torrent_id).await?;
-    qbittorrent::add_torrent_from_url(
+    let dl_url = match mteam_fetch_gen_dl_url(mteam_key.trim(), &body.torrent_id).await {
+        Ok(url) => url,
+        Err(err) => {
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    config_account_key(&cfg),
+                    "qb_push",
+                    "manual_push_torrent",
+                    "torrent",
+                    Some(body.torrent_id.clone()),
+                    None,
+                    "failed",
+                    "手动推送种子到 qB 失败：M-Team 取链失败",
+                    Some(err.message().to_string()),
+                    json!({ "torrent_id": body.torrent_id }),
+                ),
+            )
+            .await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = qbittorrent::add_torrent_from_url(
         &body.server,
         &dl_url,
         body.category.as_deref(),
         body.savepath.as_deref(),
     )
-    .await?;
+    .await
+    {
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                config_account_key(&cfg),
+                "qb_push",
+                "manual_push_torrent",
+                "torrent",
+                Some(body.torrent_id.clone()),
+                None,
+                "failed",
+                "手动推送种子到 qB 失败：qB 添加种子失败",
+                Some(err.message().to_string()),
+                json!({
+                    "torrent_id": body.torrent_id,
+                    "qb_server": body.server.name,
+                    "qb_category": body.category,
+                    "savepath": body.savepath,
+                }),
+            ),
+        )
+        .await;
+        return Err(err);
+    }
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            config_account_key(&cfg),
+            "qb_push",
+            "manual_push_torrent",
+            "torrent",
+            Some(body.torrent_id.clone()),
+            None,
+            "success",
+            "已手动推送种子到 qB",
+            None,
+            json!({
+                "torrent_id": body.torrent_id,
+                "qb_server": body.server.name,
+                "qb_category": body.category,
+                "savepath": body.savepath,
+            }),
+        ),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -3407,11 +4107,44 @@ async fn search_tmdb(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let key = state.config.read().await.tmdb_api_key.clone();
+    let cfg = state.config.read().await.clone();
+    let key = cfg.tmdb_api_key.clone();
     if key.trim().is_empty() {
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                config_account_key(&cfg),
+                "search",
+                "search_media",
+                "tmdb",
+                None,
+                Some(q.q.trim().to_string()),
+                "failed",
+                "TMDB 搜索失败：缺少 API Key",
+                Some("请在设置中填写 TMDB API Key".to_string()),
+                json!({ "source": "tmdb" }),
+            ),
+        )
+        .await;
         return Err(ApiError::bad_request("请在设置中填写 TMDB API Key"));
     }
     if q.q.trim().is_empty() {
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                config_account_key(&cfg),
+                "search",
+                "search_media",
+                "tmdb",
+                None,
+                None,
+                "failed",
+                "TMDB 搜索失败：关键词为空",
+                Some("搜索关键字不能为空".to_string()),
+                json!({ "source": "tmdb" }),
+            ),
+        )
+        .await;
         return Err(ApiError::bad_request("搜索关键字不能为空"));
     }
 
@@ -3513,6 +4246,30 @@ async fn search_tmdb(
         (movie_items, tv_items)
     };
 
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            config_account_key(&cfg),
+            "search",
+            "search_media",
+            "tmdb",
+            None,
+            Some(q.q.trim().to_string()),
+            "success",
+            format!(
+                "TMDB 搜索完成：电影 {}，剧集 {}",
+                movie_items.len(),
+                tv_items.len()
+            ),
+            None,
+            json!({
+                "source": "tmdb",
+                "movie_count": movie_items.len(),
+                "tv_count": tv_items.len(),
+            }),
+        ),
+    )
+    .await;
     Ok(Json(json!({ "movies": movie_items, "tv": tv_items })))
 }
 
@@ -3553,13 +4310,49 @@ async fn douban_search(
     State(state): State<AppState>,
     Query(q): Query<DoubanSearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let cookie = state.config.read().await.douban_cookie.clone();
+    let cfg = state.config.read().await.clone();
+    let cookie = cfg.douban_cookie.clone();
     let limit = q.limit.clamp(1, 50);
-    let items = douban::search(&cookie, &q.q, limit)
-        .await
-        .map_err(ApiError::douban)?;
+    let items = match douban::search(&cookie, &q.q, limit).await {
+        Ok(items) => items,
+        Err(err) => {
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    config_account_key(&cfg),
+                    "search",
+                    "search_media",
+                    "douban",
+                    None,
+                    Some(q.q.trim().to_string()),
+                    "failed",
+                    "豆瓣搜索失败",
+                    Some(err.to_string()),
+                    json!({ "source": "douban", "limit": limit }),
+                ),
+            )
+            .await;
+            return Err(ApiError::douban(err));
+        }
+    };
     let items_value =
         serde_json::to_value(&items).map_err(|e| ApiError::internal(e.to_string()))?;
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            config_account_key(&cfg),
+            "search",
+            "search_media",
+            "douban",
+            None,
+            Some(q.q.trim().to_string()),
+            "success",
+            format!("豆瓣搜索完成：{} 条结果", items.len()),
+            None,
+            json!({ "source": "douban", "result_count": items.len(), "limit": limit }),
+        ),
+    )
+    .await;
     Ok(Json(json!({
         "items": items_value.clone(),
         "movies": items_value,
@@ -3630,6 +4423,43 @@ fn unix_now_secs() -> u64 {
         .unwrap_or_default()
 }
 
+fn operation_log_entry(
+    account_key: impl Into<String>,
+    category: &str,
+    action: &str,
+    target_type: &str,
+    target_id: Option<String>,
+    target_title: Option<String>,
+    status: &str,
+    summary: impl Into<String>,
+    error: Option<String>,
+    related: Value,
+) -> subscription::NewOperationLogEntry {
+    subscription::NewOperationLogEntry {
+        account_key: account_key.into(),
+        created_at: unix_now_secs(),
+        category: category.to_string(),
+        action: action.to_string(),
+        target_type: target_type.to_string(),
+        target_id,
+        target_title,
+        status: status.to_string(),
+        summary: summary.into(),
+        error: error.filter(|s| !s.trim().is_empty()),
+        related,
+    }
+}
+
+async fn write_operation_log(state: &AppState, entry: subscription::NewOperationLogEntry) {
+    if let Err(e) = state.wanted_store.append_operation_log(entry).await {
+        tracing::warn!("operation log write failed: {e}");
+    }
+}
+
+fn config_account_key(cfg: &FileConfig) -> String {
+    douban::auth_cache_key_fragment(&cfg.douban_cookie).unwrap_or_else(|_| "system".to_string())
+}
+
 async fn douban_subject_detail(
     State(state): State<AppState>,
     PathParam(id): PathParam<String>,
@@ -3665,9 +4495,32 @@ async fn douban_mark_interest(
     } else {
         body.tags
     };
-    let result = douban::mark_interest(&cookie, &id, body.interest, body.rating, &tags)
-        .await
-        .map_err(ApiError::douban)?;
+    let result = match douban::mark_interest(&cookie, &id, body.interest, body.rating, &tags).await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    account_key.clone(),
+                    "subscription_sync",
+                    "mark_interest",
+                    "douban_subject",
+                    Some(id.clone()),
+                    None,
+                    "failed",
+                    "豆瓣标记失败",
+                    Some(err.to_string()),
+                    json!({
+                        "interest": format!("{:?}", body.interest),
+                        "has_rating": body.rating.is_some(),
+                    }),
+                ),
+            )
+            .await;
+            return Err(ApiError::douban(err));
+        }
+    };
     if let Err(e) = state
         .douban_cache
         .remove_prefix(&format!("library_{account_key}_"))
@@ -3678,6 +4531,29 @@ async fn douban_mark_interest(
     if let Err(e) = update_douban_tag_history(&state, &account_key, &result.tags).await {
         tracing::warn!("douban tag history update failed: {e}");
     }
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            "subscription_sync",
+            "mark_interest",
+            "douban_subject",
+            Some(id.clone()),
+            None,
+            "success",
+            if matches!(body.interest, douban::DoubanInterest::Wish) {
+                "已标记豆瓣想看"
+            } else {
+                "已标记豆瓣看过"
+            },
+            None,
+            json!({
+                "interest": format!("{:?}", body.interest),
+                "tag_count": result.tags.split_whitespace().count(),
+            }),
+        ),
+    )
+    .await;
     Ok(Json(
         serde_json::to_value(result).map_err(|e| ApiError::internal(e.to_string()))?,
     ))
@@ -4153,8 +5029,30 @@ async fn mteam_search(
     State(state): State<AppState>,
     Query(q): Query<MteamQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let key = state.config.read().await.mteam_api_key.clone();
+    let cfg = state.config.read().await.clone();
+    let key = cfg.mteam_api_key.clone();
+    let source_label = match &q.source {
+        MteamSource::Imdb => "imdb",
+        MteamSource::Douban => "douban",
+        MteamSource::Keyword => "keyword",
+    };
     if key.trim().is_empty() {
+        write_operation_log(
+            &state,
+            operation_log_entry(
+                config_account_key(&cfg),
+                "torrent_search",
+                "search_torrents",
+                "mteam",
+                None,
+                None,
+                "failed",
+                "M-Team 种子搜索失败：缺少 API Key",
+                Some("请在设置中填写 M-Team API Key".to_string()),
+                json!({ "source": source_label }),
+            ),
+        )
+        .await;
         return Err(ApiError::bad_request(
             "请在设置中填写 M-Team API Key（控制面板中的 OpenAPI 密钥）",
         ));
@@ -4181,38 +5079,100 @@ async fn mteam_search(
         .build()
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let out = match q.source {
+    let query_label = match source_label {
+        "imdb" => imdb_raw.unwrap_or("").to_string(),
+        "douban" => douban_raw.unwrap_or("").to_string(),
+        _ => keyword_raw.unwrap_or("").to_string(),
+    };
+    let out_result: Result<Value, ApiError> = match q.source {
         MteamSource::Imdb => {
-            let s = imdb_raw
-                .ok_or_else(|| ApiError::bad_request("使用 IMDb 路径时请提供有效的 imdb_id"))?;
-            let body = json!({
-                "pageNumber": q.page,
-                "pageSize": q.page_size,
-                "imdb": normalize_imdb_url(s),
-            });
-            mteam_search_post(&client, &key, &body).await?
+            if let Some(s) = imdb_raw {
+                let body = json!({
+                    "pageNumber": q.page,
+                    "pageSize": q.page_size,
+                    "imdb": normalize_imdb_url(s),
+                });
+                mteam_search_post(&client, &key, &body).await
+            } else {
+                Err(ApiError::bad_request(
+                    "使用 IMDb 路径时请提供有效的 imdb_id",
+                ))
+            }
         }
         MteamSource::Douban => {
-            let s = douban_raw
-                .ok_or_else(|| ApiError::bad_request("使用豆瓣路径时请提供有效的 douban_id"))?;
-            let body = json!({
-                "pageNumber": q.page,
-                "pageSize": q.page_size,
-                "douban": normalize_douban_url(s),
-            });
-            mteam_search_post(&client, &key, &body).await?
+            if let Some(s) = douban_raw {
+                let body = json!({
+                    "pageNumber": q.page,
+                    "pageSize": q.page_size,
+                    "douban": normalize_douban_url(s),
+                });
+                mteam_search_post(&client, &key, &body).await
+            } else {
+                Err(ApiError::bad_request(
+                    "使用豆瓣路径时请提供有效的 douban_id",
+                ))
+            }
         }
         MteamSource::Keyword => {
-            let k = keyword_raw
-                .ok_or_else(|| ApiError::bad_request("使用关键字路径时请提供 keyword"))?;
-            let body = json!({
-                "pageNumber": q.page,
-                "pageSize": q.page_size,
-                "keyword": k,
-            });
-            mteam_search_post(&client, &key, &body).await?
+            if let Some(k) = keyword_raw {
+                let body = json!({
+                    "pageNumber": q.page,
+                    "pageSize": q.page_size,
+                    "keyword": k,
+                });
+                mteam_search_post(&client, &key, &body).await
+            } else {
+                Err(ApiError::bad_request("使用关键字路径时请提供 keyword"))
+            }
         }
     };
+
+    let out = match out_result {
+        Ok(out) => out,
+        Err(err) => {
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    config_account_key(&cfg),
+                    "torrent_search",
+                    "search_torrents",
+                    "mteam",
+                    None,
+                    (!query_label.is_empty()).then_some(query_label.clone()),
+                    "failed",
+                    "M-Team 种子搜索失败",
+                    Some(err.message().to_string()),
+                    json!({ "source": source_label, "page": q.page, "page_size": q.page_size }),
+                ),
+            )
+            .await;
+            return Err(err);
+        }
+    };
+
+    let mut result_values = Vec::new();
+    collect_mteam_candidate_objects(&out, &mut result_values);
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            config_account_key(&cfg),
+            "torrent_search",
+            "search_torrents",
+            "mteam",
+            None,
+            (!query_label.is_empty()).then_some(query_label),
+            "success",
+            format!("M-Team 种子搜索完成：{} 条候选", result_values.len()),
+            None,
+            json!({
+                "source": source_label,
+                "candidate_count": result_values.len(),
+                "page": q.page,
+                "page_size": q.page_size,
+            }),
+        ),
+    )
+    .await;
 
     Ok(Json(out))
 }

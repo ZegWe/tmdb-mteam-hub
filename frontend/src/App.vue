@@ -25,6 +25,14 @@
         <button
           type="button"
           class="nav-item btn btn-ghost justify-start"
+          :class="{ 'btn-active is-active': page === 'logs' }"
+          @click="go('logs')"
+        >
+          日志
+        </button>
+        <button
+          type="button"
+          class="nav-item btn btn-ghost justify-start"
           :class="{ 'btn-active is-active': page === 'settings' }"
           @click="go('settings')"
         >
@@ -246,6 +254,141 @@
             </p>
           </article>
         </section>
+      </section>
+
+      <section
+        v-show="page === 'logs'"
+        id="page-logs"
+        class="app-page"
+        :class="{ 'is-active': page === 'logs' }"
+      >
+        <header class="top logs-top">
+          <h1>日志</h1>
+          <p class="sub">操作事件、结果状态与关联对象</p>
+          <div class="actions">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="operationLogsLoading"
+              @click="loadOperationLogs({ page: 1 })"
+            >
+              刷新
+            </button>
+          </div>
+        </header>
+
+        <section class="operation-log-filters" aria-label="日志筛选">
+          <label>
+            分类
+            <select
+              v-model="operationLogFilters.category"
+              class="select select-bordered"
+              @change="loadOperationLogs({ page: 1 })"
+            >
+              <option value="">全部分类</option>
+              <option v-for="item in operationLogCategories" :key="item.value" :value="item.value">
+                {{ item.label }}
+              </option>
+            </select>
+          </label>
+          <label>
+            状态
+            <select
+              v-model="operationLogFilters.status"
+              class="select select-bordered"
+              @change="loadOperationLogs({ page: 1 })"
+            >
+              <option value="">全部状态</option>
+              <option v-for="item in operationLogStatuses" :key="item.value" :value="item.value">
+                {{ item.label }}
+              </option>
+            </select>
+          </label>
+          <label class="operation-log-search">
+            关键词
+            <input
+              v-model.trim="operationLogFilters.q"
+              type="search"
+              class="input input-bordered"
+              placeholder="搜索说明、对象、错误"
+              @keydown.enter="loadOperationLogs({ page: 1 })"
+            />
+          </label>
+          <div class="operation-log-filter-actions">
+            <button
+              type="button"
+              class="btn btn-primary"
+              :disabled="operationLogsLoading"
+              @click="loadOperationLogs({ page: 1 })"
+            >
+              筛选
+            </button>
+            <button type="button" class="btn btn-ghost" @click="resetOperationLogFilters">
+              重置
+            </button>
+          </div>
+        </section>
+
+        <section class="operation-log-summary" aria-live="polite">
+          <p class="hint">{{ operationLogSummary }}</p>
+        </section>
+
+        <section class="operation-log-list" aria-live="polite">
+          <div v-if="operationLogsLoading && !operationLogs.length" class="inline-loading">
+            <div class="spinner spinner-sm" aria-hidden="true"></div>
+            <span>加载日志…</span>
+          </div>
+          <p v-else-if="!operationLogs.length" class="empty-hint">暂无日志</p>
+          <article
+            v-for="entry in operationLogs"
+            :key="entry.id"
+            class="operation-log-card card bg-base-100 border border-base-300 shadow-sm"
+          >
+            <div class="operation-log-main">
+              <div class="operation-log-head">
+                <span class="operation-log-time">{{ formatUnixSeconds(entry.created_at) }}</span>
+                <span class="operation-log-category badge">{{
+                  operationLogCategoryLabel(entry.category)
+                }}</span>
+                <span
+                  class="operation-log-status badge"
+                  :class="`operation-log-status-${normalizedStatus(entry.status)}`"
+                  >{{ operationLogStatusLabel(entry.status) }}</span
+                >
+              </div>
+              <h2>{{ entry.summary || operationLogActionLabel(entry.action) }}</h2>
+              <p class="operation-log-target">
+                {{ operationLogTarget(entry) }}
+              </p>
+              <p v-if="entry.error" class="operation-log-error">{{ entry.error }}</p>
+            </div>
+            <dl class="operation-log-meta">
+              <div>
+                <dt>动作</dt>
+                <dd>{{ operationLogActionLabel(entry.action) }}</dd>
+              </div>
+              <div v-if="entry.target_id">
+                <dt>ID</dt>
+                <dd>{{ entry.target_id }}</dd>
+              </div>
+              <div v-if="operationLogRelated(entry).length">
+                <dt>关联</dt>
+                <dd>{{ operationLogRelated(entry).join(" · ") }}</dd>
+              </div>
+            </dl>
+          </article>
+        </section>
+
+        <div class="operation-log-pager">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            :disabled="operationLogsLoading || !operationLogPage.has_more"
+            @click="loadMoreOperationLogs"
+          >
+            加载更多
+          </button>
+        </div>
       </section>
 
       <section
@@ -1095,9 +1238,49 @@ const SUB_STAGE_LABELS = {
   skipped: "已跳过",
 };
 
+const OPERATION_LOG_CATEGORIES = [
+  { value: "subscription_sync", label: "订阅同步" },
+  { value: "search", label: "搜索订阅" },
+  { value: "torrent_search", label: "搜索种子" },
+  { value: "qb_push", label: "推送 qB" },
+  { value: "download_progress", label: "下载进度" },
+  { value: "completion", label: "完成检测" },
+  { value: "hardlink", label: "硬链接" },
+  { value: "configuration", label: "配置保存" },
+  { value: "system_error", label: "系统/错误" },
+];
+
+const OPERATION_LOG_STATUSES = [
+  { value: "success", label: "成功" },
+  { value: "failed", label: "失败" },
+  { value: "processing", label: "处理中" },
+];
+
+const OPERATION_LOG_ACTION_LABELS = {
+  poll_wanted: "轮询想看",
+  refresh_local: "刷新本地列表",
+  search_media: "搜索影视",
+  search_torrents: "搜索种子",
+  match_candidates: "匹配候选种子",
+  push_torrent: "订阅推送 qB",
+  manual_push_torrent: "手动推送 qB",
+  sync_progress: "同步下载进度",
+  check_completion: "完成检测",
+  link_result: "硬链接结果",
+  save_config: "保存配置",
+  mark_interest: "豆瓣标记",
+  update_subscription_status: "更新订阅状态",
+  subscription_sync_error: "订阅同步错误",
+};
+
 const route = useRoute();
 const router = useRouter();
-const routeToPage = { main: "main", subscriptions: "subscriptions", settings: "settings" };
+const routeToPage = {
+  main: "main",
+  subscriptions: "subscriptions",
+  logs: "logs",
+  settings: "settings",
+};
 
 const page = computed(() => routeToPage[route.name] || "main");
 const error = ref("");
@@ -1161,6 +1344,13 @@ const subscriptionsLoading = ref(false);
 const subscriptionState = ref(null);
 const subscriptionActionLoading = ref(false);
 
+const operationLogsLoading = ref(false);
+const operationLogs = ref([]);
+const operationLogFilters = reactive({ category: "", status: "", q: "" });
+const operationLogPage = reactive({ page: 1, page_size: 30, total: 0, has_more: false });
+const operationLogCategories = OPERATION_LOG_CATEGORIES;
+const operationLogStatuses = OPERATION_LOG_STATUSES;
+
 const doubanMark = reactive({ interest: "", rating: "", tags: "", category: "", status: "" });
 
 watch(
@@ -1169,6 +1359,7 @@ watch(
     clearError();
     if (next === "settings") loadSettings();
     if (next === "subscriptions") loadSubscriptions({ silent: true });
+    if (next === "logs") loadOperationLogs({ page: 1, silent: true });
     if (next !== "settings") resetDoubanQrUi();
     if (next === "settings") closeDetail();
   },
@@ -1181,7 +1372,13 @@ onMounted(() => {
 
 function go(target) {
   const path =
-    target === "subscriptions" ? "/subscriptions" : target === "settings" ? "/settings" : "/";
+    target === "subscriptions"
+      ? "/subscriptions"
+      : target === "logs"
+        ? "/logs"
+        : target === "settings"
+          ? "/settings"
+          : "/";
   router.push(path);
 }
 
@@ -2128,7 +2325,10 @@ async function loadSubscriptions({ poll = false, silent = false } = {}) {
     let pollOutcome = null;
     if (poll)
       pollOutcome = await api("/api/subscriptions/wanted/poll", { method: "POST", body: "{}" });
-    subscriptionState.value = await api("/api/subscriptions/wanted");
+    const params = new URLSearchParams();
+    if (!poll && !silent) params.set("log", "true");
+    const suffix = params.toString() ? `?${params}` : "";
+    subscriptionState.value = await api(`/api/subscriptions/wanted${suffix}`);
     if (!silent) showToast(poll ? subscriptionPollToast(pollOutcome) : "本地订阅列表已刷新", "ok");
     return subscriptionState.value;
   } catch (err) {
@@ -2140,6 +2340,117 @@ async function loadSubscriptions({ poll = false, silent = false } = {}) {
   } finally {
     subscriptionsLoading.value = false;
   }
+}
+
+const operationLogSummary = computed(() => {
+  const total = Number(operationLogPage.total || 0);
+  const shown = operationLogs.value.length;
+  const bits = [`共 ${total} 条`, `已显示 ${shown} 条`];
+  const category = operationLogFilters.category
+    ? operationLogCategoryLabel(operationLogFilters.category)
+    : "";
+  const status = operationLogFilters.status
+    ? operationLogStatusLabel(operationLogFilters.status)
+    : "";
+  if (category) bits.push(`分类 ${category}`);
+  if (status) bits.push(`状态 ${status}`);
+  if (operationLogFilters.q) bits.push(`关键词 ${operationLogFilters.q}`);
+  return bits.join(" · ");
+});
+
+async function loadOperationLogs({ page = 1, append = false, silent = false } = {}) {
+  operationLogsLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(operationLogPage.page_size || 30),
+    });
+    if (operationLogFilters.category) params.set("category", operationLogFilters.category);
+    if (operationLogFilters.status) params.set("status", operationLogFilters.status);
+    if (operationLogFilters.q) params.set("q", operationLogFilters.q);
+    const data = await api(`/api/operation-logs?${params}`);
+    const items = Array.isArray(data?.items) ? data.items : [];
+    operationLogs.value = append ? [...operationLogs.value, ...items] : items;
+    operationLogPage.page = Number(data?.page || page) || page;
+    operationLogPage.page_size = Number(data?.page_size || operationLogPage.page_size || 30);
+    operationLogPage.total = Number(data?.total || 0);
+    operationLogPage.has_more = !!data?.has_more;
+    if (!silent) showToast("日志已加载", "ok");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    showError(`加载日志失败：${msg}`);
+    if (!silent) showToast(`加载日志失败：${msg}`, "err");
+  } finally {
+    operationLogsLoading.value = false;
+  }
+}
+
+function loadMoreOperationLogs() {
+  if (operationLogsLoading.value || !operationLogPage.has_more) return;
+  loadOperationLogs({ page: Number(operationLogPage.page || 1) + 1, append: true });
+}
+
+function resetOperationLogFilters() {
+  operationLogFilters.category = "";
+  operationLogFilters.status = "";
+  operationLogFilters.q = "";
+  loadOperationLogs({ page: 1 });
+}
+
+function operationLogCategoryLabel(value) {
+  return (
+    OPERATION_LOG_CATEGORIES.find((item) => item.value === normalizedStatus(value))?.label ||
+    value ||
+    "未分类"
+  );
+}
+
+function operationLogStatusLabel(value) {
+  return (
+    OPERATION_LOG_STATUSES.find((item) => item.value === normalizedStatus(value))?.label ||
+    value ||
+    "未知"
+  );
+}
+
+function operationLogActionLabel(value) {
+  return OPERATION_LOG_ACTION_LABELS[value] || value || "操作";
+}
+
+function operationLogTarget(entry) {
+  const parts = [
+    entry.target_title || "",
+    entry.target_type ? `对象 ${entry.target_type}` : "",
+    entry.target_id ? `ID ${entry.target_id}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "无关联对象";
+}
+
+function operationLogRelated(entry) {
+  const related = entry?.related && typeof entry.related === "object" ? entry.related : {};
+  return Object.entries(related)
+    .filter(([, value]) => value != null && value !== "" && typeof value !== "object")
+    .slice(0, 6)
+    .map(([key, value]) => `${operationLogRelatedLabel(key)} ${value}`);
+}
+
+function operationLogRelatedLabel(key) {
+  const labels = {
+    candidate_count: "候选",
+    match_count: "匹配",
+    selected_torrent_id: "种子",
+    torrent_id: "种子",
+    qb_server: "qB",
+    qb_category: "分类",
+    download_progress: "进度",
+    file_count: "文件",
+    plan_file_count: "计划",
+    total_wish_items: "想看",
+    created_unprocessed: "新增",
+    created_skipped: "跳过",
+    updated_existing: "更新",
+  };
+  return labels[key] || key;
 }
 
 function subscriptionPollToast(outcome) {
