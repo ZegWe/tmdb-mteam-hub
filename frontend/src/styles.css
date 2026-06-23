@@ -1223,6 +1223,14 @@ a.torrent-card-link:visited {
   font-size: 0.72rem;
 }
 
+.subscription-card-stage {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .subscription-card-note,
 .subscription-detail-error {
   margin: 0.65rem 0 0;

@@ -238,6 +238,9 @@
             <div v-if="subscriptionProgress(record) != null" class="subscription-card-progress">
               {{ formatPercent(subscriptionProgress(record)) }}
             </div>
+            <p v-if="subscriptionStageNote(record)" class="subscription-card-stage">
+              {{ subscriptionStageNote(record) }}
+            </p>
             <p v-if="subscriptionCardNote(record)" class="subscription-card-note">
               {{ subscriptionCardNote(record) }}
             </p>
@@ -1072,6 +1075,24 @@ const PUSH_STATUS_LABELS = {
 
 const SUB_SKIP_REASON_LABELS = {
   initial_bootstrap_existing_wish: "历史想看，首次同步跳过",
+};
+
+const SUB_STAGE_LABELS = {
+  queued: "等待自动处理",
+  searching: "搜索种子",
+  matched: "已匹配种子",
+  no_candidates: "未搜索到种子",
+  no_match: "未匹配规则",
+  pushing: "推送 qB",
+  pushed: "等待进度同步",
+  downloading: "等待下载完成",
+  download_complete: "等待硬链接",
+  link_planned: "等待执行硬链接",
+  linked: "硬链接完成",
+  push_failed: "推送失败",
+  link_failed: "硬链接失败",
+  error: "处理失败",
+  skipped: "已跳过",
 };
 
 const route = useRoute();
@@ -2170,10 +2191,24 @@ function subscriptionCardMeta(record) {
   return [
     record.release_year || "",
     record.category_text || "",
+    subscriptionStageLabel(record) ? `阶段 ${subscriptionStageLabel(record)}` : "",
     push.qb_category ? `qB ${push.qb_category}` : "",
     push.download_state || "",
+    record.stage_updated_at ? `阶段更新 ${formatUnixSeconds(record.stage_updated_at)}` : "",
     record.updated_at ? `更新 ${formatUnixSeconds(record.updated_at)}` : "",
   ].filter(Boolean);
+}
+
+function subscriptionStageLabel(record) {
+  const stage = normalizedStatus(record?.processing_stage);
+  return SUB_STAGE_LABELS[stage] || stage || "";
+}
+
+function subscriptionStageNote(record) {
+  const message = String(record?.stage_message || "").trim();
+  const next = String(record?.next_action || "").trim();
+  if (message && next) return `${message}；下一步：${next}`;
+  return message || (next ? `下一步：${next}` : "");
 }
 
 function subscriptionCardNote(record) {
@@ -2219,6 +2254,10 @@ function subscriptionDetailRows(record) {
     row("分类文本", record.category_text),
     row("上映年份", record.release_year),
     row("状态", subscriptionDisplayStatus(record).text),
+    row("当前阶段", subscriptionStageLabel(record)),
+    row("阶段说明", record.stage_message),
+    row("下一步", record.next_action),
+    row("阶段更新时间", formatUnixSeconds(record.stage_updated_at)),
     row("跳过原因", formatSubscriptionSkipReason(record.skip_reason)),
     row("重试", `${record.retry_count || 0}/${record.max_retries || 0}`),
     row("首次看到", formatUnixSeconds(record.first_seen_at)),

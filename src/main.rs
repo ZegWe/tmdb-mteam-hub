@@ -2747,7 +2747,7 @@ async fn run_wanted_watch_poll(
     let wish = douban::library(&cfg.douban_cookie, douban::DoubanLibraryStatus::Wish, limit)
         .await
         .map_err(ApiError::douban)?;
-    state
+    let outcome = state
         .wanted_store
         .apply_wish_items(
             &account_key,
@@ -2756,7 +2756,211 @@ async fn run_wanted_watch_poll(
             unix_now_secs(),
         )
         .await
-        .map_err(|e| ApiError::internal(format!("写入想看订阅状态失败: {e}")))
+        .map_err(|e| ApiError::internal(format!("写入想看订阅状态失败: {e}")))?;
+    if let Err(err) = process_wanted_watch_queue(state, &account_key).await {
+        tracing::warn!(
+            account_key = %account_key,
+            "wanted subscription processing failed after poll: {}",
+            err.message()
+        );
+    }
+    Ok(outcome)
+}
+
+async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Result<(), ApiError> {
+    let snapshot = state
+        .wanted_store
+        .snapshot(account_key, unix_now_secs())
+        .await
+        .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
+    let records = snapshot.records.values().cloned().collect::<Vec<_>>();
+    for record in records {
+        if let Err(err) = process_wanted_record_step(state, account_key, record.clone()).await {
+            tracing::warn!(
+                subject_id = %record.subject_id,
+                status = ?record.status,
+                "wanted subscription step failed: {}",
+                err.message()
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn process_wanted_record_step(
+    state: &AppState,
+    account_key: &str,
+    record: subscription::WantedSubscriptionRecord,
+) -> Result<(), ApiError> {
+    match record.status {
+        subscription::WantedSubscriptionStatus::Unprocessed
+        | subscription::WantedSubscriptionStatus::Matching => {
+            process_wanted_push_step(state, account_key, &record.subject_id, false).await
+        }
+        subscription::WantedSubscriptionStatus::Processing => {
+            process_wanted_push_step(state, account_key, &record.subject_id, true).await
+        }
+        subscription::WantedSubscriptionStatus::Pushed
+        | subscription::WantedSubscriptionStatus::Downloading => {
+            process_wanted_progress_step(state, account_key, &record.subject_id).await
+        }
+        subscription::WantedSubscriptionStatus::Completed => {
+            process_wanted_completion_step(state, account_key, &record.subject_id).await
+        }
+        subscription::WantedSubscriptionStatus::Linked
+        | subscription::WantedSubscriptionStatus::Failed
+        | subscription::WantedSubscriptionStatus::Skipped => Ok(()),
+    }
+}
+
+async fn process_wanted_push_step(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    force: bool,
+) -> Result<(), ApiError> {
+    let matching = subscription::WantedStatusUpdate {
+        status: subscription::WantedSubscriptionStatus::Matching,
+        error: None,
+        skip_reason: None,
+    };
+    let _ = wanted_subscription_status(
+        State(state.clone()),
+        PathParam(subject_id.to_string()),
+        Json(matching),
+    )
+    .await?;
+
+    match wanted_subscription_push(
+        State(state.clone()),
+        PathParam(subject_id.to_string()),
+        Json(WantedPushBody {
+            force,
+            ..WantedPushBody::default()
+        }),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            persist_if_status_unchanged(
+                state,
+                account_key,
+                subject_id,
+                subscription::WantedSubscriptionStatus::Matching,
+                err.message(),
+            )
+            .await;
+            Err(err)
+        }
+    }
+}
+
+async fn process_wanted_progress_step(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+) -> Result<(), ApiError> {
+    match wanted_subscription_progress(
+        State(state.clone()),
+        PathParam(subject_id.to_string()),
+        Json(WantedProgressBody::default()),
+    )
+    .await
+    {
+        Ok(Json(value)) => {
+            if value
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                process_wanted_completion_step(state, account_key, subject_id).await?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            persist_if_status_unchanged_any(
+                state,
+                account_key,
+                subject_id,
+                &[
+                    subscription::WantedSubscriptionStatus::Pushed,
+                    subscription::WantedSubscriptionStatus::Downloading,
+                ],
+                err.message(),
+            )
+            .await;
+            Err(err)
+        }
+    }
+}
+
+async fn process_wanted_completion_step(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+) -> Result<(), ApiError> {
+    match wanted_subscription_completion(
+        State(state.clone()),
+        PathParam(subject_id.to_string()),
+        Json(WantedCompletionBody::default()),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            persist_if_status_unchanged(
+                state,
+                account_key,
+                subject_id,
+                subscription::WantedSubscriptionStatus::Completed,
+                err.message(),
+            )
+            .await;
+            Err(err)
+        }
+    }
+}
+
+async fn persist_if_status_unchanged(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    status: subscription::WantedSubscriptionStatus,
+    error: &str,
+) {
+    persist_if_status_unchanged_any(state, account_key, subject_id, &[status], error).await;
+}
+
+async fn persist_if_status_unchanged_any(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    statuses: &[subscription::WantedSubscriptionStatus],
+    error: &str,
+) {
+    let Ok(snapshot) = state
+        .wanted_store
+        .snapshot(account_key, unix_now_secs())
+        .await
+    else {
+        return;
+    };
+    let Some(record) = snapshot.records.get(subject_id) else {
+        return;
+    };
+    if !statuses.iter().any(|status| *status == record.status) {
+        return;
+    }
+    let _ = persist_subscription_sync_error(
+        state,
+        account_key,
+        subject_id,
+        subscription::WantedSubscriptionStatus::Failed,
+        error.to_string(),
+        unix_now_secs(),
+    )
+    .await;
 }
 
 fn spawn_wanted_watch_loop(state: AppState) {
@@ -4168,6 +4372,54 @@ mod subscription_category_tests {
     }
 
     #[tokio::test]
+    async fn watcher_queue_marks_pending_record_with_actionable_stage_error() {
+        let root = temp_test_dir("watcher_stage_error");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-stage";
+        seed_wanted_record(&state, account_key, subject_id).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
+            cfg.subscription_categories = vec![category("电影", "电影")];
+            cfg.qb_servers = vec![QbServerEntry {
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                insecure_tls: false,
+            }];
+        }
+
+        process_wanted_watch_queue(&state, account_key)
+            .await
+            .unwrap_or_else(|err| panic!("{}", err.message()));
+        let snapshot = state.wanted_store.snapshot(account_key, 220).await.unwrap();
+        let record = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(
+            record.status,
+            subscription::WantedSubscriptionStatus::Failed
+        );
+        assert!(record
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("M-Team API Key"));
+        assert_eq!(record.processing_stage.as_deref(), Some("error"));
+        assert!(record
+            .stage_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("M-Team API Key"));
+        assert_eq!(
+            record.next_action.as_deref(),
+            Some("检查错误后重新轮询或手动重试")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn manual_sync_error_persists_without_retry_churn() {
         let root = temp_test_dir("manual_sync_error");
         let state = test_app_state(&root);
@@ -4379,6 +4631,10 @@ mod subscription_category_tests {
             max_retries: 3,
             last_error: None,
             skip_reason: None,
+            processing_stage: None,
+            stage_message: None,
+            stage_updated_at: None,
+            next_action: None,
             candidate_matches: Vec::new(),
             last_push: None,
             last_completion: None,
