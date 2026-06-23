@@ -35,15 +35,10 @@
 
     <div class="app-content">
       <div v-if="error" id="err" class="banner err alert alert-error" role="alert">{{ error }}</div>
-      <div
-        v-if="toast.message"
-        id="toast"
-        class="toast alert"
-        :class="toast.kind === 'err' ? 'toast-err alert-error' : 'toast-ok alert-success'"
-        role="status"
-        aria-live="polite"
-      >
-        {{ toast.message }}
+      <div v-if="toast.message" id="toast" class="app-toast" role="status" aria-live="polite">
+        <div class="app-toast-message" :class="toast.kind === 'err' ? 'toast-err' : 'toast-ok'">
+          {{ toast.message }}
+        </div>
       </div>
 
       <section
