@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
   --background: #f7f8f7;
   --foreground: #18181b;
@@ -31,7 +35,13 @@
   --accent: var(--ring);
   --accent-dim: #0d9488;
   --danger: var(--destructive);
-  font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family:
+    Inter,
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
 }
 
 * {
@@ -235,7 +245,11 @@ summary:focus-visible {
   text-decoration: none;
   white-space: nowrap;
   box-shadow: var(--shadow-sm);
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.12s ease;
 }
 
 .btn.primary {
@@ -363,7 +377,9 @@ summary:focus-visible {
   border-radius: var(--radius);
   overflow: hidden;
   cursor: pointer;
-  transition: border-color 0.15s, transform 0.12s;
+  transition:
+    border-color 0.15s,
+    transform 0.12s;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -999,7 +1015,9 @@ a.torrent-card-link:visited {
   border-radius: var(--radius);
   background: var(--surface);
   cursor: pointer;
-  transition: border-color 0.15s ease, transform 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
 }
 
 .subscription-card:hover {
