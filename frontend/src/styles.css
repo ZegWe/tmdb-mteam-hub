@@ -68,6 +68,42 @@ textarea {
   font: inherit;
 }
 
+select {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+select.select-sm {
+  height: 2.25rem;
+  min-height: 2.25rem;
+  line-height: 1.35;
+}
+
+.select {
+  max-width: 100%;
+  min-width: 0;
+}
+
+select.select {
+  display: block;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  line-height: 1.35;
+}
+
+select.select.select-sm {
+  height: 2.25rem;
+  min-height: 2.25rem;
+  line-height: 1.35;
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -720,7 +756,7 @@ a.tag:hover {
 
 .douban-rating-select select {
   min-width: 5.5rem;
-  padding: 0.34rem 0.5rem;
+  padding: 0.42rem 2rem 0.42rem 0.55rem;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--bg);
@@ -747,6 +783,10 @@ a.tag:hover {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+}
+
+.douban-tag-input select {
+  padding-right: 2rem;
 }
 
 .douban-tag-input input:focus,
@@ -1316,6 +1356,20 @@ a.torrent-card-link:visited {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+}
+
+#settings-form select,
+#qb-push-form select {
+  height: 2.5rem;
+  padding: 0.45rem 2.25rem 0.45rem 0.65rem;
+  line-height: 1.35;
+}
+
+#settings-form select.select-sm,
+#qb-push-form select.select-sm {
+  height: 2.25rem;
+  padding-top: 0.36rem;
+  padding-bottom: 0.36rem;
 }
 
 #settings-form textarea {

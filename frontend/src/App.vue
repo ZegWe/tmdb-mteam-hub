@@ -420,7 +420,11 @@
                     placeholder="100"
                 /></label>
                 <label
-                  >匹配模式<select v-model="rule.mode" class="select select-bordered select-sm">
+                  >匹配模式<select
+                    v-model="rule.mode"
+                    class="select select-bordered select-sm"
+                    :title="rule.mode === 'all' ? '全部满足' : '任一满足'"
+                  >
                     <option value="all">全部满足</option>
                     <option value="any">任一满足</option>
                   </select></label
@@ -623,7 +627,11 @@
             </div>
             <label v-if="doubanMark.interest === 'collect'" class="douban-rating-select">
               <span>评分</span>
-              <select v-model="doubanMark.rating" class="select select-bordered select-sm">
+              <select
+                v-model="doubanMark.rating"
+                class="select select-bordered select-sm"
+                :title="selectedDoubanRatingLabel"
+              >
                 <option value="">未评分</option>
                 <option value="5">5 星</option>
                 <option value="4">4 星</option>
@@ -647,6 +655,7 @@
               v-if="doubanMark.interest === 'wish'"
               v-model="doubanMark.category"
               class="select select-bordered select-sm"
+              :title="selectedDoubanCategoryLabel"
             >
               <option value="">
                 {{ subscriptionCategoriesCache.length ? "选择订阅分类" : "未配置订阅分类" }}
@@ -980,6 +989,7 @@
           v-model="qbPush.serverIndex"
           class="select select-bordered"
           :disabled="!qbServersCache.length"
+          :title="selectedQbPushServerLabel"
         >
           <option v-if="!qbServersCache.length" value="">未配置 qB（请打开 API 设置）</option>
           <option v-for="(server, idx) in qbServersCache" :key="idx" :value="String(idx)">
@@ -1561,6 +1571,19 @@ const doubanInterestStatus = computed(() => doubanMark.status);
 const doubanSaveDisabled = computed(
   () => !doubanMark.interest || (doubanMark.interest === "wish" && !doubanMark.category),
 );
+const selectedDoubanRatingLabel = computed(() =>
+  doubanMark.rating ? `${doubanMark.rating} 星` : "未评分",
+);
+const selectedDoubanCategoryLabel = computed(() => {
+  if (!doubanMark.category)
+    return subscriptionCategoriesCache.value.length ? "选择订阅分类" : "未配置订阅分类";
+  const category = subscriptionCategoriesCache.value.find(
+    (item) => item.wanted_tag === doubanMark.category,
+  );
+  return category
+    ? `${category.name || category.wanted_tag} · ${category.wanted_tag}`
+    : doubanMark.category;
+});
 
 function setDoubanInterest(interest) {
   doubanMark.interest = interest === "wish" || interest === "collect" ? interest : "";
@@ -1742,6 +1765,12 @@ const qbPushLabel = computed(() =>
       ? `种子 ID · ${qbPush.torrentId}`
       : "",
 );
+const selectedQbPushServerLabel = computed(() => {
+  const server = qbServersCache.value[Number(qbPush.serverIndex)];
+  return server
+    ? server.name || server.base_url || `服务器 ${Number(qbPush.serverIndex) + 1}`
+    : "未配置 qB（请打开 API 设置）";
+});
 
 async function submitQbPush() {
   if (!qbServersCache.value.length) {
@@ -2017,8 +2046,40 @@ const subscriptionRecords = computed(() => {
     subscriptionState.value?.records && typeof subscriptionState.value.records === "object"
       ? Object.values(subscriptionState.value.records)
       : [];
-  return records.sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+  return records.sort(compareSubscriptionRecords);
 });
+
+function subscriptionOrderTimestamp(record) {
+  const firstSeen = Number(record?.first_seen_at || 0);
+  if (Number.isFinite(firstSeen) && firstSeen > 0) return firstSeen;
+  const created = Number(record?.created_at || 0);
+  if (Number.isFinite(created) && created > 0) return created;
+  const updated = Number(record?.updated_at || 0);
+  return Number.isFinite(updated) ? updated : 0;
+}
+
+function compareSubscriptionRecords(a, b) {
+  const orderDelta = subscriptionOrderTimestamp(a) - subscriptionOrderTimestamp(b);
+  if (orderDelta) return orderDelta;
+
+  const createdDelta = Number(a?.created_at || 0) - Number(b?.created_at || 0);
+  if (createdDelta) return createdDelta;
+
+  const idDelta = String(a?.subject_id || "").localeCompare(
+    String(b?.subject_id || ""),
+    "zh-Hans-CN",
+    {
+      numeric: true,
+      sensitivity: "base",
+    },
+  );
+  if (idDelta) return idDelta;
+
+  return String(a?.title || "").localeCompare(String(b?.title || ""), "zh-Hans-CN", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
 
 const subscriptionSummary = computed(() => {
   const records = subscriptionRecords.value;
