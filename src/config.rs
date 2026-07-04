@@ -5,6 +5,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QbServerEntry {
     #[serde(default)]
+    pub id: String,
+    #[serde(default)]
     pub name: String,
     pub base_url: String,
     pub username: String,
@@ -19,6 +21,8 @@ pub struct SubscriptionCategory {
     pub name: String,
     #[serde(default)]
     pub wanted_tag: String,
+    #[serde(default)]
+    pub qb_server_id: String,
     #[serde(default)]
     pub qb_category: String,
     #[serde(default)]
@@ -107,7 +111,7 @@ pub struct FileConfig {
 }
 
 fn default_listen_ip() -> String {
-    "127.0.0.1".to_string()
+    "0.0.0.0".to_string()
 }
 
 fn default_listen_port() -> u16 {
@@ -185,5 +189,19 @@ impl FileConfig {
         std::fs::write(&tmp, raw)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileConfig;
+
+    #[test]
+    fn default_listen_addr_binds_all_interfaces() {
+        let addr = FileConfig::default()
+            .listen_addr()
+            .expect("default listen address should parse");
+
+        assert_eq!(addr.to_string(), "0.0.0.0:8787");
     }
 }

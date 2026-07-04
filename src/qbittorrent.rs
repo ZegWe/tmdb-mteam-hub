@@ -230,6 +230,29 @@ pub async fn list_torrents(
     server: &QbServerEntry,
     category: Option<&str>,
 ) -> Result<Vec<QbTorrentInfo>, ApiError> {
+    list_torrents_query(server, category, None).await
+}
+
+pub async fn list_torrents_by_hashes(
+    server: &QbServerEntry,
+    hashes: &[String],
+) -> Result<Vec<QbTorrentInfo>, ApiError> {
+    let hashes = hashes
+        .iter()
+        .map(|hash| hash.trim())
+        .filter(|hash| !hash.is_empty())
+        .collect::<Vec<_>>();
+    if hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+    list_torrents_query(server, None, Some(&hashes.join("|"))).await
+}
+
+async fn list_torrents_query(
+    server: &QbServerEntry,
+    category: Option<&str>,
+    hashes: Option<&str>,
+) -> Result<Vec<QbTorrentInfo>, ApiError> {
     let base = server.base_url.trim().trim_end_matches('/');
     let client = http_client_tls(server.insecure_tls).await?;
     qb_login_session(&client, server).await?;
@@ -239,6 +262,9 @@ pub async fn list_torrents(
     let mut req = client.get(info_url).header("Referer", &referer);
     if let Some(category) = category.map(str::trim).filter(|s| !s.is_empty()) {
         req = req.query(&[("category", category)]);
+    }
+    if let Some(hashes) = hashes.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.query(&[("hashes", hashes)]);
     }
     let resp = req.send().await.map_err(|e| {
         ApiError::upstream(StatusCode::BAD_GATEWAY, format!("qB 查询任务失败: {e}"))

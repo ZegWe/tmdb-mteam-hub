@@ -236,6 +236,18 @@
                 >{{ record.last_push.episodes.length }} 集</span
               >
             </div>
+            <div class="subscription-stage-track" :aria-label="subscriptionStageTrackLabel(record)">
+              <span
+                v-for="node in subscriptionProgressNodes(record)"
+                :key="node.key"
+                class="subscription-stage-node"
+                :class="`subscription-stage-node-${node.state}`"
+                :title="node.label"
+              >
+                <span class="subscription-stage-dot"></span>
+                <span class="subscription-stage-label">{{ node.label }}</span>
+              </span>
+            </div>
             <div
               v-if="subscriptionProgress(record) != null"
               class="subscription-progress"
@@ -246,12 +258,32 @@
             <div v-if="subscriptionProgress(record) != null" class="subscription-card-progress">
               {{ formatPercent(subscriptionProgress(record)) }}
             </div>
-            <p v-if="subscriptionStageNote(record)" class="subscription-card-stage">
-              {{ subscriptionStageNote(record) }}
+            <p
+              v-for="notice in subscriptionCardNotices(record)"
+              :key="notice.key"
+              class="subscription-card-notice"
+              :class="`subscription-card-notice-${notice.kind}`"
+            >
+              {{ notice.text }}
             </p>
-            <p v-if="subscriptionCardNote(record)" class="subscription-card-note">
-              {{ subscriptionCardNote(record) }}
-            </p>
+            <div class="subscription-card-actions" @click.stop>
+              <button
+                type="button"
+                class="btn btn-xs btn-secondary"
+                :disabled="subscriptionActionLoading || !canRetrySubscription(record)"
+                @click="retrySubscriptionCurrent(record.subject_id)"
+              >
+                重试当前节点
+              </button>
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                :disabled="subscriptionActionLoading || !canRerunSubscription(record)"
+                @click="rerunSubscription(record.subject_id)"
+              >
+                重跑任务
+              </button>
+            </div>
           </article>
         </section>
       </section>
@@ -376,6 +408,45 @@
                 <dd>{{ operationLogRelated(entry).join(" · ") }}</dd>
               </div>
             </dl>
+            <section
+              v-if="operationLogTorrentMatches(entry).length"
+              class="operation-log-matches"
+              aria-label="种子匹配结果"
+            >
+              <div class="operation-log-matches-title">种子匹配</div>
+              <div
+                v-for="match in operationLogTorrentMatches(entry)"
+                :key="`${entry.id}-${match.torrent_id || match.title}`"
+                class="operation-log-match"
+                :class="{ 'operation-log-match-selected': match.selected }"
+              >
+                <div class="operation-log-match-head">
+                  <strong>{{ match.title || match.torrent_id || "未知种子" }}</strong>
+                  <span>{{ match.selected ? "已选中" : "未选中" }}</span>
+                </div>
+                <p class="operation-log-match-meta">
+                  {{ operationLogMatchStats(match) }}
+                </p>
+                <p v-if="match.matched_rule_name" class="operation-log-match-rule">
+                  规则 {{ match.matched_rule_name }}
+                  <template v-if="match.matched_priority != null">
+                    · 优先级 {{ match.matched_priority }}
+                  </template>
+                </p>
+                <p v-if="operationLogMatchedKeywords(match)" class="operation-log-match-rule">
+                  命中 {{ operationLogMatchedKeywords(match) }}
+                </p>
+                <p v-if="match.excluded_reason" class="operation-log-match-reason">
+                  {{ match.excluded_reason }}
+                </p>
+                <p
+                  v-if="operationLogRuleEvaluationSummary(match)"
+                  class="operation-log-match-evaluations"
+                >
+                  {{ operationLogRuleEvaluationSummary(match) }}
+                </p>
+              </div>
+            </section>
           </article>
         </section>
 
@@ -482,6 +553,22 @@
                     class="input input-bordered input-sm"
                     placeholder="如 电影"
                 /></label>
+                <label
+                  >qB 服务器<select
+                    v-model="category.qb_server_id"
+                    class="select select-bordered select-sm"
+                    :disabled="!settings.qb_servers.length"
+                  >
+                    <option v-if="!settings.qb_servers.length" value="">请先添加 qB 服务器</option>
+                    <option
+                      v-for="server in settings.qb_servers"
+                      :key="server.id"
+                      :value="server.id"
+                    >
+                      {{ qbServerOptionLabel(server) }}
+                    </option>
+                  </select></label
+                >
                 <label
                   >qB 下载分类<input
                     v-model="category.qb_category"
@@ -836,7 +923,12 @@
         <dl v-if="detailMetaRows.length" class="detail-meta">
           <div v-for="row in detailMetaRows" :key="row.label" class="detail-meta-row">
             <dt>{{ row.label }}</dt>
-            <dd>{{ row.value }}</dd>
+            <dd>
+              <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                row.value
+              }}</a>
+              <span v-else>{{ row.value }}</span>
+            </dd>
           </div>
         </dl>
 
@@ -1019,10 +1111,31 @@
             class="detail-meta-row"
           >
             <dt>{{ row.label }}</dt>
-            <dd>{{ row.value }}</dd>
+            <dd>
+              <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                row.value
+              }}</a>
+              <span v-else>{{ row.value }}</span>
+            </dd>
           </div>
         </dl>
         <div class="row-actions">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            :disabled="subscriptionActionLoading || !canRetrySubscription(selectedSubscription)"
+            @click="retrySubscriptionCurrent(selectedSubscription.subject_id)"
+          >
+            重试当前节点
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            :disabled="subscriptionActionLoading || !canRerunSubscription(selectedSubscription)"
+            @click="rerunSubscription(selectedSubscription.subject_id)"
+          >
+            重跑任务
+          </button>
           <button
             v-if="selectedSubscription.last_push"
             type="button"
@@ -1054,7 +1167,12 @@
               class="detail-meta-row"
             >
               <dt>{{ row.label }}</dt>
-              <dd>{{ row.value }}</dd>
+              <dd>
+                <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                  row.value
+                }}</a>
+                <span v-else>{{ row.value }}</span>
+              </dd>
             </div>
           </dl>
           <p v-else class="empty-hint">尚未推送，暂无下载进度</p>
@@ -1089,7 +1207,12 @@
               class="detail-meta-row"
             >
               <dt>{{ row.label }}</dt>
-              <dd>{{ row.value }}</dd>
+              <dd>
+                <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                  row.value
+                }}</a>
+                <span v-else>{{ row.value }}</span>
+              </dd>
             </div>
           </dl>
         </section>
@@ -1163,7 +1286,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 const IMG_BASE = "https://image.tmdb.org/t/p/w342";
@@ -1238,6 +1361,25 @@ const SUB_STAGE_LABELS = {
   skipped: "已跳过",
 };
 
+const SUB_PROGRESS_STEPS = [
+  { key: "match", label: "匹配" },
+  { key: "push", label: "推送" },
+  { key: "download", label: "下载中" },
+  { key: "downloaded", label: "下载完成" },
+  { key: "link", label: "硬链接" },
+  { key: "done", label: "完成" },
+];
+
+const SUB_ISSUE_STAGES = new Set([
+  "no_candidates",
+  "no_match",
+  "push_failed",
+  "link_failed",
+  "error",
+]);
+
+const SUBSCRIPTION_AUTO_SYNC_MS = 5000;
+
 const OPERATION_LOG_CATEGORIES = [
   { value: "subscription_sync", label: "订阅同步" },
   { value: "search", label: "搜索订阅" },
@@ -1281,6 +1423,45 @@ const routeToPage = {
   logs: "logs",
   settings: "settings",
 };
+
+const DETAIL_QUERY_KEYS = ["detail", "id", "doubanTags"];
+
+function firstQueryValue(value) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeDetailRouteQuery(query) {
+  const detail = String(firstQueryValue(query?.detail) || "").trim();
+  const id = String(firstQueryValue(query?.id) || "").trim();
+  if (!detail || !id) return null;
+  if (["movie", "tv", "douban"].includes(detail)) {
+    return { kind: "media", mediaType: detail, id };
+  }
+  if (detail === "subscription") return { kind: "subscription", id };
+  return null;
+}
+
+function detailRouteQueryFromMediaCard(item, fallbackType) {
+  const type = item?.source === "douban" ? "douban" : item?.media_type || fallbackType;
+  const rawId = type === "douban" ? (item?.id ?? item?.subject_id) : item?.id;
+  const id = String(rawId || "").trim();
+  if (!id) return null;
+  const query = { detail: type, id };
+  const tags = Array.isArray(item?.tags) ? item.tags.join(" ") : item?.tags || "";
+  if (type === "douban" && String(tags).trim()) query.doubanTags = String(tags).trim();
+  return query;
+}
+
+function detailRouteQueryFromSubscriptionRecord(record) {
+  const id = String(record?.subject_id || "").trim();
+  return id ? { detail: "subscription", id } : null;
+}
+
+function withoutDetailRouteQuery(query) {
+  const next = { ...query };
+  for (const key of DETAIL_QUERY_KEYS) delete next[key];
+  return next;
+}
 
 const page = computed(() => routeToPage[route.name] || "main");
 const error = ref("");
@@ -1339,10 +1520,14 @@ const doubanQrImage = ref("");
 const doubanQrSessionId = ref("");
 const qrLoading = ref(false);
 let doubanQrTimer = 0;
+let localQbServerSeq = 0;
 
 const subscriptionsLoading = ref(false);
 const subscriptionState = ref(null);
 const subscriptionActionLoading = ref(false);
+let subscriptionAutoSyncTimer = 0;
+let subscriptionAutoSyncInFlight = false;
+let detailOpenedFromRoutePush = false;
 
 const operationLogsLoading = ref(false);
 const operationLogs = ref([]);
@@ -1358,7 +1543,12 @@ watch(
   (next) => {
     clearError();
     if (next === "settings") loadSettings();
-    if (next === "subscriptions") loadSubscriptions({ silent: true });
+    if (next === "subscriptions") {
+      loadSubscriptions({ silent: true });
+      startSubscriptionAutoSync();
+    } else {
+      stopSubscriptionAutoSync();
+    }
     if (next === "logs") loadOperationLogs({ page: 1, silent: true });
     if (next !== "settings") resetDoubanQrUi();
     if (next === "settings") closeDetail();
@@ -1366,8 +1556,25 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => [page.value, route.query.detail, route.query.id, route.query.doubanTags],
+  () => {
+    syncDetailFromRoute().catch((err) => {
+      detailOpen.value = true;
+      detailLoading.value = false;
+      detailError.value = err instanceof Error ? err.message : String(err);
+    });
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   loadSettings();
+  if (page.value === "subscriptions") startSubscriptionAutoSync();
+});
+
+onBeforeUnmount(() => {
+  stopSubscriptionAutoSync();
 });
 
 function go(target) {
@@ -1531,15 +1738,47 @@ async function loadDoubanLibrary(forceRefresh = false) {
 }
 
 function openCardDetail(item, fallbackType) {
-  const type = item.source === "douban" ? "douban" : item.media_type || fallbackType;
-  const id = type === "douban" ? (item.id ?? item.subject_id) : Number(item.id);
-  const tags = Array.isArray(item.tags)
-    ? normalizeDoubanTags(item.tags.join(" "))
-    : normalizeDoubanTags(item.tags || "");
-  openDetail(type, id, { doubanTags: tags });
+  const detailQuery = detailRouteQueryFromMediaCard(item, fallbackType);
+  if (!detailQuery) return;
+  pushDetailRoute({ name: route.name || "main", query: { ...route.query, ...detailQuery } });
 }
 
-async function openDetail(mediaType, id, options = {}) {
+function pushDetailRoute(target) {
+  const alreadyInDetail = !!normalizeDetailRouteQuery(route.query);
+  if (!alreadyInDetail) detailOpenedFromRoutePush = true;
+  const navigation = alreadyInDetail ? router.replace(target) : router.push(target);
+  navigation.catch(handleRouteNavigationError);
+}
+
+function handleRouteNavigationError(err) {
+  const message = err instanceof Error ? err.message : String(err || "");
+  if (/duplicated|redundant|same route/i.test(message)) return;
+  showError(message || "更新详情 URL 失败");
+}
+
+async function syncDetailFromRoute() {
+  const parsed = normalizeDetailRouteQuery(route.query);
+  if (!parsed) {
+    detailOpenedFromRoutePush = false;
+    closeDetailState();
+    return;
+  }
+
+  if (parsed.kind === "media" && page.value === "main") {
+    const doubanTags = normalizeDoubanTags(firstQueryValue(route.query.doubanTags) || "");
+    await loadMediaDetailFromRoute(parsed.mediaType, parsed.id, { doubanTags });
+    return;
+  }
+
+  if (parsed.kind === "subscription" && page.value === "subscriptions") {
+    await loadSubscriptionDetailFromRoute(parsed.id);
+    return;
+  }
+
+  closeDetailState();
+}
+
+async function loadMediaDetailFromRoute(mediaType, id, options = {}) {
   clearError();
   resetDetail();
   detailOpen.value = true;
@@ -1574,6 +1813,28 @@ async function openDetail(mediaType, id, options = {}) {
   }
 }
 
+async function loadSubscriptionDetailFromRoute(id) {
+  clearError();
+  resetDetail();
+  detailOpen.value = true;
+  detailLoading.value = true;
+  detailKind.value = "subscription";
+  try {
+    if (!refreshSelectedSubscriptionFromRoute()) {
+      await loadSubscriptions({ silent: true });
+      refreshSelectedSubscriptionFromRoute();
+    }
+    if (!selectedSubscription.value) {
+      detailError.value = `未找到订阅记录：${id}`;
+    }
+  } catch (err) {
+    detailError.value = err instanceof Error ? err.message : String(err);
+    showError(detailError.value);
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
 function resetDetail() {
   detailError.value = "";
   detailKind.value = "";
@@ -1590,8 +1851,25 @@ function resetDetail() {
   for (const key of Object.keys(seasonErrors)) delete seasonErrors[key];
 }
 
-function closeDetail() {
+function closeDetailState() {
   detailOpen.value = false;
+  detailLoading.value = false;
+  resetDetail();
+}
+
+function closeDetail() {
+  if (normalizeDetailRouteQuery(route.query)) {
+    if (detailOpenedFromRoutePush) {
+      detailOpenedFromRoutePush = false;
+      router.back();
+      return;
+    }
+    router
+      .replace({ name: route.name || "main", query: withoutDetailRouteQuery(route.query) })
+      .catch(handleRouteNavigationError);
+    return;
+  }
+  closeDetailState();
 }
 
 const detailTitle = computed(() => detailData.value?.title || detailData.value?.name || "");
@@ -2034,15 +2312,15 @@ async function loadSettings() {
     settings.tmdb_api_key = data.tmdb_api_key || "";
     settings.mteam_api_key = data.mteam_api_key || "";
     settings.douban_cookie = data.douban_cookie || "";
-    settings.qb_servers = (Array.isArray(data.qb_servers) ? data.qb_servers : []).map((server) => ({
-      ...server,
-      testMessage: "",
-      testKind: "",
-      testing: false,
-    }));
+    settings.qb_servers = normalizeQbServerForms(
+      Array.isArray(data.qb_servers) ? data.qb_servers : [],
+    );
     settings.subscription_categories = (
       Array.isArray(data.subscription_categories) ? data.subscription_categories : []
-    ).map((category) => ({ ...category }));
+    ).map((category) => ({
+      ...category,
+      qb_server_id: String(category.qb_server_id || "").trim() || settings.qb_servers[0]?.id || "",
+    }));
     settings.torrent_match_rules = (
       Array.isArray(data.torrent_match_rules) ? data.torrent_match_rules : []
     ).map(ruleToForm);
@@ -2076,10 +2354,57 @@ function ruleFromForm(rule) {
   };
 }
 
+function normalizeQbServerForms(servers) {
+  const used = new Set();
+  return servers.map((server) => {
+    const id = uniqueClientQbServerId(server.id || server.name || server.base_url, used);
+    return {
+      ...server,
+      id,
+      testMessage: "",
+      testKind: "",
+      testing: false,
+    };
+  });
+}
+
+function newQbServerId() {
+  localQbServerSeq += 1;
+  return `qb-${Date.now().toString(36)}-${localQbServerSeq}`;
+}
+
+function uniqueClientQbServerId(raw, used) {
+  const base =
+    String(raw || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/g, "-")
+      .replace(/^-+|-+$/g, "") || newQbServerId();
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  for (let idx = 2; ; idx += 1) {
+    const candidate = `${base}-${idx}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+}
+
+function qbServerOptionLabel(server) {
+  const name = String(server?.name || "").trim();
+  const url = String(server?.base_url || "").trim();
+  if (name && url) return `${name} · ${url}`;
+  return name || url || server?.id || "未命名 qB";
+}
+
 function addSubscriptionCategory() {
   settings.subscription_categories.push({
     name: "",
     wanted_tag: "",
+    qb_server_id: settings.qb_servers[0]?.id || "",
     qb_category: "",
     qb_save_dir_name: "",
     download_dir: "",
@@ -2093,6 +2418,7 @@ function addTorrentRule() {
 
 function addQbServer() {
   settings.qb_servers.push({
+    id: newQbServerId(),
     name: "",
     base_url: "",
     username: "",
@@ -2130,6 +2456,7 @@ async function testQbServer(server) {
 
 function qbPayload(server) {
   return {
+    id: String(server.id || "").trim() || newQbServerId(),
     name: String(server.name || "").trim(),
     base_url: String(server.base_url || "").trim(),
     username: String(server.username || "").trim(),
@@ -2183,6 +2510,7 @@ function subscriptionCategoryPayload(category) {
   return {
     name: String(category.name || "").trim(),
     wanted_tag: String(category.wanted_tag || "").trim(),
+    qb_server_id: String(category.qb_server_id || "").trim(),
     qb_category: String(category.qb_category || "").trim(),
     qb_save_dir_name: String(category.qb_save_dir_name || "").trim(),
     download_dir: String(category.download_dir || "").trim(),
@@ -2263,6 +2591,8 @@ const subscriptionRecords = computed(() => {
 });
 
 function subscriptionOrderTimestamp(record) {
+  const doubanSortTime = Number(record?.douban_sort_time || 0);
+  if (Number.isFinite(doubanSortTime) && doubanSortTime > 0) return doubanSortTime;
   const firstSeen = Number(record?.first_seen_at || 0);
   if (Number.isFinite(firstSeen) && firstSeen > 0) return firstSeen;
   const created = Number(record?.created_at || 0);
@@ -2271,11 +2601,25 @@ function subscriptionOrderTimestamp(record) {
   return Number.isFinite(updated) ? updated : 0;
 }
 
+function subscriptionReturnOrder(record) {
+  const order = Number(record?.douban_return_order);
+  return Number.isFinite(order) && order >= 0 ? order : null;
+}
+
 function compareSubscriptionRecords(a, b) {
-  const orderDelta = subscriptionOrderTimestamp(a) - subscriptionOrderTimestamp(b);
+  const aReturnOrder = subscriptionReturnOrder(a);
+  const bReturnOrder = subscriptionReturnOrder(b);
+  if (aReturnOrder !== null && bReturnOrder !== null) {
+    const returnOrderDelta = aReturnOrder - bReturnOrder;
+    if (returnOrderDelta) return returnOrderDelta;
+  }
+  if (aReturnOrder !== null) return -1;
+  if (bReturnOrder !== null) return 1;
+
+  const orderDelta = subscriptionOrderTimestamp(b) - subscriptionOrderTimestamp(a);
   if (orderDelta) return orderDelta;
 
-  const createdDelta = Number(a?.created_at || 0) - Number(b?.created_at || 0);
+  const createdDelta = Number(b?.created_at || 0) - Number(a?.created_at || 0);
   if (createdDelta) return createdDelta;
 
   const idDelta = String(a?.subject_id || "").localeCompare(
@@ -2329,6 +2673,7 @@ async function loadSubscriptions({ poll = false, silent = false } = {}) {
     if (!poll && !silent) params.set("log", "true");
     const suffix = params.toString() ? `?${params}` : "";
     subscriptionState.value = await api(`/api/subscriptions/wanted${suffix}`);
+    refreshSelectedSubscriptionFromRoute();
     if (!silent) showToast(poll ? subscriptionPollToast(pollOutcome) : "本地订阅列表已刷新", "ok");
     return subscriptionState.value;
   } catch (err) {
@@ -2339,6 +2684,48 @@ async function loadSubscriptions({ poll = false, silent = false } = {}) {
     return null;
   } finally {
     subscriptionsLoading.value = false;
+  }
+}
+
+function startSubscriptionAutoSync() {
+  stopSubscriptionAutoSync();
+  subscriptionAutoSyncTimer = window.setInterval(() => {
+    syncSubscriptionState({ silent: true }).catch(() => {});
+  }, SUBSCRIPTION_AUTO_SYNC_MS);
+}
+
+function stopSubscriptionAutoSync() {
+  if (subscriptionAutoSyncTimer) {
+    clearInterval(subscriptionAutoSyncTimer);
+    subscriptionAutoSyncTimer = 0;
+  }
+}
+
+async function syncSubscriptionState({ silent = true } = {}) {
+  if (subscriptionAutoSyncInFlight || page.value !== "subscriptions")
+    return subscriptionState.value;
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    return subscriptionState.value;
+  }
+  subscriptionAutoSyncInFlight = true;
+  const selectedId = selectedSubscription.value?.subject_id || selectedSubscriptionRouteId();
+  try {
+    subscriptionState.value = await api("/api/subscriptions/wanted");
+    if (selectedId) {
+      selectedSubscription.value =
+        subscriptionRecords.value.find(
+          (record) => String(record.subject_id) === String(selectedId),
+        ) || selectedSubscription.value;
+    }
+    return subscriptionState.value;
+  } catch (err) {
+    if (!silent) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`同步订阅状态失败：${msg}`, "err");
+    }
+    return null;
+  } finally {
+    subscriptionAutoSyncInFlight = false;
   }
 }
 
@@ -2434,6 +2821,44 @@ function operationLogRelated(entry) {
     .map(([key, value]) => `${operationLogRelatedLabel(key)} ${value}`);
 }
 
+function operationLogTorrentMatches(entry) {
+  const related = entry?.related && typeof entry.related === "object" ? entry.related : {};
+  return Array.isArray(related.torrent_matches) ? related.torrent_matches : [];
+}
+
+function operationLogMatchStats(match) {
+  return [
+    match.torrent_id ? `ID ${match.torrent_id}` : "",
+    match.seeders != null ? `做种 ${match.seeders}` : "做种 —",
+    match.leechers != null ? `下载 ${match.leechers}` : "下载 —",
+    match.size ? `大小 ${match.size}` : "",
+    match.uploaded_at || "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function operationLogMatchedKeywords(match) {
+  return Array.isArray(match.matched_keywords) && match.matched_keywords.length
+    ? match.matched_keywords.join("、")
+    : "";
+}
+
+function operationLogRuleEvaluationSummary(match) {
+  const rows = Array.isArray(match.rule_evaluations) ? match.rule_evaluations : [];
+  return rows
+    .map((item) => {
+      const bits = [`${item.rule_name || "未命名规则"} ${item.matched ? "命中" : "未命中"}`];
+      if (Array.isArray(item.matched_keywords) && item.matched_keywords.length)
+        bits.push(`命中 ${item.matched_keywords.join("、")}`);
+      if (Array.isArray(item.missing_keywords) && item.missing_keywords.length)
+        bits.push(`缺少 ${item.missing_keywords.join("、")}`);
+      if (item.excluded_reason) bits.push(item.excluded_reason);
+      return bits.join("，");
+    })
+    .join("；");
+}
+
 function operationLogRelatedLabel(key) {
   const labels = {
     candidate_count: "候选",
@@ -2497,12 +2922,52 @@ function subscriptionProgress(record) {
   return null;
 }
 
+function subscriptionProgressIndex(record) {
+  const stage = normalizedStatus(record?.processing_stage);
+  const status = normalizedStatus(record?.status);
+  const pushStatus = normalizedStatus(record?.last_push?.status);
+  const completionStatus = normalizedStatus(record?.last_completion?.status);
+  if (stage === "linked" || status === "linked" || completionStatus === "completed") return 5;
+  if (["download_complete", "link_planned", "link_failed"].includes(stage)) return 4;
+  if (status === "completed" || pushStatus === "downloaded") return 4;
+  if (["pushed", "downloading"].includes(stage) || ["pushed", "downloading"].includes(status))
+    return 2;
+  if (["pushing", "push_failed"].includes(stage) || status === "processing") return 1;
+  if (status === "failed" && completionStatus === "failed") return 4;
+  if (status === "failed" && pushStatus === "failed") return 1;
+  return 0;
+}
+
+function subscriptionProgressNodes(record) {
+  const current = subscriptionProgressIndex(record);
+  return SUB_PROGRESS_STEPS.map((step, index) => ({
+    ...step,
+    state: index < current ? "done" : index === current ? "current" : "todo",
+  }));
+}
+
+function subscriptionStageTrackLabel(record) {
+  return subscriptionProgressNodes(record)
+    .map((node) => `${node.label}${node.state === "current" ? "（当前）" : ""}`)
+    .join("，");
+}
+
+function canRetrySubscription(record) {
+  const status = normalizedStatus(record?.status);
+  const stage = normalizedStatus(record?.processing_stage);
+  return !!record?.subject_id && status !== "linked" && stage !== "linked";
+}
+
+function canRerunSubscription(record) {
+  return !!record?.subject_id;
+}
+
 function subscriptionCardMeta(record) {
   const push = record.last_push || {};
   return [
+    record.douban_date ? `豆瓣 ${record.douban_date}` : "",
     record.release_year || "",
     record.category_text || "",
-    subscriptionStageLabel(record) ? `阶段 ${subscriptionStageLabel(record)}` : "",
     push.qb_category ? `qB ${push.qb_category}` : "",
     push.download_state || "",
     record.stage_updated_at ? `阶段更新 ${formatUnixSeconds(record.stage_updated_at)}` : "",
@@ -2535,24 +3000,82 @@ function subscriptionStageNote(record) {
   return message || (next ? `下一步：${next}` : "");
 }
 
-function subscriptionCardNote(record) {
+function subscriptionCardNotices(record) {
+  return [subscriptionCardStageNotice(record), subscriptionCardErrorNotice(record)].filter(Boolean);
+}
+
+function subscriptionCardStageNotice(record) {
+  const stage = normalizedStatus(record?.processing_stage);
+  if (SUB_ISSUE_STAGES.has(stage)) return null;
+  const text = subscriptionStageNote(record);
+  return subscriptionCardNotice("stage", "stage", text);
+}
+
+function subscriptionCardErrorNotice(record) {
+  const stage = normalizedStatus(record?.processing_stage);
+  const status = normalizedStatus(record?.status);
+  if (stage === "skipped" || status === "skipped") return null;
+
   const push = record.last_push || {};
   const completion = record.last_completion || {};
-  return (
-    completion.error ||
-    push.error ||
-    record.last_error ||
-    formatSubscriptionSkipReason(record.skip_reason) ||
-    ""
-  );
+  const pushStatus = normalizedStatus(push.status);
+  const completionStatus = normalizedStatus(completion.status);
+
+  if (SUB_ISSUE_STAGES.has(stage)) {
+    return subscriptionCardNotice(
+      subscriptionIssueNoticeKey(stage),
+      "error",
+      subscriptionStageNote(record),
+    );
+  }
+  if (completionStatus === "failed") {
+    return subscriptionCardNotice(
+      "completion-error",
+      "error",
+      completion.error || record.last_error,
+    );
+  }
+  if (pushStatus === "failed") {
+    return subscriptionCardNotice("push-error", "error", push.error || record.last_error);
+  }
+  if (status === "failed") {
+    return subscriptionCardNotice("error", "error", record.last_error);
+  }
+  return null;
+}
+
+function subscriptionIssueNoticeKey(stage) {
+  if (stage === "push_failed") return "push-error";
+  if (stage === "link_failed") return "completion-error";
+  return "error";
+}
+
+function subscriptionCardNotice(key, kind, text) {
+  const value = String(text || "").trim();
+  return value ? { key, kind, text: value } : null;
 }
 
 function openSubscriptionDetail(record) {
-  detailOpen.value = true;
-  detailLoading.value = false;
-  detailError.value = "";
-  detailKind.value = "subscription";
+  const detailQuery = detailRouteQueryFromSubscriptionRecord(record);
+  if (!detailQuery) return;
+  pushDetailRoute({
+    name: "subscriptions",
+    query: { ...withoutDetailRouteQuery(route.query), ...detailQuery },
+  });
+}
+
+function selectedSubscriptionRouteId() {
+  const parsed = normalizeDetailRouteQuery(route.query);
+  return parsed?.kind === "subscription" ? parsed.id : "";
+}
+
+function refreshSelectedSubscriptionFromRoute() {
+  const id = selectedSubscriptionRouteId();
+  if (!id) return false;
+  const record = subscriptionRecords.value.find((item) => String(item.subject_id) === String(id));
+  if (!record) return false;
   selectedSubscription.value = record;
+  return true;
 }
 
 const subscriptionEpisodes = computed(() => {
@@ -2576,6 +3099,7 @@ function subscriptionDetailRows(record) {
   return [
     row("豆瓣 ID", record.subject_id),
     row("分类文本", record.category_text),
+    row("豆瓣时间", record.douban_date),
     row("上映年份", record.release_year),
     row("状态", subscriptionDisplayStatus(record).text),
     row("当前阶段", subscriptionStageLabel(record)),
@@ -2592,6 +3116,8 @@ function subscriptionDetailRows(record) {
 function pushRows(push) {
   return [
     row("种子", push.torrent_title),
+    row("种子链接", push.torrent_download_url, push.torrent_download_url),
+    row("M-Team", push.mteam_torrent_url, push.mteam_torrent_url),
     row("qB", push.qb_server),
     row("分类", push.qb_category),
     row("保存目录", push.qb_save_dir_name),
@@ -2618,8 +3144,11 @@ function completionRows(completion) {
   ].filter(Boolean);
 }
 
-function row(label, value) {
-  return value == null || String(value).trim() === "" ? null : { label, value: String(value) };
+function row(label, value, href = "") {
+  if (value == null || String(value).trim() === "") return null;
+  const text = String(value);
+  const link = String(href || "").trim();
+  return link ? { label, value: text, href: link } : { label, value: text };
 }
 
 async function refreshSubscriptionProgress(id) {
@@ -2658,6 +3187,47 @@ async function checkSubscriptionCompletion(id) {
   } finally {
     subscriptionActionLoading.value = false;
   }
+}
+
+async function retrySubscriptionCurrent(id) {
+  subscriptionActionLoading.value = true;
+  try {
+    const data = await api(`/api/subscriptions/wanted/${encodeURIComponent(id)}/retry-current`, {
+      method: "POST",
+      body: "{}",
+    });
+    await refreshSubscriptionAfterAction(id, data.record);
+    showToast("已重试当前节点", "ok");
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), "err");
+  } finally {
+    subscriptionActionLoading.value = false;
+  }
+}
+
+async function rerunSubscription(id) {
+  subscriptionActionLoading.value = true;
+  try {
+    const data = await api(`/api/subscriptions/wanted/${encodeURIComponent(id)}/rerun`, {
+      method: "POST",
+      body: "{}",
+    });
+    await refreshSubscriptionAfterAction(id, data.record);
+    showToast("已从匹配阶段重跑", "ok");
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), "err");
+  } finally {
+    subscriptionActionLoading.value = false;
+  }
+}
+
+async function refreshSubscriptionAfterAction(id, fallbackRecord) {
+  if (fallbackRecord) selectedSubscription.value = fallbackRecord;
+  await syncSubscriptionState({ silent: true });
+  selectedSubscription.value =
+    subscriptionRecords.value.find((record) => String(record.subject_id) === String(id)) ||
+    fallbackRecord ||
+    selectedSubscription.value;
 }
 
 function pushStatusLabel(status) {

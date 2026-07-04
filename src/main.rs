@@ -54,7 +54,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let config_path = resolve_config_path();
     tracing::info!("config path: {}", config_path.display());
-    let file_cfg = FileConfig::load_or_create(&config_path)?;
+    let file_cfg = normalize_loaded_file_config(FileConfig::load_or_create(&config_path)?);
+    if let Err(err) = file_cfg.save(&config_path) {
+        tracing::warn!("failed to persist normalized config: {err}");
+    }
     let listen_addr = file_cfg.listen_addr()?;
 
     let cache_dir = resolve_tmdb_cache_dir();
@@ -145,6 +148,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route(
             "/subscriptions/wanted/{id}/status",
             post(wanted_subscription_status),
+        )
+        .route(
+            "/subscriptions/wanted/{id}/retry-current",
+            post(wanted_subscription_retry_current),
+        )
+        .route(
+            "/subscriptions/wanted/{id}/rerun",
+            post(wanted_subscription_rerun),
         )
         .with_state(state);
 
@@ -260,10 +271,10 @@ async fn put_config(
     new_cfg.tmdb_api_key = body.tmdb_api_key;
     new_cfg.mteam_api_key = body.mteam_api_key;
     new_cfg.douban_cookie = douban::normalize_cookie_header(&body.douban_cookie);
-    new_cfg.qb_servers = body.qb_servers;
+    new_cfg.qb_servers = normalize_qb_servers(body.qb_servers)?;
     if let Some(subscription_categories) = body.subscription_categories {
         new_cfg.subscription_categories =
-            normalize_subscription_categories(subscription_categories)?;
+            normalize_subscription_categories(subscription_categories, &new_cfg.qb_servers)?;
     }
     if let Some(subscription_watcher) = body.subscription_watcher {
         new_cfg.subscription_watcher = normalize_subscription_watcher(subscription_watcher);
@@ -337,18 +348,137 @@ async fn put_config(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn normalize_qb_servers(servers: Vec<QbServerEntry>) -> Result<Vec<QbServerEntry>, ApiError> {
+    let mut used = HashSet::new();
+    let mut out = Vec::new();
+
+    for server in servers {
+        let id = unique_qb_server_id(&server, &mut used);
+        let normalized = QbServerEntry {
+            id,
+            name: server.name.trim().to_string(),
+            base_url: server.base_url.trim().to_string(),
+            username: server.username.trim().to_string(),
+            password: server.password,
+            insecure_tls: server.insecure_tls,
+        };
+        out.push(normalized);
+    }
+
+    Ok(out)
+}
+
+fn normalize_loaded_file_config(mut cfg: FileConfig) -> FileConfig {
+    if let Ok(servers) = normalize_qb_servers(cfg.qb_servers.clone()) {
+        cfg.qb_servers = servers;
+    }
+    if let Ok(categories) =
+        normalize_subscription_categories(cfg.subscription_categories.clone(), &cfg.qb_servers)
+    {
+        cfg.subscription_categories = categories;
+    }
+    cfg.subscription_watcher = normalize_subscription_watcher(cfg.subscription_watcher);
+    if let Ok(rules) = normalize_torrent_match_rules(cfg.torrent_match_rules.clone()) {
+        cfg.torrent_match_rules = rules;
+    }
+    cfg
+}
+
+fn unique_qb_server_id(server: &QbServerEntry, used: &mut HashSet<String>) -> String {
+    let base = qb_server_id_base(server);
+    if used.insert(base.clone()) {
+        return base;
+    }
+
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search must find a unique qB server id")
+}
+
+fn qb_server_id_base(server: &QbServerEntry) -> String {
+    for raw in [&server.id, &server.name, &server.base_url] {
+        let sanitized = sanitize_qb_server_id(raw);
+        if !sanitized.is_empty() {
+            return sanitized;
+        }
+    }
+    format!("qb-{:x}", stable_qb_server_hash(server))
+}
+
+fn sanitize_qb_server_id(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if ch == '_' {
+            if !out.is_empty() {
+                out.push('_');
+                last_dash = false;
+            }
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn stable_qb_server_hash(server: &QbServerEntry) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!(
+        "{}\n{}\n{}",
+        server.name.trim(),
+        server.base_url.trim(),
+        server.username.trim()
+    )
+    .as_bytes()
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn normalize_subscription_categories(
     categories: Vec<SubscriptionCategory>,
+    qb_servers: &[QbServerEntry],
 ) -> Result<Vec<SubscriptionCategory>, ApiError> {
     let mut out = Vec::new();
     let mut names = HashSet::new();
     let mut wanted_tags = HashSet::new();
+    let qb_server_ids = qb_servers
+        .iter()
+        .map(|server| server.id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<HashSet<_>>();
+    let default_qb_server_id = qb_servers
+        .first()
+        .map(|server| server.id.trim().to_string())
+        .filter(|id| !id.is_empty());
 
     for (idx, category) in categories.into_iter().enumerate() {
         let n = idx + 1;
+        let qb_server_id = category.qb_server_id.trim().to_string();
+        let qb_server_id = if qb_server_id.is_empty() {
+            default_qb_server_id.clone().ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "订阅分类 {} 缺少 qB 服务器，请先配置 qB 服务器",
+                    category.name.trim()
+                ))
+            })?
+        } else {
+            qb_server_id
+        };
         let normalized = SubscriptionCategory {
             name: category.name.trim().to_string(),
             wanted_tag: category.wanted_tag.trim().to_string(),
+            qb_server_id,
             qb_category: category.qb_category.trim().to_string(),
             qb_save_dir_name: category.qb_save_dir_name.trim().to_string(),
             download_dir: category.download_dir.trim().to_string(),
@@ -380,6 +510,12 @@ fn normalize_subscription_categories(
             return Err(ApiError::bad_request(format!(
                 "订阅分类 {} 缺少 qB 保存目录名",
                 normalized.name
+            )));
+        }
+        if !qb_server_ids.contains(&normalized.qb_server_id) {
+            return Err(ApiError::bad_request(format!(
+                "订阅分类 {} 绑定的 qB 服务器不存在: {}",
+                normalized.name, normalized.qb_server_id
             )));
         }
         if normalized.download_dir.is_empty() {
@@ -692,6 +828,37 @@ async fn wanted_subscription_status(
     ))
 }
 
+async fn wanted_subscription_retry_current(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (_cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    let action = retry_action_for_wanted_record(&record)?;
+    process_wanted_record_pipeline(&state, &account_key, record.clone()).await?;
+    let (_cfg, _account_key, record) = load_wanted_record_context(&state, &id).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "action": action.as_str(),
+        "record": record,
+    })))
+}
+
+async fn wanted_subscription_rerun(
+    State(state): State<AppState>,
+    PathParam(id): PathParam<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (_cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
+    process_wanted_push_step(&state, &account_key, &record.subject_id, true).await?;
+    let (_cfg, _account_key, record) = load_wanted_record_context(&state, &id).await?;
+    process_wanted_record_pipeline(&state, &account_key, record).await?;
+    let (_cfg, _account_key, record) = load_wanted_record_context(&state, &id).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "action": SubscriptionRetryAction::Push.as_str(),
+        "record": record,
+    })))
+}
+
 #[derive(Deserialize, Default)]
 struct WantedCandidateBody {
     #[serde(default)]
@@ -700,8 +867,6 @@ struct WantedCandidateBody {
 
 #[derive(Deserialize, Default)]
 struct WantedPushBody {
-    #[serde(default)]
-    qb_server_name: Option<String>,
     #[serde(default)]
     force: bool,
     #[serde(default)]
@@ -793,6 +958,7 @@ async fn wanted_subscription_candidates(
                 "candidate_count": candidates.len(),
                 "match_count": matches.iter().filter(|item| item.selected).count(),
                 "selected_torrent_id": selected.as_ref().map(|item| item.candidate.torrent_id.clone()),
+                "torrent_matches": torrent_match_log_entries(&matches),
             }),
         ),
     )
@@ -829,7 +995,7 @@ async fn wanted_subscription_push(
         )));
     }
     let category = category_for_wanted_record(&record, &cfg.subscription_categories)?.clone();
-    let qb_server = select_qb_server(&cfg.qb_servers, body.qb_server_name.as_deref())?;
+    let qb_server = select_qb_server_for_category(&cfg.qb_servers, &category)?;
     let candidates =
         match search_mteam_candidates_for_record(&cfg.mteam_api_key, &record, body.page_size).await
         {
@@ -867,6 +1033,33 @@ async fn wanted_subscription_push(
         .await
         .map_err(|e| ApiError::internal(format!("写入候选种子记录失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    write_operation_log(
+        &state,
+        operation_log_entry(
+            account_key.clone(),
+            "torrent_search",
+            "match_candidates",
+            "subscription",
+            Some(record.subject_id.clone()),
+            Some(record.title.clone()),
+            if selected.is_some() { "success" } else { "failed" },
+            format!(
+                "订阅推送前匹配候选种子完成：{} 个候选，{} 个选中",
+                candidates.len(),
+                matches.iter().filter(|item| item.selected).count()
+            ),
+            None,
+            json!({
+                "candidate_count": candidates.len(),
+                "match_count": matches.iter().filter(|item| item.selected).count(),
+                "selected_torrent_id": selected.as_ref().map(|item| item.candidate.torrent_id.clone()),
+                "qb_server": qb_server_label(&qb_server),
+                "qb_category": category.qb_category,
+                "torrent_matches": torrent_match_log_entries(&matches),
+            }),
+        ),
+    )
+    .await;
 
     let Some(selected) = selected else {
         let error = if candidates.is_empty() {
@@ -899,6 +1092,7 @@ async fn wanted_subscription_push(
                 json!({
                     "candidate_count": candidates.len(),
                     "qb_category": category.qb_category,
+                    "torrent_matches": torrent_match_log_entries(&matches),
                 }),
             ),
         )
@@ -1003,7 +1197,7 @@ async fn wanted_subscription_push(
         return Err(e);
     }
 
-    let mut push = torrent_push_record(
+    let mut push = torrent_push_record_with_download_url(
         &record.subject_id,
         &qb_server,
         &category,
@@ -1011,7 +1205,9 @@ async fn wanted_subscription_push(
         "pushed",
         Some(unix_now_secs()),
         None,
+        Some(&dl_url),
     );
+    inherit_existing_qb_lookup(&mut push, record.last_push.as_ref());
     if let Ok(lookup) = find_qb_torrent_for_push(&qb_server, &push, None).await {
         push.qb_hash = Some(lookup.torrent.hash);
         push.qb_name = Some(lookup.torrent.name);
@@ -1113,27 +1309,23 @@ async fn wanted_subscription_completion(
         return Err(ApiError::bad_request(error));
     }
 
-    let qb_server = match select_qb_server(
-        &cfg.qb_servers,
-        body.qb_server_name
-            .as_deref()
-            .or(Some(push.qb_server.as_str())),
-    ) {
-        Ok(qb_server) => qb_server,
-        Err(err) => {
-            let error = err.message().to_string();
-            persist_completion_sync_error(
-                &state,
-                &account_key,
-                &record.subject_id,
-                push,
-                &error,
-                now,
-            )
-            .await?;
-            return Err(err);
-        }
-    };
+    let qb_server =
+        match select_qb_server_for_push(&cfg.qb_servers, &push, body.qb_server_name.as_deref()) {
+            Ok(qb_server) => qb_server,
+            Err(err) => {
+                let error = err.message().to_string();
+                persist_completion_sync_error(
+                    &state,
+                    &account_key,
+                    &record.subject_id,
+                    push,
+                    &error,
+                    now,
+                )
+                .await?;
+                return Err(err);
+            }
+        };
     let qb_torrent =
         match find_qb_torrent_for_push(&qb_server, &push, body.qb_hash.as_deref()).await {
             Ok(lookup) => lookup.torrent,
@@ -1151,32 +1343,13 @@ async fn wanted_subscription_completion(
                 return Err(err);
             }
         };
-    let qb_files = match qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await {
-        Ok(qb_files) => qb_files,
-        Err(err) => {
-            let error = err.message().to_string();
-            push.qb_hash = Some(qb_torrent.hash.clone());
-            push.qb_name = Some(qb_torrent.name.clone());
-            persist_completion_sync_error(
-                &state,
-                &account_key,
-                &record.subject_id,
-                push,
-                &error,
-                now,
-            )
-            .await?;
-            return Err(err);
-        }
-    };
-
-    push.checked_at = Some(now);
-    push.qb_hash = Some(qb_torrent.hash.clone());
-    push.qb_name = Some(qb_torrent.name.clone());
-    apply_qb_progress_to_push(&mut push, &qb_torrent, &qb_files);
-
     if !qb_torrent.is_complete() {
-        push.status = "downloading".to_string();
+        push.checked_at = Some(now);
+        push.qb_hash = Some(qb_torrent.hash.clone());
+        push.qb_name = Some(qb_torrent.name.clone());
+        apply_qb_progress_to_push(&mut push, &qb_torrent, &[]);
+        mark_push_progress_success(&mut push, false);
+
         let completion = subscription::HardlinkCompletionRecord {
             status: "pending".to_string(),
             checked_at: now,
@@ -1233,6 +1406,30 @@ async fn wanted_subscription_completion(
             "record": record,
         })));
     }
+    let qb_files = match qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await {
+        Ok(qb_files) => qb_files,
+        Err(err) => {
+            let error = err.message().to_string();
+            push.qb_hash = Some(qb_torrent.hash.clone());
+            push.qb_name = Some(qb_torrent.name.clone());
+            persist_completion_sync_error(
+                &state,
+                &account_key,
+                &record.subject_id,
+                push,
+                &error,
+                now,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+
+    push.checked_at = Some(now);
+    push.qb_hash = Some(qb_torrent.hash.clone());
+    push.qb_name = Some(qb_torrent.name.clone());
+    apply_qb_progress_to_push(&mut push, &qb_torrent, &qb_files);
+    mark_push_progress_success(&mut push, qb_torrent.is_complete());
 
     let plan = match build_hardlink_plan(&record, &category, &push, &qb_torrent, &qb_files, now) {
         Ok(plan) => plan,
@@ -1363,27 +1560,23 @@ async fn wanted_subscription_progress(
             return Err(ApiError::bad_request(error));
         }
     };
-    let qb_server = match select_qb_server(
-        &cfg.qb_servers,
-        body.qb_server_name
-            .as_deref()
-            .or(Some(push.qb_server.as_str())),
-    ) {
-        Ok(qb_server) => qb_server,
-        Err(err) => {
-            let error = err.message().to_string();
-            persist_progress_sync_error(
-                &state,
-                &account_key,
-                &record.subject_id,
-                push,
-                &error,
-                now,
-            )
-            .await?;
-            return Err(err);
-        }
-    };
+    let qb_server =
+        match select_qb_server_for_push(&cfg.qb_servers, &push, body.qb_server_name.as_deref()) {
+            Ok(qb_server) => qb_server,
+            Err(err) => {
+                let error = err.message().to_string();
+                persist_progress_sync_error(
+                    &state,
+                    &account_key,
+                    &record.subject_id,
+                    push,
+                    &error,
+                    now,
+                )
+                .await?;
+                return Err(err);
+            }
+        };
     let qb_torrent =
         match find_qb_torrent_for_push(&qb_server, &push, body.qb_hash.as_deref()).await {
             Ok(lookup) => lookup.torrent,
@@ -1401,34 +1594,30 @@ async fn wanted_subscription_progress(
                 return Err(err);
             }
         };
-    let qb_files = match qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await {
-        Ok(qb_files) => qb_files,
-        Err(err) => {
-            let error = err.message().to_string();
-            push.qb_hash = Some(qb_torrent.hash.clone());
-            push.qb_name = Some(qb_torrent.name.clone());
-            persist_progress_sync_error(
-                &state,
-                &account_key,
-                &record.subject_id,
-                push,
-                &error,
-                now,
-            )
-            .await?;
-            return Err(err);
+    let mut file_list_error = None;
+    let qb_files = if qb_torrent.is_complete() {
+        match qbittorrent::torrent_files(&qb_server, &qb_torrent.hash).await {
+            Ok(qb_files) => qb_files,
+            Err(err) => {
+                let error = err.message().to_string();
+                tracing::warn!(
+                    subject_id = %record.subject_id,
+                    qb_hash = %qb_torrent.hash,
+                    "qB file list unavailable while syncing progress: {error}"
+                );
+                file_list_error = Some(error);
+                Vec::new()
+            }
         }
+    } else {
+        Vec::new()
     };
 
     push.checked_at = Some(now);
     push.qb_hash = Some(qb_torrent.hash.clone());
     push.qb_name = Some(qb_torrent.name.clone());
     apply_qb_progress_to_push(&mut push, &qb_torrent, &qb_files);
-    push.status = if qb_torrent.is_complete() {
-        "downloaded".to_string()
-    } else {
-        "downloading".to_string()
-    };
+    mark_push_progress_success(&mut push, qb_torrent.is_complete());
 
     let record = state
         .wanted_store
@@ -1469,6 +1658,7 @@ async fn wanted_subscription_progress(
                 "download_state": push.download_state.clone(),
                 "qb_hash": push.qb_hash.clone(),
                 "qb_name": push.qb_name.clone(),
+                "file_list_error": file_list_error,
             }),
         ),
     )
@@ -1724,15 +1914,57 @@ fn select_qb_server(
 ) -> Result<QbServerEntry, ApiError> {
     let requested = requested_name.map(str::trim).filter(|s| !s.is_empty());
     let server = if let Some(name) = requested {
-        servers
-            .iter()
-            .find(|server| server.name.trim() == name || server.base_url.trim() == name)
+        servers.iter().find(|server| {
+            server.id.trim() == name || server.name.trim() == name || server.base_url.trim() == name
+        })
     } else {
         servers.first()
     };
     server
         .cloned()
         .ok_or_else(|| ApiError::bad_request("请先在设置中配置 qB 服务器"))
+}
+
+fn select_qb_server_for_category(
+    servers: &[QbServerEntry],
+    category: &SubscriptionCategory,
+) -> Result<QbServerEntry, ApiError> {
+    let id = category.qb_server_id.trim();
+    if id.is_empty() {
+        return servers
+            .first()
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("请先在设置中配置 qB 服务器"));
+    }
+    servers
+        .iter()
+        .find(|server| server.id.trim() == id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "订阅分类 {} 绑定的 qB 服务器不存在: {}",
+                category.name, id
+            ))
+        })
+}
+
+fn select_qb_server_for_push(
+    servers: &[QbServerEntry],
+    push: &subscription::TorrentPushRecord,
+    requested: Option<&str>,
+) -> Result<QbServerEntry, ApiError> {
+    let selector = requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let id = push.qb_server_id.trim();
+            (!id.is_empty()).then_some(id)
+        })
+        .or_else(|| {
+            let name = push.qb_server.trim();
+            (!name.is_empty()).then_some(name)
+        });
+    select_qb_server(servers, selector)
 }
 
 async fn search_mteam_candidates_for_record(
@@ -1755,11 +1987,7 @@ async fn search_mteam_candidates_for_record(
     let subject_id = record.subject_id.trim();
     if !subject_id.is_empty() {
         let douban = normalize_douban_url(subject_id);
-        let body = json!({
-            "pageNumber": 1,
-            "pageSize": page_size,
-            "douban": douban,
-        });
+        let body = mteam_search_body(1, page_size, "douban", &douban);
         let response = mteam_search_post(&client, key, &body).await?;
         append_unique_candidates(
             &mut candidates,
@@ -1770,11 +1998,7 @@ async fn search_mteam_candidates_for_record(
 
     let title = record.title.trim();
     if !title.is_empty() {
-        let body = json!({
-            "pageNumber": 1,
-            "pageSize": page_size,
-            "keyword": title,
-        });
+        let body = mteam_search_body(1, page_size, "keyword", title);
         let response = mteam_search_post(&client, key, &body).await?;
         append_unique_candidates(
             &mut candidates,
@@ -1783,7 +2007,22 @@ async fn search_mteam_candidates_for_record(
         );
     }
 
+    sort_torrent_candidates_by_seeders(&mut candidates);
     Ok(candidates)
+}
+
+fn sort_torrent_candidates_by_seeders(candidates: &mut [subscription::TorrentCandidateRecord]) {
+    candidates.sort_by(|a, b| b.seeders.unwrap_or(0).cmp(&a.seeders.unwrap_or(0)));
+}
+
+fn mteam_search_body(page: u32, page_size: u32, query_field: &str, query_value: &str) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("pageNumber".to_string(), json!(page));
+    body.insert("pageSize".to_string(), json!(page_size));
+    body.insert("sortField".to_string(), json!("SEEDERS"));
+    body.insert("sortDirection".to_string(), json!("DESC"));
+    body.insert(query_field.to_string(), json!(query_value));
+    Value::Object(body)
 }
 
 fn append_unique_candidates(
@@ -2010,6 +2249,43 @@ fn match_torrent_candidates_without_rules(
         .collect()
 }
 
+fn torrent_match_log_entries(matches: &[subscription::TorrentCandidateMatchRecord]) -> Value {
+    Value::Array(
+        matches
+            .iter()
+            .map(|item| {
+                json!({
+                    "torrent_id": item.candidate.torrent_id,
+                    "title": item.candidate.title,
+                    "subtitle": item.candidate.subtitle,
+                    "source": item.candidate.source,
+                    "search_query": item.candidate.search_query,
+                    "size": item.candidate.size,
+                    "seeders": item.candidate.seeders,
+                    "leechers": item.candidate.leechers,
+                    "uploaded_at": item.candidate.uploaded_at,
+                    "selected": item.selected,
+                    "matched_rule_name": item.matched_rule_name,
+                    "matched_priority": item.matched_priority,
+                    "matched_keywords": item.matched_keywords,
+                    "excluded_reason": item.excluded_reason,
+                    "rule_evaluations": item.rule_evaluations.iter().map(|evaluation| {
+                        json!({
+                            "rule_name": evaluation.rule_name,
+                            "priority": evaluation.priority,
+                            "mode": evaluation.mode,
+                            "matched": evaluation.matched,
+                            "matched_keywords": evaluation.matched_keywords,
+                            "missing_keywords": evaluation.missing_keywords,
+                            "excluded_reason": evaluation.excluded_reason,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
 fn evaluate_candidate_rule(
     candidate: &subscription::TorrentCandidateRecord,
     rule: &TorrentMatchRule,
@@ -2153,11 +2429,6 @@ fn apply_qb_progress_to_push(
     files: &[qbittorrent::QbTorrentFile],
 ) {
     let file_records = torrent_file_progress_records(files);
-    let total_file_count = file_records.len();
-    let completed_file_count = file_records
-        .iter()
-        .filter(|file| file.progress >= 0.999_999)
-        .count();
     let total_size = if torrent.size > 0 {
         torrent.size
     } else {
@@ -2166,11 +2437,29 @@ fn apply_qb_progress_to_push(
 
     push.download_progress = Some(torrent.progress.clamp(0.0, 1.0));
     push.download_state = (!torrent.state.trim().is_empty()).then(|| torrent.state.clone());
-    push.total_size = (total_size > 0).then_some(total_size);
-    push.total_file_count = Some(total_file_count);
-    push.completed_file_count = Some(completed_file_count);
-    push.files = file_records;
-    push.episodes = episode_records_from_file_progress(&push.files);
+    if total_size > 0 {
+        push.total_size = Some(total_size);
+    }
+    if !files.is_empty() {
+        let total_file_count = file_records.len();
+        let completed_file_count = file_records
+            .iter()
+            .filter(|file| file.progress >= 0.999_999)
+            .count();
+        push.total_file_count = Some(total_file_count);
+        push.completed_file_count = Some(completed_file_count);
+        push.files = file_records;
+        push.episodes = episode_records_from_file_progress(&push.files);
+    }
+}
+
+fn mark_push_progress_success(push: &mut subscription::TorrentPushRecord, completed: bool) {
+    push.status = if completed {
+        "downloaded".to_string()
+    } else {
+        "downloading".to_string()
+    };
+    push.error = None;
 }
 
 fn torrent_file_progress_records(
@@ -2846,6 +3135,20 @@ async fn find_qb_torrent_for_push(
     push: &subscription::TorrentPushRecord,
     requested_hash: Option<&str>,
 ) -> Result<QbTorrentLookup, ApiError> {
+    let hash_candidates = qb_hash_lookup_candidates(push, requested_hash);
+    if !hash_candidates.is_empty() {
+        if let Ok(torrents) =
+            qbittorrent::list_torrents_by_hashes(qb_server, &hash_candidates).await
+        {
+            if let Some(found) = select_qb_torrent(&torrents, push, requested_hash) {
+                return Ok(QbTorrentLookup {
+                    torrent: found.torrent,
+                    matched_by: format!("{}（qB hashes 精确查询）", found.matched_by),
+                });
+            }
+        }
+    }
+
     let category_filter = push.qb_category.trim();
     let category_filter = (!category_filter.is_empty()).then_some(category_filter);
     let scoped_torrents = qbittorrent::list_torrents(qb_server, category_filter).await?;
@@ -2884,6 +3187,36 @@ async fn find_qb_torrent_for_push(
         all_count,
         all_error.as_deref(),
     )))
+}
+
+fn qb_hash_lookup_candidates(
+    push: &subscription::TorrentPushRecord,
+    requested_hash: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(hash) = requested_hash.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push(hash.to_string());
+    }
+    if let Some(hash) = push
+        .qb_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push(hash.to_string());
+    }
+    out.sort();
+    out.dedup();
+    if let Some(hash) = requested_hash.map(str::trim).filter(|s| !s.is_empty()) {
+        out.sort_by_key(|candidate| {
+            if candidate.eq_ignore_ascii_case(hash) {
+                0
+            } else {
+                1
+            }
+        });
+    }
+    out
 }
 
 fn select_qb_torrent(
@@ -3140,11 +3473,10 @@ fn build_hardlink_plan(
 
     let selected = files
         .iter()
-        .filter(|file| should_link_media_file(&file.name))
         .filter_map(|file| safe_relative_path(&file.name).map(|relative| (file, relative)))
         .collect::<Vec<_>>();
     if selected.is_empty() {
-        return Err(ApiError::bad_request("qB 文件列表中没有可硬链接的媒体文件"));
+        return Err(ApiError::bad_request("qB 文件列表中没有可硬链接的文件"));
     }
 
     let mut plan_files = Vec::new();
@@ -3295,11 +3627,10 @@ fn execute_hardlink_plan(plan: &HardlinkPlan, now: u64) -> subscription::Hardlin
 
 fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecord {
     let source_display = file.source_path.display().to_string();
-    let target_display = file.target_path.display().to_string();
     if !file.source_path.exists() {
         return subscription::HardlinkFileRecord {
             source_path: source_display,
-            target_path: target_display,
+            target_path: file.target_path.display().to_string(),
             size: file.size,
             status: "failed".to_string(),
             season_number: file.season_number,
@@ -3309,33 +3640,38 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             error: Some("源文件不存在".to_string()),
         };
     }
-    if file.target_path.exists() {
-        if same_file(&file.source_path, &file.target_path).unwrap_or(false) {
-            return subscription::HardlinkFileRecord {
-                source_path: source_display,
-                target_path: target_display,
-                size: file.size,
-                status: "already_linked".to_string(),
-                season_number: file.season_number,
-                episode_number: file.episode_number,
-                episode_end_number: file.episode_end_number,
-                episode_label: file.episode_label.clone(),
-                error: None,
-            };
-        }
+    let (target_path, already_linked) =
+        match resolve_hardlink_target_path(&file.source_path, &file.target_path) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return subscription::HardlinkFileRecord {
+                    source_path: source_display,
+                    target_path: file.target_path.display().to_string(),
+                    size: file.size,
+                    status: "failed".to_string(),
+                    season_number: file.season_number,
+                    episode_number: file.episode_number,
+                    episode_end_number: file.episode_end_number,
+                    episode_label: file.episode_label.clone(),
+                    error: Some(error),
+                };
+            }
+        };
+    let target_display = target_path.display().to_string();
+    if already_linked {
         return subscription::HardlinkFileRecord {
             source_path: source_display,
             target_path: target_display,
             size: file.size,
-            status: "failed".to_string(),
+            status: "already_linked".to_string(),
             season_number: file.season_number,
             episode_number: file.episode_number,
             episode_end_number: file.episode_end_number,
             episode_label: file.episode_label.clone(),
-            error: Some("目标文件已存在且不是同一硬链接".to_string()),
+            error: None,
         };
     }
-    if let Some(parent) = file.target_path.parent() {
+    if let Some(parent) = target_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return subscription::HardlinkFileRecord {
                 source_path: source_display,
@@ -3350,7 +3686,7 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             };
         }
     }
-    match std::fs::hard_link(&file.source_path, &file.target_path) {
+    match std::fs::hard_link(&file.source_path, &target_path) {
         Ok(()) => subscription::HardlinkFileRecord {
             source_path: source_display,
             target_path: target_display,
@@ -3374,6 +3710,38 @@ fn hardlink_one_file(file: &HardlinkFilePlan) -> subscription::HardlinkFileRecor
             error: Some(hardlink_error_message(&e)),
         },
     }
+}
+
+fn resolve_hardlink_target_path(source: &Path, target: &Path) -> Result<(PathBuf, bool), String> {
+    if !target.exists() {
+        return Ok((target.to_path_buf(), false));
+    }
+    if same_file(source, target).unwrap_or(false) {
+        return Ok((target.to_path_buf(), true));
+    }
+    for suffix in 1..=999 {
+        let candidate = conflict_renamed_path(target, suffix);
+        if !candidate.exists() {
+            return Ok((candidate, false));
+        }
+        if same_file(source, &candidate).unwrap_or(false) {
+            return Ok((candidate, true));
+        }
+    }
+    Err("目标文件已存在且自动改名超过 999 次".to_string())
+}
+
+fn conflict_renamed_path(path: &Path, suffix: u32) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy());
+    let file_name = match path.extension().map(|value| value.to_string_lossy()) {
+        Some(ext) if !ext.is_empty() => format!("{stem}.{suffix}.{ext}"),
+        _ => format!("{stem}.{suffix}"),
+    };
+    path.with_file_name(file_name)
 }
 
 fn hardlink_error_message(error: &std::io::Error) -> String {
@@ -3494,6 +3862,28 @@ fn torrent_push_record(
     pushed_at: Option<u64>,
     error: Option<String>,
 ) -> subscription::TorrentPushRecord {
+    torrent_push_record_with_download_url(
+        subscription_id,
+        qb_server,
+        category,
+        candidate,
+        status,
+        pushed_at,
+        error,
+        None,
+    )
+}
+
+fn torrent_push_record_with_download_url(
+    subscription_id: &str,
+    qb_server: &QbServerEntry,
+    category: &SubscriptionCategory,
+    candidate: &subscription::TorrentCandidateRecord,
+    status: &str,
+    pushed_at: Option<u64>,
+    error: Option<String>,
+    torrent_download_url: Option<&str>,
+) -> subscription::TorrentPushRecord {
     let qb_server_name = if qb_server.name.trim().is_empty() {
         qb_server.base_url.trim().to_string()
     } else {
@@ -3504,6 +3894,7 @@ fn torrent_push_record(
         torrent_id: candidate.torrent_id.clone(),
         torrent_title: candidate.title.clone(),
         qb_server: qb_server_name,
+        qb_server_id: qb_server.id.trim().to_string(),
         qb_category: category.qb_category.trim().to_string(),
         qb_save_dir_name: category.qb_save_dir_name.trim().to_string(),
         qb_identifier: if candidate.torrent_id.trim().is_empty() {
@@ -3511,6 +3902,11 @@ fn torrent_push_record(
         } else {
             format!("mteam:{}", candidate.torrent_id.trim())
         },
+        torrent_download_url: torrent_download_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string),
+        mteam_torrent_url: mteam_torrent_web_url(&candidate.torrent_id),
         pushed_at,
         status: status.to_string(),
         error,
@@ -3529,6 +3925,62 @@ fn torrent_push_record(
         target_dir: None,
         linked_files: Vec::new(),
     }
+}
+
+fn mteam_torrent_web_url(torrent_id: &str) -> Option<String> {
+    let id = torrent_id.trim();
+    (!id.is_empty()).then(|| format!("https://kp.m-team.cc/detail/{id}"))
+}
+
+fn inherit_existing_qb_lookup(
+    next: &mut subscription::TorrentPushRecord,
+    existing: Option<&subscription::TorrentPushRecord>,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+    if existing.torrent_id.trim() != next.torrent_id.trim()
+        || existing.qb_server_id.trim() != next.qb_server_id.trim()
+        || existing.qb_category.trim() != next.qb_category.trim()
+    {
+        return;
+    }
+    if next.qb_hash.as_deref().unwrap_or("").trim().is_empty() {
+        next.qb_hash = existing.qb_hash.clone();
+    }
+    if next.qb_name.as_deref().unwrap_or("").trim().is_empty() {
+        next.qb_name = existing.qb_name.clone();
+    }
+}
+
+const WANTED_PIPELINE_TICK_SECS: u64 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WantedWatchTickAction {
+    PollWanted,
+    ProcessPipeline,
+}
+
+fn wanted_watch_tick_action(
+    poll_enabled: bool,
+    has_account_key: bool,
+    now_secs: u64,
+    last_wanted_poll_at: Option<u64>,
+    poll_interval_secs: u64,
+) -> Option<WantedWatchTickAction> {
+    if !has_account_key {
+        return None;
+    }
+    let poll_interval_secs = poll_interval_secs.clamp(60, 86_400);
+    let should_poll = poll_enabled
+        && last_wanted_poll_at
+            .map(|last| now_secs.saturating_sub(last) >= poll_interval_secs)
+            .unwrap_or(true);
+    Some(if should_poll {
+        WantedWatchTickAction::PollWanted
+    } else {
+        WantedWatchTickAction::ProcessPipeline
+    })
 }
 
 async fn run_wanted_watch_poll(
@@ -3561,6 +4013,14 @@ async fn run_wanted_watch_poll(
     Ok(outcome)
 }
 
+async fn run_wanted_pipeline_tick(state: &AppState) -> Result<String, ApiError> {
+    let cfg = state.config.read().await.clone();
+    let account_key =
+        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
+    process_wanted_watch_queue(state, &account_key).await?;
+    Ok(account_key)
+}
+
 async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Result<(), ApiError> {
     let snapshot = state
         .wanted_store
@@ -3569,6 +4029,9 @@ async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Resu
         .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
     let records = snapshot.records.values().cloned().collect::<Vec<_>>();
     for record in records {
+        if !wanted_record_needs_automatic_pipeline(&record) {
+            continue;
+        }
         if let Err(err) = process_wanted_record_step(state, account_key, record.clone()).await {
             tracing::warn!(
                 subject_id = %record.subject_id,
@@ -3586,24 +4049,152 @@ async fn process_wanted_record_step(
     account_key: &str,
     record: subscription::WantedSubscriptionRecord,
 ) -> Result<(), ApiError> {
+    process_wanted_record_pipeline(state, account_key, record).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptionRetryAction {
+    Push,
+    Progress,
+    Completion,
+}
+
+impl SubscriptionRetryAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            SubscriptionRetryAction::Push => "push",
+            SubscriptionRetryAction::Progress => "progress",
+            SubscriptionRetryAction::Completion => "completion",
+        }
+    }
+}
+
+fn retry_action_for_wanted_record(
+    record: &subscription::WantedSubscriptionRecord,
+) -> Result<SubscriptionRetryAction, ApiError> {
+    match record.processing_stage.as_deref().unwrap_or("") {
+        "queued" | "searching" | "no_candidates" | "no_match" | "matched" | "pushing"
+        | "push_failed" | "skipped" => return Ok(SubscriptionRetryAction::Push),
+        "pushed" | "downloading" => return Ok(SubscriptionRetryAction::Progress),
+        "download_complete" | "link_planned" | "link_failed" => {
+            return Ok(SubscriptionRetryAction::Completion);
+        }
+        "linked" => {
+            return Err(ApiError::bad_request("当前订阅状态不需要重试"));
+        }
+        _ => {}
+    }
+
     match record.status {
         subscription::WantedSubscriptionStatus::Unprocessed
-        | subscription::WantedSubscriptionStatus::Matching => {
-            process_wanted_push_step(state, account_key, &record.subject_id, false).await
-        }
-        subscription::WantedSubscriptionStatus::Processing => {
-            process_wanted_push_step(state, account_key, &record.subject_id, true).await
-        }
+        | subscription::WantedSubscriptionStatus::Matching
+        | subscription::WantedSubscriptionStatus::Processing => Ok(SubscriptionRetryAction::Push),
         subscription::WantedSubscriptionStatus::Pushed
         | subscription::WantedSubscriptionStatus::Downloading => {
-            process_wanted_progress_step(state, account_key, &record.subject_id).await
+            Ok(SubscriptionRetryAction::Progress)
         }
         subscription::WantedSubscriptionStatus::Completed => {
-            process_wanted_completion_step(state, account_key, &record.subject_id).await
+            Ok(SubscriptionRetryAction::Completion)
+        }
+        subscription::WantedSubscriptionStatus::Failed => {
+            if record.last_completion.is_some() {
+                Ok(SubscriptionRetryAction::Completion)
+            } else if record.last_push.is_some() {
+                Ok(SubscriptionRetryAction::Push)
+            } else {
+                Ok(SubscriptionRetryAction::Push)
+            }
+        }
+        subscription::WantedSubscriptionStatus::Skipped => Ok(SubscriptionRetryAction::Push),
+        subscription::WantedSubscriptionStatus::Linked => {
+            Err(ApiError::bad_request("当前订阅状态不需要重试"))
+        }
+    }
+}
+
+fn pipeline_action_for_wanted_record(
+    record: &subscription::WantedSubscriptionRecord,
+) -> Option<SubscriptionRetryAction> {
+    match record.status {
+        subscription::WantedSubscriptionStatus::Unprocessed
+        | subscription::WantedSubscriptionStatus::Matching
+        | subscription::WantedSubscriptionStatus::Processing
+        | subscription::WantedSubscriptionStatus::Skipped => Some(SubscriptionRetryAction::Push),
+        subscription::WantedSubscriptionStatus::Pushed
+        | subscription::WantedSubscriptionStatus::Downloading => {
+            Some(SubscriptionRetryAction::Progress)
+        }
+        subscription::WantedSubscriptionStatus::Completed => {
+            Some(SubscriptionRetryAction::Completion)
         }
         subscription::WantedSubscriptionStatus::Linked
-        | subscription::WantedSubscriptionStatus::Failed
-        | subscription::WantedSubscriptionStatus::Skipped => Ok(()),
+        | subscription::WantedSubscriptionStatus::Failed => None,
+    }
+}
+
+fn wanted_record_needs_automatic_pipeline(record: &subscription::WantedSubscriptionRecord) -> bool {
+    !matches!(
+        record.status,
+        subscription::WantedSubscriptionStatus::Skipped
+            | subscription::WantedSubscriptionStatus::Failed
+            | subscription::WantedSubscriptionStatus::Linked
+    )
+}
+
+fn pipeline_should_stop_after_action(action: SubscriptionRetryAction) -> bool {
+    matches!(
+        action,
+        SubscriptionRetryAction::Push
+            | SubscriptionRetryAction::Progress
+            | SubscriptionRetryAction::Completion
+    )
+}
+
+async fn process_wanted_record_pipeline(
+    state: &AppState,
+    account_key: &str,
+    mut record: subscription::WantedSubscriptionRecord,
+) -> Result<(), ApiError> {
+    for _ in 0..4 {
+        let Some(action) = pipeline_action_for_wanted_record(&record) else {
+            return Ok(());
+        };
+        process_subscription_retry_action_once(state, account_key, &record.subject_id, action)
+            .await?;
+
+        let snapshot = state
+            .wanted_store
+            .snapshot(account_key, unix_now_secs())
+            .await
+            .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
+        let Some(next_record) = snapshot.records.get(&record.subject_id).cloned() else {
+            return Err(ApiError::bad_request("订阅记录不存在"));
+        };
+        record = next_record;
+
+        if pipeline_should_stop_after_action(action) {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+async fn process_subscription_retry_action_once(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    action: SubscriptionRetryAction,
+) -> Result<(), ApiError> {
+    match action {
+        SubscriptionRetryAction::Push => {
+            process_wanted_push_step(state, account_key, subject_id, true).await
+        }
+        SubscriptionRetryAction::Progress => {
+            process_wanted_progress_step(state, account_key, subject_id).await
+        }
+        SubscriptionRetryAction::Completion => {
+            process_wanted_completion_step(state, account_key, subject_id).await
+        }
     }
 }
 
@@ -3759,71 +4350,91 @@ async fn persist_if_status_unchanged_any(
 
 fn spawn_wanted_watch_loop(state: AppState) {
     tokio::spawn(async move {
+        let mut last_wanted_poll_at = None;
         loop {
-            let cfg = state.config.read().await.subscription_watcher.clone();
-            let interval = cfg.poll_interval_secs.clamp(60, 86_400);
-            if cfg.enabled {
-                match run_wanted_watch_poll(&state).await {
-                    Ok(outcome) => {
-                        tracing::info!(
-                            account_key = %outcome.account_key,
-                            total = outcome.total_wish_items,
-                            created_unprocessed = outcome.created_unprocessed,
-                            created_skipped = outcome.created_skipped,
-                            updated_existing = outcome.updated_existing,
-                            "wanted subscription poll completed"
-                        );
-                        write_operation_log(
-                            &state,
-                            operation_log_entry(
-                                outcome.account_key.clone(),
-                                "subscription_sync",
-                                "poll_wanted",
-                                "subscription_state",
-                                None,
-                                None,
-                                "success",
-                                format!(
-                                    "后台轮询想看完成：新增待处理 {}，跳过旧想看 {}，更新已有 {}",
-                                    outcome.created_unprocessed,
-                                    outcome.created_skipped,
-                                    outcome.updated_existing
+            let cfg = state.config.read().await.clone();
+            let now_secs = unix_now_secs();
+            let action = wanted_watch_tick_action(
+                cfg.subscription_watcher.enabled,
+                douban::auth_cache_key_fragment(&cfg.douban_cookie).is_ok(),
+                now_secs,
+                last_wanted_poll_at,
+                cfg.subscription_watcher.poll_interval_secs,
+            );
+            match action {
+                Some(WantedWatchTickAction::PollWanted) => {
+                    last_wanted_poll_at = Some(now_secs);
+                    match run_wanted_watch_poll(&state).await {
+                        Ok(outcome) => {
+                            tracing::info!(
+                                account_key = %outcome.account_key,
+                                total = outcome.total_wish_items,
+                                created_unprocessed = outcome.created_unprocessed,
+                                created_skipped = outcome.created_skipped,
+                                updated_existing = outcome.updated_existing,
+                                "wanted subscription poll completed"
+                            );
+                            write_operation_log(
+                                &state,
+                                operation_log_entry(
+                                    outcome.account_key.clone(),
+                                    "subscription_sync",
+                                    "poll_wanted",
+                                    "subscription_state",
+                                    None,
+                                    None,
+                                    "success",
+                                    format!(
+                                        "后台轮询想看完成：新增待处理 {}，跳过旧想看 {}，更新已有 {}",
+                                        outcome.created_unprocessed,
+                                        outcome.created_skipped,
+                                        outcome.updated_existing
+                                    ),
+                                    None,
+                                    json!({
+                                        "trigger": "watcher",
+                                        "total_wish_items": outcome.total_wish_items,
+                                        "created_unprocessed": outcome.created_unprocessed,
+                                        "created_skipped": outcome.created_skipped,
+                                        "updated_existing": outcome.updated_existing,
+                                        "bootstrap_mode": outcome.bootstrap_mode,
+                                    }),
                                 ),
-                                None,
-                                json!({
-                                    "trigger": "watcher",
-                                    "total_wish_items": outcome.total_wish_items,
-                                    "created_unprocessed": outcome.created_unprocessed,
-                                    "created_skipped": outcome.created_skipped,
-                                    "updated_existing": outcome.updated_existing,
-                                    "bootstrap_mode": outcome.bootstrap_mode,
-                                }),
-                            ),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("wanted subscription poll failed: {}", e.message());
-                        write_operation_log(
-                            &state,
-                            operation_log_entry(
-                                "system",
-                                "subscription_sync",
-                                "poll_wanted",
-                                "subscription_state",
-                                None,
-                                None,
-                                "failed",
-                                "后台轮询想看失败",
-                                Some(e.message().to_string()),
-                                json!({ "trigger": "watcher" }),
-                            ),
-                        )
-                        .await;
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("wanted subscription poll failed: {}", e.message());
+                            write_operation_log(
+                                &state,
+                                operation_log_entry(
+                                    "system",
+                                    "subscription_sync",
+                                    "poll_wanted",
+                                    "subscription_state",
+                                    None,
+                                    None,
+                                    "failed",
+                                    "后台轮询想看失败",
+                                    Some(e.message().to_string()),
+                                    json!({ "trigger": "watcher" }),
+                                ),
+                            )
+                            .await;
+                        }
                     }
                 }
+                Some(WantedWatchTickAction::ProcessPipeline) => {
+                    if let Err(err) = run_wanted_pipeline_tick(&state).await {
+                        tracing::warn!(
+                            "wanted subscription pipeline tick failed: {}",
+                            err.message()
+                        );
+                    }
+                }
+                None => {}
             }
-            tokio::time::sleep(Duration::from_secs(interval)).await;
+            tokio::time::sleep(Duration::from_secs(WANTED_PIPELINE_TICK_SECS)).await;
         }
     });
 }
@@ -5087,11 +5698,8 @@ async fn mteam_search(
     let out_result: Result<Value, ApiError> = match q.source {
         MteamSource::Imdb => {
             if let Some(s) = imdb_raw {
-                let body = json!({
-                    "pageNumber": q.page,
-                    "pageSize": q.page_size,
-                    "imdb": normalize_imdb_url(s),
-                });
+                let imdb = normalize_imdb_url(s);
+                let body = mteam_search_body(q.page, q.page_size, "imdb", &imdb);
                 mteam_search_post(&client, &key, &body).await
             } else {
                 Err(ApiError::bad_request(
@@ -5101,11 +5709,8 @@ async fn mteam_search(
         }
         MteamSource::Douban => {
             if let Some(s) = douban_raw {
-                let body = json!({
-                    "pageNumber": q.page,
-                    "pageSize": q.page_size,
-                    "douban": normalize_douban_url(s),
-                });
+                let douban = normalize_douban_url(s);
+                let body = mteam_search_body(q.page, q.page_size, "douban", &douban);
                 mteam_search_post(&client, &key, &body).await
             } else {
                 Err(ApiError::bad_request(
@@ -5115,11 +5720,7 @@ async fn mteam_search(
         }
         MteamSource::Keyword => {
             if let Some(k) = keyword_raw {
-                let body = json!({
-                    "pageNumber": q.page,
-                    "pageSize": q.page_size,
-                    "keyword": k,
-                });
+                let body = mteam_search_body(q.page, q.page_size, "keyword", k);
                 mteam_search_post(&client, &key, &body).await
             } else {
                 Err(ApiError::bad_request("使用关键字路径时请提供 keyword"))
@@ -5250,6 +5851,7 @@ mod subscription_category_tests {
         SubscriptionCategory {
             name: name.to_string(),
             wanted_tag: wanted_tag.to_string(),
+            qb_server_id: String::new(),
             qb_category: format!("qb-{name}"),
             qb_save_dir_name: format!("save-{name}"),
             download_dir: format!("/downloads/{name}"),
@@ -5257,12 +5859,77 @@ mod subscription_category_tests {
         }
     }
 
+    fn qb_server(id: &str, name: &str, base_url: &str) -> QbServerEntry {
+        QbServerEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            base_url: base_url.to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        }
+    }
+
+    #[test]
+    fn qb_servers_get_stable_unique_ids() {
+        let servers = match normalize_qb_servers(vec![
+            qb_server("", "NAS", "http://127.0.0.1:8080"),
+            qb_server("", "NAS", "http://127.0.0.1:8081"),
+            qb_server("custom-id", "下载机", "http://127.0.0.1:8082"),
+        ]) {
+            Ok(servers) => servers,
+            Err(err) => panic!("qB servers should normalize: {}", err.message()),
+        };
+
+        assert_eq!(servers[0].id, "nas");
+        assert_eq!(servers[1].id, "nas-2");
+        assert_eq!(servers[2].id, "custom-id");
+    }
+
+    #[test]
+    fn subscription_categories_bind_to_qb_server_ids() {
+        let servers = vec![qb_server("nas", "NAS", "http://127.0.0.1:8080")];
+        let mut movie = category("电影", "电影");
+        let normalized = match normalize_subscription_categories(vec![movie.clone()], &servers) {
+            Ok(categories) => categories,
+            Err(err) => panic!("category should bind to first qB server: {}", err.message()),
+        };
+        assert_eq!(normalized[0].qb_server_id, "nas");
+
+        movie.qb_server_id = "missing".to_string();
+        assert!(matches!(
+            normalize_subscription_categories(vec![movie], &servers),
+            Err(ApiError::BadRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn category_qb_server_id_selects_push_target() {
+        let servers = vec![
+            qb_server("nas", "NAS", "http://127.0.0.1:8080"),
+            qb_server("ssd", "SSD", "http://127.0.0.1:8081"),
+        ];
+        let mut movie = category("电影", "电影");
+        movie.qb_server_id = "ssd".to_string();
+
+        let selected = match select_qb_server_for_category(&servers, &movie) {
+            Ok(server) => server,
+            Err(err) => panic!(
+                "category should select configured qB server: {}",
+                err.message()
+            ),
+        };
+        assert_eq!(selected.id, "ssd");
+        assert_eq!(selected.name, "SSD");
+    }
+
     #[test]
     fn subscription_categories_reject_duplicate_wanted_tags() {
-        let res = normalize_subscription_categories(vec![
-            category("电影", "影视"),
-            category("剧集", "影视"),
-        ]);
+        let servers = vec![qb_server("nas", "NAS", "http://127.0.0.1:8080")];
+        let res = normalize_subscription_categories(
+            vec![category("电影", "影视"), category("剧集", "影视")],
+            &servers,
+        );
         assert!(matches!(res, Err(ApiError::BadRequest { .. })));
     }
 
@@ -5464,9 +6131,46 @@ mod subscription_category_tests {
     }
 
     #[test]
+    fn torrent_match_log_entries_include_every_candidate_result() {
+        let candidates = vec![
+            torrent("1", "测试电影 2160p WEB-DL"),
+            torrent("2", "测试电影 1080p HDTV"),
+        ];
+        let rules = vec![torrent_rule(
+            "wanted 4k",
+            100,
+            config::TorrentRuleMatchMode::All,
+            &["2160p"],
+            &[],
+            &["web-dl"],
+        )];
+        let matches = match_torrent_candidates(&candidates, &rules);
+
+        let value = torrent_match_log_entries(&matches);
+        let rows = value.as_array().expect("match log entries should be array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get("torrent_id").and_then(Value::as_str), Some("1"));
+        assert_eq!(rows[0].get("selected").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            rows[0].get("matched_rule_name").and_then(Value::as_str),
+            Some("wanted 4k")
+        );
+        assert!(rows[0]
+            .get("rule_evaluations")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty()));
+        assert_eq!(rows[1].get("torrent_id").and_then(Value::as_str), Some("2"));
+        assert_eq!(
+            rows[1].get("excluded_reason").and_then(Value::as_str),
+            Some("未命中任何规则")
+        );
+    }
+
+    #[test]
     fn failed_push_record_keeps_qb_and_candidate_context() {
         let candidate = torrent("12345", "测试电影 2160p");
         let qb = QbServerEntry {
+            id: "nas".to_string(),
             name: "nas".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
             username: "admin".to_string(),
@@ -5494,8 +6198,35 @@ mod subscription_category_tests {
     }
 
     #[test]
+    fn push_record_keeps_mteam_page_and_download_url() {
+        let candidate = torrent("12345", "测试电影 2160p");
+        let qb = qb_server("nas", "nas", "http://127.0.0.1:8080");
+        let category = category("电影", "电影");
+        let push = torrent_push_record_with_download_url(
+            "subject-1",
+            &qb,
+            &category,
+            &candidate,
+            "pushed",
+            Some(100),
+            None,
+            Some("https://api.m-team.cc/download/token"),
+        );
+
+        assert_eq!(
+            push.mteam_torrent_url.as_deref(),
+            Some("https://kp.m-team.cc/detail/12345")
+        );
+        assert_eq!(
+            push.torrent_download_url.as_deref(),
+            Some("https://api.m-team.cc/download/token")
+        );
+    }
+
+    #[test]
     fn qb_torrent_lookup_matches_stored_hash_first() {
         let qb = QbServerEntry {
+            id: "nas".to_string(),
             name: "nas".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
             username: "admin".to_string(),
@@ -5524,8 +6255,257 @@ mod subscription_category_tests {
     }
 
     #[test]
+    fn qb_hash_lookup_candidates_prefer_requested_then_stored_hash() {
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let mut push = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category("电影", "电影"),
+            &torrent("12345", "测试电影 2160p"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        push.qb_hash = Some("stored-hash".to_string());
+
+        assert_eq!(
+            qb_hash_lookup_candidates(&push, Some("requested-hash")),
+            vec!["requested-hash".to_string(), "stored-hash".to_string()]
+        );
+    }
+
+    #[test]
+    fn successful_progress_update_clears_previous_push_error() {
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let mut push = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category("电影", "电影"),
+            &torrent("12345", "测试电影 2160p"),
+            "failed",
+            Some(100),
+            Some("previous lookup failed".to_string()),
+        );
+
+        mark_push_progress_success(&mut push, false);
+
+        assert_eq!(push.status, "downloading");
+        assert_eq!(push.error, None);
+    }
+
+    #[test]
+    fn retry_action_follows_current_processing_stage() {
+        let mut record = wanted_record("subject-1", "测试电影", Some(2024));
+
+        record.status = subscription::WantedSubscriptionStatus::Skipped;
+        record.processing_stage = Some("skipped".to_string());
+        assert_eq!(
+            retry_action_for_wanted_record(&record).ok(),
+            Some(SubscriptionRetryAction::Push)
+        );
+        assert_eq!(
+            pipeline_action_for_wanted_record(&record),
+            Some(SubscriptionRetryAction::Push)
+        );
+
+        record.status = subscription::WantedSubscriptionStatus::Pushed;
+        record.processing_stage = Some("no_match".to_string());
+        assert_eq!(
+            retry_action_for_wanted_record(&record).ok(),
+            Some(SubscriptionRetryAction::Push)
+        );
+
+        record.processing_stage = Some("pushed".to_string());
+        assert_eq!(
+            pipeline_action_for_wanted_record(&record),
+            Some(SubscriptionRetryAction::Progress)
+        );
+
+        record.status = subscription::WantedSubscriptionStatus::Pushed;
+        record.processing_stage = Some("downloading".to_string());
+        assert_eq!(
+            retry_action_for_wanted_record(&record).ok(),
+            Some(SubscriptionRetryAction::Progress)
+        );
+
+        record.status = subscription::WantedSubscriptionStatus::Completed;
+        record.processing_stage = Some("link_failed".to_string());
+        assert_eq!(
+            retry_action_for_wanted_record(&record).ok(),
+            Some(SubscriptionRetryAction::Completion)
+        );
+        assert_eq!(
+            pipeline_action_for_wanted_record(&record),
+            Some(SubscriptionRetryAction::Completion)
+        );
+    }
+
+    #[test]
+    fn pipeline_stops_after_push_before_progress_lookup() {
+        assert!(pipeline_should_stop_after_action(
+            SubscriptionRetryAction::Push
+        ));
+        assert!(pipeline_should_stop_after_action(
+            SubscriptionRetryAction::Progress
+        ));
+        assert!(pipeline_should_stop_after_action(
+            SubscriptionRetryAction::Completion
+        ));
+    }
+
+    #[test]
+    fn rerun_preserves_existing_qb_lookup_for_same_torrent() {
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let category = category("电影", "电影");
+        let mut existing = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category,
+            &torrent(
+                "1081744",
+                "Love Undercover 2002 2160p WEB-DL H265 AAC2.0-CSWEB",
+            ),
+            "downloaded",
+            Some(100),
+            None,
+        );
+        existing.qb_hash = Some("fd7094".to_string());
+        existing.qb_name = Some("[国语].新扎师妹.Love.Undercover.2002.2160p".to_string());
+        let mut next = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category,
+            &torrent(
+                "1081744",
+                "Love Undercover 2002 2160p WEB-DL H265 AAC2.0-CSWEB",
+            ),
+            "pushed",
+            Some(200),
+            None,
+        );
+
+        inherit_existing_qb_lookup(&mut next, Some(&existing));
+
+        assert_eq!(next.qb_hash.as_deref(), Some("fd7094"));
+        assert_eq!(
+            next.qb_name.as_deref(),
+            Some("[国语].新扎师妹.Love.Undercover.2002.2160p")
+        );
+    }
+
+    #[test]
+    fn watcher_tick_runs_pipeline_between_douban_polls() {
+        assert_eq!(WANTED_PIPELINE_TICK_SECS, 5);
+        assert_eq!(
+            wanted_watch_tick_action(true, true, 1_000, None, 3_600),
+            Some(WantedWatchTickAction::PollWanted)
+        );
+        assert_eq!(
+            wanted_watch_tick_action(true, true, 1_060, Some(1_000), 3_600),
+            Some(WantedWatchTickAction::ProcessPipeline)
+        );
+        assert_eq!(
+            wanted_watch_tick_action(true, true, 4_600, Some(1_000), 3_600),
+            Some(WantedWatchTickAction::PollWanted)
+        );
+        assert_eq!(
+            wanted_watch_tick_action(false, true, 4_600, Some(1_000), 3_600),
+            Some(WantedWatchTickAction::ProcessPipeline)
+        );
+        assert_eq!(
+            wanted_watch_tick_action(false, false, 4_600, Some(1_000), 3_600),
+            None
+        );
+    }
+
+    #[test]
+    fn automatic_pipeline_does_not_rerun_historical_skipped_records() {
+        let mut record = wanted_record("subject-1", "测试电影", Some(2024));
+
+        record.status = subscription::WantedSubscriptionStatus::Skipped;
+        record.processing_stage = Some("skipped".to_string());
+        assert_eq!(
+            retry_action_for_wanted_record(&record).ok(),
+            Some(SubscriptionRetryAction::Push)
+        );
+        assert!(!wanted_record_needs_automatic_pipeline(&record));
+
+        record.status = subscription::WantedSubscriptionStatus::Downloading;
+        record.processing_stage = Some("downloading".to_string());
+        assert!(wanted_record_needs_automatic_pipeline(&record));
+
+        record.status = subscription::WantedSubscriptionStatus::Completed;
+        record.processing_stage = Some("download_complete".to_string());
+        assert!(wanted_record_needs_automatic_pipeline(&record));
+    }
+
+    #[test]
+    fn torrent_candidates_are_sorted_by_seeders_descending() {
+        let mut candidates = vec![
+            torrent("1", "低做种 2160p"),
+            torrent("2", "未知做种 2160p"),
+            torrent("3", "高做种 2160p"),
+        ];
+        candidates[0].seeders = Some(8);
+        candidates[1].seeders = None;
+        candidates[2].seeders = Some(21);
+
+        sort_torrent_candidates_by_seeders(&mut candidates);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.torrent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3", "1", "2"]
+        );
+    }
+
+    #[test]
+    fn mteam_search_body_requests_seeders_descending() {
+        let body = mteam_search_body(2, 50, "keyword", "测试电影");
+
+        assert_eq!(body.get("pageNumber").and_then(Value::as_u64), Some(2));
+        assert_eq!(body.get("pageSize").and_then(Value::as_u64), Some(50));
+        assert_eq!(
+            body.get("keyword").and_then(Value::as_str),
+            Some("测试电影")
+        );
+        assert_eq!(
+            body.get("sortField").and_then(Value::as_str),
+            Some("SEEDERS")
+        );
+        assert_eq!(
+            body.get("sortDirection").and_then(Value::as_str),
+            Some("DESC")
+        );
+    }
+
+    #[test]
     fn qb_torrent_lookup_matches_mteam_tag_when_name_differs() {
         let qb = QbServerEntry {
+            id: "nas".to_string(),
             name: "nas".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
             username: "admin".to_string(),
@@ -5553,6 +6533,7 @@ mod subscription_category_tests {
     #[test]
     fn qb_lookup_error_mentions_server_counts_and_identifiers() {
         let qb = QbServerEntry {
+            id: "nas".to_string(),
             name: "nas".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
             username: "admin".to_string(),
@@ -5664,6 +6645,7 @@ mod subscription_category_tests {
             cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
             cfg.subscription_categories = vec![category("电影", "电影")];
             cfg.qb_servers = vec![QbServerEntry {
+                id: "nas".to_string(),
                 name: "nas".to_string(),
                 base_url: "http://127.0.0.1:8080".to_string(),
                 username: "admin".to_string(),
@@ -5742,6 +6724,7 @@ mod subscription_category_tests {
         seed_wanted_record(&state, account_key, subject_id).await;
 
         let qb = QbServerEntry {
+            id: "nas".to_string(),
             name: "nas".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
             username: "admin".to_string(),
@@ -5819,6 +6802,7 @@ mod subscription_category_tests {
         seed_wanted_record(&state, account_key, subject_id).await;
 
         let qb = QbServerEntry {
+            id: "nas".to_string(),
             name: "nas".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
             username: "admin".to_string(),
@@ -5907,6 +6891,9 @@ mod subscription_category_tests {
             release_year,
             category_text: Some("电影".to_string()),
             tags: vec!["电影".to_string()],
+            douban_date: None,
+            douban_sort_time: None,
+            douban_return_order: None,
             status: subscription::WantedSubscriptionStatus::Pushed,
             retry_count: 0,
             max_retries: 3,
@@ -5986,6 +6973,7 @@ mod subscription_category_tests {
         let push = torrent_push_record(
             "subject-1",
             &QbServerEntry {
+                id: "qb".to_string(),
                 name: "qb".to_string(),
                 base_url: "http://127.0.0.1:8080".to_string(),
                 username: "u".to_string(),
@@ -6011,7 +6999,7 @@ mod subscription_category_tests {
         ) else {
             panic!("valid completed torrent should produce a hardlink plan");
         };
-        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files.len(), 2);
         assert_eq!(plan.target_dir, target.join("测试电影.2024"));
         assert_eq!(
             plan.files[0].source_path,
@@ -6020,6 +7008,72 @@ mod subscription_category_tests {
         assert_eq!(
             plan.files[0].target_path,
             target.join("测试电影.2024/TorrentRoot/movie.mkv")
+        );
+        assert_eq!(
+            plan.files[1].target_path,
+            target.join("测试电影.2024/TorrentRoot/Sample/sample.mkv")
+        );
+    }
+
+    #[test]
+    fn hardlink_plan_preserves_all_safe_qb_files() {
+        let root = temp_test_dir("plan_all_files");
+        let source = root.join("downloads");
+        let target = root.join("links");
+        std::fs::create_dir_all(source.join("TorrentRoot/Screenshots")).unwrap();
+        std::fs::write(source.join("TorrentRoot/movie.mkv"), b"movie").unwrap();
+        std::fs::write(source.join("TorrentRoot/readme.txt"), b"readme").unwrap();
+        std::fs::write(source.join("TorrentRoot/Screenshots/shot01.png"), b"shot").unwrap();
+
+        let mut category = category("电影", "电影");
+        category.download_dir = source.display().to_string();
+        category.link_target_dir = target.display().to_string();
+        let push = torrent_push_record(
+            "subject-1",
+            &qb_server("nas", "NAS", "http://127.0.0.1:8080"),
+            &category,
+            &torrent("123", "Movie 2160p"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        let plan = match build_hardlink_plan(
+            &wanted_record("subject-1", "测试电影", Some(2024)),
+            &category,
+            &push,
+            &qb_torrent("Movie 2160p"),
+            &[
+                qb_file("TorrentRoot/movie.mkv", 5),
+                qb_file("TorrentRoot/readme.txt", 2),
+                qb_file("TorrentRoot/Screenshots/shot01.png", 1),
+                qb_file("../escape.txt", 1),
+            ],
+            200,
+        ) {
+            Ok(plan) => plan,
+            Err(err) => panic!(
+                "valid completed torrent should produce a hardlink plan: {}",
+                err.message()
+            ),
+        };
+
+        let targets = plan
+            .files
+            .iter()
+            .map(|file| {
+                file.target_path
+                    .strip_prefix(&plan.target_dir)
+                    .unwrap()
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![
+                PathBuf::from("TorrentRoot/movie.mkv"),
+                PathBuf::from("TorrentRoot/readme.txt"),
+                PathBuf::from("TorrentRoot/Screenshots/shot01.png"),
+            ]
         );
     }
 
@@ -6081,10 +7135,11 @@ mod subscription_category_tests {
     }
 
     #[test]
-    fn hardlink_execution_records_target_conflict() {
+    fn hardlink_execution_renames_target_conflicts() {
         let root = temp_test_dir("target_conflict");
         let source = root.join("source/movie.mkv");
         let target = root.join("target/movie.mkv");
+        let renamed = root.join("target/movie.1.mkv");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&source, b"source").unwrap();
@@ -6095,8 +7150,8 @@ mod subscription_category_tests {
             qb_hash: "hash".to_string(),
             qb_name: "movie".to_string(),
             files: vec![HardlinkFilePlan {
-                source_path: source,
-                target_path: target,
+                source_path: source.clone(),
+                target_path: target.clone(),
                 size: 6,
                 season_number: None,
                 episode_number: None,
@@ -6105,11 +7160,14 @@ mod subscription_category_tests {
             }],
         };
         let result = execute_hardlink_plan(&plan, 300);
-        assert_eq!(result.status, "failed");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.linked_files[0].status, "linked");
         assert_eq!(
-            result.linked_files[0].error.as_deref(),
-            Some("目标文件已存在且不是同一硬链接")
+            result.linked_files[0].target_path,
+            renamed.display().to_string()
         );
+        assert!(same_file(&source, &renamed).unwrap());
+        assert!(!same_file(&source, &target).unwrap());
     }
 
     #[test]
@@ -6327,6 +7385,7 @@ mod subscription_category_tests {
         let mut push = torrent_push_record(
             "subject-tv",
             &QbServerEntry {
+                id: "nas".to_string(),
                 name: "nas".to_string(),
                 base_url: "http://127.0.0.1:8080".to_string(),
                 username: "u".to_string(),
@@ -6380,6 +7439,66 @@ mod subscription_category_tests {
         assert_eq!(push.episodes[0].status, "downloaded");
         assert_eq!(push.episodes[1].label, "S01E02");
         assert_eq!(push.episodes[1].status, "pending");
+    }
+
+    #[test]
+    fn qb_progress_without_files_preserves_existing_file_and_episode_records() {
+        let mut category = category("剧集", "剧集");
+        category.qb_category = "tv".to_string();
+        let mut push = torrent_push_record(
+            "subject-tv",
+            &QbServerEntry {
+                id: "nas".to_string(),
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "u".to_string(),
+                password: "p".to_string(),
+                insecure_tls: false,
+            },
+            &category,
+            &torrent("456", "Show.S01"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        push.files = vec![subscription::TorrentFileProgressRecord {
+            name: "Show.S01E01.mkv".to_string(),
+            size: 10,
+            progress: 0.5,
+            priority: 1,
+            season_number: Some(1),
+            episode_number: Some(1),
+            episode_end_number: None,
+            episode_label: Some("S01E01".to_string()),
+        }];
+        push.episodes = episode_records_from_file_progress(&push.files);
+        push.total_file_count = Some(1);
+        push.completed_file_count = Some(0);
+        let torrent = qbittorrent::QbTorrentInfo {
+            hash: "hash-tv".to_string(),
+            name: "Show.S01".to_string(),
+            category: "tv".to_string(),
+            tags: String::new(),
+            save_path: "/downloads/tv".to_string(),
+            content_path: "tv/Show.S01".to_string(),
+            progress: 0.7,
+            size: 20,
+            downloaded: 14,
+            completion_on: -1,
+            state: "downloading".to_string(),
+        };
+
+        apply_qb_progress_to_push(&mut push, &torrent, &[]);
+
+        assert_eq!(push.download_progress, Some(0.7));
+        assert_eq!(push.download_state.as_deref(), Some("downloading"));
+        assert_eq!(push.total_size, Some(20));
+        assert_eq!(push.completed_file_count, Some(0));
+        assert_eq!(push.total_file_count, Some(1));
+        assert_eq!(push.files.len(), 1);
+        assert_eq!(push.episodes.len(), 1);
+        assert_eq!(push.episodes[0].label, "S01E01");
+        assert_eq!(push.episodes[0].status, "downloading");
     }
 }
 

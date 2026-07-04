@@ -101,11 +101,17 @@ pub struct TorrentPushRecord {
     #[serde(default)]
     pub qb_server: String,
     #[serde(default)]
+    pub qb_server_id: String,
+    #[serde(default)]
     pub qb_category: String,
     #[serde(default)]
     pub qb_save_dir_name: String,
     #[serde(default)]
     pub qb_identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torrent_download_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mteam_torrent_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pushed_at: Option<u64>,
     #[serde(default)]
@@ -231,6 +237,12 @@ pub struct WantedSubscriptionRecord {
     pub category_text: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub douban_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub douban_sort_time: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub douban_return_order: Option<u32>,
     #[serde(default)]
     pub status: WantedSubscriptionStatus,
     #[serde(default)]
@@ -848,6 +860,9 @@ fn parse_record_row(row: &Row<'_>) -> std::io::Result<WantedSubscriptionRecord> 
             release_year: None,
             category_text: category_text.clone(),
             tags: Vec::new(),
+            douban_date: None,
+            douban_sort_time: None,
+            douban_return_order: None,
             status: status_from_label(&status),
             retry_count: 0,
             max_retries: 0,
@@ -1220,18 +1235,18 @@ fn apply_wish_items_to_state(
     let mut created_skipped = 0usize;
     let mut updated_existing = 0usize;
 
-    for item in items {
+    for (idx, item) in items.iter().enumerate() {
         let subject_id = item.subject_id.trim();
         if subject_id.is_empty() {
             continue;
         }
         if let Some(existing) = state.records.get_mut(subject_id) {
-            refresh_record_from_item(existing, item, now);
+            refresh_record_from_item(existing, item, idx, now);
             updated_existing += 1;
             continue;
         }
 
-        let mut record = record_from_item(item, max_retries, now);
+        let mut record = record_from_item(item, idx, max_retries, now);
         if bootstrap_mode && bootstrap_existing_as_skipped {
             record.status = WantedSubscriptionStatus::Skipped;
             record.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
@@ -1263,16 +1278,21 @@ fn apply_wish_items_to_state(
 
 fn record_from_item(
     item: &DoubanLibraryItem,
+    return_order: usize,
     max_retries: u32,
     now: u64,
 ) -> WantedSubscriptionRecord {
     let tags = normalized_tags(&item.tags);
+    let douban_date = normalized_douban_date(&item.date);
     WantedSubscriptionRecord {
         subject_id: item.subject_id.trim().to_string(),
         title: item.title.trim().to_string(),
         release_year: release_year_from_item(item),
         category_text: tags.first().cloned(),
         tags,
+        douban_sort_time: douban_date.as_deref().and_then(douban_date_sort_key),
+        douban_date,
+        douban_return_order: Some(return_order.min(u32::MAX as usize) as u32),
         status: WantedSubscriptionStatus::Unprocessed,
         retry_count: 0,
         max_retries,
@@ -1295,9 +1315,11 @@ fn record_from_item(
 fn refresh_record_from_item(
     record: &mut WantedSubscriptionRecord,
     item: &DoubanLibraryItem,
+    return_order: usize,
     now: u64,
 ) {
     let tags = normalized_tags(&item.tags);
+    let douban_date = normalized_douban_date(&item.date);
     record.title = item.title.trim().to_string();
     record.release_year = release_year_from_item(item).or(record.release_year);
     record.category_text = tags
@@ -1305,8 +1327,35 @@ fn refresh_record_from_item(
         .cloned()
         .or_else(|| record.category_text.clone());
     record.tags = tags;
+    record.douban_sort_time = douban_date
+        .as_deref()
+        .and_then(douban_date_sort_key)
+        .or(record.douban_sort_time);
+    record.douban_date = douban_date.or_else(|| record.douban_date.clone());
+    record.douban_return_order = Some(return_order.min(u32::MAX as usize) as u32);
     record.last_seen_at = now;
     record.updated_at = now;
+}
+
+fn normalized_douban_date(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn douban_date_sort_key(raw: &str) -> Option<u64> {
+    let digits = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.len() < 4 {
+        return None;
+    }
+    let trimmed = if digits.len() > 14 {
+        &digits[..14]
+    } else {
+        digits.as_str()
+    };
+    trimmed.parse::<u64>().ok()
 }
 
 fn apply_status_update(
@@ -1357,6 +1406,7 @@ fn apply_status_update(
                     | WantedSubscriptionStatus::Linked
             ) {
                 record.last_error = None;
+                record.skip_reason = None;
             }
             apply_status_stage(record, now);
             false
@@ -1653,6 +1703,12 @@ mod tests {
         }
     }
 
+    fn item_with_date(id: &str, title: &str, date: &str) -> DoubanLibraryItem {
+        let mut item = item(id, title, "2024 / 中国大陆 / 剧情", &["电影"]);
+        item.date = date.to_string();
+        item
+    }
+
     #[test]
     fn bootstrap_existing_wish_items_are_skipped() {
         let mut state = WantedSubscriptionState::new("acct", 100);
@@ -1684,7 +1740,7 @@ mod tests {
 
     #[test]
     fn skipped_stage_hydration_does_not_leak_raw_skip_reason() {
-        let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 3, 100);
+        let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
         rec.status = WantedSubscriptionStatus::Skipped;
         rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
         rec.processing_stage = Some("skipped".to_string());
@@ -1698,6 +1754,27 @@ mod tests {
         assert_eq!(rec.stage_message.as_deref(), Some("历史想看，首次同步跳过"));
         assert_eq!(rec.stage_updated_at, Some(150));
         assert_eq!(rec.next_action.as_deref(), None);
+    }
+
+    #[test]
+    fn active_status_update_clears_historical_skip_reason() {
+        let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
+        rec.status = WantedSubscriptionStatus::Skipped;
+        rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
+        apply_status_update(
+            &mut rec,
+            WantedStatusUpdate {
+                status: WantedSubscriptionStatus::Matching,
+                error: None,
+                skip_reason: None,
+            },
+            3,
+            160,
+        );
+
+        assert_eq!(rec.status, WantedSubscriptionStatus::Matching);
+        assert_eq!(rec.skip_reason, None);
+        assert_eq!(rec.processing_stage.as_deref(), Some("searching"));
     }
 
     #[test]
@@ -1760,8 +1837,46 @@ mod tests {
     }
 
     #[test]
+    fn wish_items_store_douban_server_date_and_return_order() {
+        let mut state = WantedSubscriptionState::new("acct", 100);
+        state.bootstrap_completed = true;
+        let cfg = SubscriptionWatcherConfig::default();
+        apply_wish_items_to_state(
+            &mut state,
+            &[
+                item_with_date("1", "服务器第一项", "2026-06-25"),
+                item_with_date("2", "服务器第二项", "2026-06-24"),
+            ],
+            cfg.bootstrap_existing_as_skipped,
+            cfg.max_retries,
+            "/tmp/state.json".to_string(),
+            200,
+        );
+
+        let first = state.records.get("1").unwrap();
+        let second = state.records.get("2").unwrap();
+        assert_eq!(first.douban_date.as_deref(), Some("2026-06-25"));
+        assert_eq!(first.douban_sort_time, Some(20260625));
+        assert_eq!(first.douban_return_order, Some(0));
+        assert_eq!(second.douban_return_order, Some(1));
+
+        apply_wish_items_to_state(
+            &mut state,
+            &[item_with_date("1", "服务器第一项更新", "2026-06-26")],
+            cfg.bootstrap_existing_as_skipped,
+            cfg.max_retries,
+            "/tmp/state.json".to_string(),
+            260,
+        );
+        let refreshed = state.records.get("1").unwrap();
+        assert_eq!(refreshed.douban_date.as_deref(), Some("2026-06-26"));
+        assert_eq!(refreshed.douban_sort_time, Some(20260626));
+        assert_eq!(refreshed.douban_return_order, Some(0));
+    }
+
+    #[test]
     fn failure_policy_caps_retries() {
-        let mut rec = record_from_item(&item("1", "失败片", "2026 / 中国大陆", &[]), 2, 100);
+        let mut rec = record_from_item(&item("1", "失败片", "2026 / 中国大陆", &[]), 0, 2, 100);
         let first_exhausted = apply_status_update(
             &mut rec,
             WantedStatusUpdate {
@@ -1797,6 +1912,7 @@ mod tests {
     fn candidate_and_push_updates_record_actionable_stages() {
         let mut rec = record_from_item(
             &item("1", "电影一", "2024 / 中国大陆 / 剧情", &["电影"]),
+            0,
             3,
             100,
         );
@@ -1832,9 +1948,12 @@ mod tests {
             torrent_id: String::new(),
             torrent_title: String::new(),
             qb_server: "nas".to_string(),
+            qb_server_id: "nas".to_string(),
             qb_category: "movie".to_string(),
             qb_save_dir_name: "movies".to_string(),
             qb_identifier: String::new(),
+            torrent_download_url: None,
+            mteam_torrent_url: None,
             pushed_at: None,
             status: "failed".to_string(),
             error: rec.last_error.clone(),
