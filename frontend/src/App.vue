@@ -9,7 +9,7 @@
         <button
           type="button"
           class="nav-item btn btn-ghost justify-start"
-          :class="{ 'btn-active is-active': page === 'main' }"
+          :class="{ 'btn-active is-active': navPage === 'main' }"
           @click="go('main')"
         >
           主功能
@@ -17,7 +17,7 @@
         <button
           type="button"
           class="nav-item btn btn-ghost justify-start"
-          :class="{ 'btn-active is-active': page === 'subscriptions' }"
+          :class="{ 'btn-active is-active': navPage === 'subscriptions' }"
           @click="go('subscriptions')"
         >
           订阅
@@ -25,7 +25,7 @@
         <button
           type="button"
           class="nav-item btn btn-ghost justify-start"
-          :class="{ 'btn-active is-active': page === 'logs' }"
+          :class="{ 'btn-active is-active': navPage === 'logs' }"
           @click="go('logs')"
         >
           日志
@@ -33,7 +33,7 @@
         <button
           type="button"
           class="nav-item btn btn-ghost justify-start"
-          :class="{ 'btn-active is-active': page === 'settings' }"
+          :class="{ 'btn-active is-active': navPage === 'settings' }"
           @click="go('settings')"
         >
           设置
@@ -827,461 +827,486 @@
           </div>
         </form>
       </section>
+
+      <section
+        v-show="page === 'detail'"
+        id="page-detail"
+        class="app-page detail-page"
+        :class="{ 'is-active': page === 'detail' }"
+      >
+        <header class="top detail-page-top">
+          <div>
+            <h1>{{ detailPageTitle }}</h1>
+            <p class="sub">{{ detailPageSubtitle }}</p>
+          </div>
+          <div class="actions">
+            <button type="button" class="btn btn-secondary" @click="closeDetail">返回</button>
+          </div>
+        </header>
+
+        <div class="detail-body">
+          <div v-if="detailLoading" class="detail-loading" role="status">
+            <div class="spinner" aria-hidden="true"></div>
+            <p>加载详情…</p>
+          </div>
+          <p v-else-if="detailError" class="empty-hint">加载失败：{{ detailError }}</p>
+
+          <article v-else-if="detailKind === 'media' && detailData" class="d-head">
+            <img v-if="detailPoster" :src="detailPoster" alt="" />
+            <h3>{{ detailTitle }}</h3>
+            <div class="detail-type-line">
+              <span class="tag">{{
+                detailMediaType === "douban" ? "豆瓣" : detailMediaType === "tv" ? "剧集" : "电影"
+              }}</span>
+              <span v-if="detailDate" class="tag">{{ detailDate }}</span>
+            </div>
+            <div v-if="externalLinks.length" class="detail-external-ids">
+              <a
+                v-for="link in externalLinks"
+                :key="link.href"
+                class="detail-ext-link tag"
+                :href="link.href"
+                target="_blank"
+                rel="noopener noreferrer"
+                >{{ link.label }}</a
+              >
+            </div>
+            <section v-if="detailDoubanId" class="douban-mark-panel">
+              <div class="douban-mark-head">
+                <h4>豆瓣标记</h4>
+                <span class="douban-mark-status subtle" aria-live="polite">{{
+                  doubanInterestStatus
+                }}</span>
+              </div>
+              <div class="douban-mark-controls">
+                <div
+                  class="douban-mark-mode tabs tabs-boxed"
+                  role="group"
+                  aria-label="豆瓣标记状态"
+                >
+                  <button
+                    type="button"
+                    class="mteam-tab tab"
+                    :class="{ 'is-active tab-active': doubanMark.interest === 'wish' }"
+                    @click="setDoubanInterest('wish')"
+                  >
+                    想看
+                  </button>
+                  <button
+                    type="button"
+                    class="mteam-tab tab"
+                    :class="{ 'is-active tab-active': doubanMark.interest === 'collect' }"
+                    @click="setDoubanInterest('collect')"
+                  >
+                    看过
+                  </button>
+                </div>
+                <label v-if="doubanMark.interest === 'collect'" class="douban-rating-select">
+                  <span>评分</span>
+                  <select
+                    v-model="doubanMark.rating"
+                    class="select select-bordered select-sm"
+                    :title="selectedDoubanRatingLabel"
+                  >
+                    <option value="">未评分</option>
+                    <option value="5">5 星</option>
+                    <option value="4">4 星</option>
+                    <option value="3">3 星</option>
+                    <option value="2">2 星</option>
+                    <option value="1">1 星</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="doubanSaveDisabled"
+                  @click="saveDoubanInterest"
+                >
+                  保存
+                </button>
+              </div>
+              <label class="douban-tag-input">
+                <span>{{ doubanMark.interest === "wish" ? "订阅分类" : "标签" }}</span>
+                <select
+                  v-if="doubanMark.interest === 'wish'"
+                  v-model="doubanMark.category"
+                  class="select select-bordered select-sm"
+                  :title="selectedDoubanCategoryLabel"
+                >
+                  <option value="">
+                    {{ subscriptionCategoriesCache.length ? "选择订阅分类" : "未配置订阅分类" }}
+                  </option>
+                  <option
+                    v-for="category in subscriptionCategoriesCache"
+                    :key="category.wanted_tag"
+                    :value="category.wanted_tag"
+                  >
+                    {{ category.name || category.wanted_tag }} · {{ category.wanted_tag }}
+                  </option>
+                </select>
+                <input
+                  v-else
+                  v-model="doubanMark.tags"
+                  type="text"
+                  class="input input-bordered input-sm"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="可选，例如：想补、冷门、家人一起看"
+                />
+              </label>
+              <div v-if="doubanTagHistory.length" class="douban-tag-history" aria-live="polite">
+                <button
+                  v-for="tag in doubanTagHistory.slice(0, 24)"
+                  :key="tag"
+                  type="button"
+                  class="douban-tag-chip"
+                  @click="applyDoubanTagSuggestion(tag)"
+                >
+                  {{ tag }}
+                </button>
+              </div>
+            </section>
+
+            <p v-if="detailData.tagline" class="tagline-block">{{ detailData.tagline }}</p>
+            <dl v-if="detailMetaRows.length" class="detail-meta">
+              <div v-for="row in detailMetaRows" :key="row.label" class="detail-meta-row">
+                <dt>{{ row.label }}</dt>
+                <dd>
+                  <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                    row.value
+                  }}</a>
+                  <span v-else>{{ row.value }}</span>
+                </dd>
+              </div>
+            </dl>
+
+            <div v-if="detailMediaType === 'tv'" class="tv-seasons-mount">
+              <h4 class="tv-episodes-heading">分集</h4>
+              <p v-if="!detailSeasons.length" class="subtle">暂无分季信息</p>
+              <div v-else class="tv-seasons-list" role="list">
+                <details
+                  v-for="season in detailSeasons"
+                  :key="season.season_number"
+                  class="tv-season-block"
+                  @toggle="loadSeasonEpisodes($event, season.season_number)"
+                >
+                  <summary class="tv-season-summary">
+                    <span class="tv-season-label"
+                      >第 {{ season.season_number }} 季{{
+                        season.name ? ` · ${season.name}` : ""
+                      }}</span
+                    >
+                    <span v-if="season.episode_count != null" class="tv-season-meta subtle"
+                      >{{ season.episode_count }} 集</span
+                    >
+                  </summary>
+                  <div class="tv-season-body">
+                    <div
+                      v-if="seasonLoading[season.season_number]"
+                      class="inline-loading tv-season-loading"
+                      role="status"
+                    >
+                      <div class="spinner spinner-sm"></div>
+                      <span>加载中…</span>
+                    </div>
+                    <p v-else-if="seasonErrors[season.season_number]" class="empty-hint">
+                      加载失败：{{ seasonErrors[season.season_number] }}
+                    </p>
+                    <p
+                      v-else-if="!seasonEpisodes[season.season_number]"
+                      class="subtle tv-season-placeholder"
+                    >
+                      展开以加载本季分集…
+                    </p>
+                    <template v-else>
+                      <p v-if="!seasonEpisodes[season.season_number].length" class="subtle">
+                        本季暂无分集数据
+                      </p>
+                      <div
+                        v-for="ep in seasonEpisodes[season.season_number]"
+                        :key="ep.episode_number"
+                        class="tv-episode-row"
+                      >
+                        <div class="tv-ep-thumb">
+                          <img
+                            v-if="episodeStill(ep)"
+                            class="tv-ep-still"
+                            :src="episodeStill(ep)"
+                            alt=""
+                            loading="lazy"
+                          />
+                          <div
+                            v-else
+                            class="tv-ep-still tv-ep-still-placeholder"
+                            aria-hidden="true"
+                          ></div>
+                        </div>
+                        <div class="tv-ep-main">
+                          <div class="tv-ep-title-line">
+                            <span class="tv-ep-num">E{{ ep.episode_number ?? "—" }}</span>
+                            <span class="tv-ep-title">{{
+                              ep.name || `第 ${ep.episode_number} 集`
+                            }}</span>
+                            <span v-if="ep.air_date" class="tv-ep-air">{{ ep.air_date }}</span>
+                          </div>
+                          <p v-if="ep.overview" class="tv-ep-overview">{{ ep.overview }}</p>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            <p class="overview">{{ detailOverview }}</p>
+            <div class="row-actions mteam-actions">
+              <template v-if="mteamSources.length">
+                <span class="mteam-actions-label subtle">M-Team</span>
+                <div
+                  class="mteam-tablist tabs tabs-boxed"
+                  role="tablist"
+                  aria-label="M-Team 检索路径"
+                >
+                  <button
+                    v-for="source in mteamSources"
+                    :key="source.source"
+                    type="button"
+                    class="mteam-tab tab"
+                    :class="{ 'is-active tab-active': activeTorrentSource === source.source }"
+                    role="tab"
+                    @click="selectTorrentSource(source.source)"
+                  >
+                    {{ source.label }}
+                  </button>
+                </div>
+              </template>
+              <span v-else class="subtle">缺少 IMDb / 豆瓣 ID，且无原标题，无法在 M-Team 检索</span>
+            </div>
+            <div class="torrent-list">
+              <div v-if="torrentsLoading" class="inline-loading" role="status">
+                <div class="spinner spinner-sm"></div>
+                <span>正在加载 M-Team…</span>
+              </div>
+              <p v-else-if="torrentError" class="empty-hint">加载失败：{{ torrentError }}</p>
+              <template v-else-if="torrentRows.length">
+                <h4 class="torrent-list-title">M-Team 种子</h4>
+                <div class="torrent-cards">
+                  <article
+                    v-for="torrent in torrentRows"
+                    :key="torrent.id || torrent.name"
+                    class="torrent-card"
+                  >
+                    <div class="torrent-card-inner">
+                      <a
+                        class="torrent-card-link"
+                        :href="mteamTorrentWebUrl(torrent.id)"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <div class="torrent-name">
+                          {{ torrent.name || torrent.title || torrent.id || "(无标题)" }}
+                        </div>
+                        <div class="torrent-stats">{{ torrentStats(torrent) }}</div>
+                        <div class="torrent-desc">
+                          {{ torrent.smallDescr || torrent.small_descr || "" }}
+                        </div>
+                      </a>
+                      <div class="torrent-card-actions">
+                        <button
+                          v-if="torrent.id"
+                          type="button"
+                          class="btn btn-sm btn-primary torrent-push-trigger"
+                          @click.prevent.stop="openQbPushDialog(torrent)"
+                        >
+                          推送 qB
+                        </button>
+                        <span v-else class="subtle torrent-push-hint" title="无种子 ID，无法推送"
+                          >—</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </template>
+              <p v-else-if="activeTorrentSource" class="empty-hint">
+                未返回种子列表（请检查 M-Team 返回结构或账号权限）。
+              </p>
+            </div>
+          </article>
+
+          <article
+            v-else-if="detailKind === 'subscription' && selectedSubscription"
+            class="subscription-detail"
+            :data-subscription-detail-id="selectedSubscription.subject_id"
+          >
+            <div class="subscription-detail-head">
+              <h3>{{ selectedSubscription.title || selectedSubscription.subject_id }}</h3>
+              <span
+                class="subscription-status badge"
+                :class="`subscription-status-${subscriptionDisplayStatus(selectedSubscription).key}`"
+                >{{ subscriptionDisplayStatus(selectedSubscription).text }}</span
+              >
+            </div>
+            <dl class="detail-meta">
+              <div
+                v-for="row in subscriptionDetailRows(selectedSubscription)"
+                :key="row.label"
+                class="detail-meta-row"
+              >
+                <dt>{{ row.label }}</dt>
+                <dd>
+                  <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                    row.value
+                  }}</a>
+                  <span v-else>{{ row.value }}</span>
+                </dd>
+              </div>
+            </dl>
+            <div class="row-actions">
+              <button
+                type="button"
+                class="btn btn-secondary"
+                :disabled="subscriptionActionLoading || !canRetrySubscription(selectedSubscription)"
+                @click="retrySubscriptionCurrent(selectedSubscription.subject_id)"
+              >
+                重试当前节点
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :disabled="subscriptionActionLoading || !canRerunSubscription(selectedSubscription)"
+                @click="rerunSubscription(selectedSubscription.subject_id)"
+              >
+                重跑任务
+              </button>
+              <button
+                v-if="selectedSubscription.last_push"
+                type="button"
+                class="btn btn-secondary"
+                :disabled="subscriptionActionLoading"
+                @click="refreshSubscriptionProgress(selectedSubscription.subject_id)"
+              >
+                刷新下载进度
+              </button>
+              <button
+                v-if="selectedSubscription.last_push"
+                type="button"
+                class="btn btn-primary"
+                :disabled="subscriptionActionLoading"
+                @click="checkSubscriptionCompletion(selectedSubscription.subject_id)"
+              >
+                检查完成并硬链接
+              </button>
+            </div>
+            <p v-if="selectedSubscription.last_error" class="subscription-detail-error">
+              {{ selectedSubscription.last_error }}
+            </p>
+            <section class="subscription-detail-section">
+              <h4>下载</h4>
+              <div
+                v-if="subscriptionProgress(selectedSubscription) != null"
+                class="subscription-detail-download-progress"
+              >
+                <div
+                  class="subscription-progress"
+                  :aria-label="`下载进度 ${formatPercent(subscriptionProgress(selectedSubscription))}`"
+                >
+                  <span
+                    :style="{
+                      width: `${Math.round(subscriptionProgress(selectedSubscription) * 100)}%`,
+                    }"
+                  ></span>
+                </div>
+                <span>{{ formatPercent(subscriptionProgress(selectedSubscription)) }}</span>
+              </div>
+              <dl v-if="selectedSubscription.last_push" class="detail-meta">
+                <div
+                  v-for="row in pushRows(selectedSubscription.last_push)"
+                  :key="row.label"
+                  class="detail-meta-row"
+                >
+                  <dt>{{ row.label }}</dt>
+                  <dd>
+                    <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                      row.value
+                    }}</a>
+                    <span v-else>{{ row.value }}</span>
+                  </dd>
+                </div>
+              </dl>
+              <p v-else class="empty-hint">尚未推送，暂无下载进度</p>
+            </section>
+            <section v-if="subscriptionEpisodes.length" class="subscription-detail-section">
+              <h4>分集</h4>
+              <div class="subscription-episode-list">
+                <div
+                  v-for="ep in subscriptionEpisodes"
+                  :key="ep.label || ep.episode_number"
+                  class="subscription-episode-row"
+                >
+                  <span class="subscription-episode-title">{{ ep.label || "未识别分集" }}</span>
+                  <span class="subscription-episode-state">{{ pushStatusLabel(ep.status) }}</span>
+                  <div v-if="ep.progress != null" class="subscription-progress">
+                    <span :style="{ width: `${Math.round(Number(ep.progress) * 100)}%` }"></span>
+                  </div>
+                  <span class="subscription-episode-files"
+                    >{{ ep.completed_file_count || ep.linked_file_count || 0 }}/{{
+                      ep.file_count || 0
+                    }}</span
+                  >
+                </div>
+              </div>
+            </section>
+            <section
+              v-if="selectedSubscription.last_completion"
+              class="subscription-detail-section"
+            >
+              <h4>硬链接</h4>
+              <dl class="detail-meta">
+                <div
+                  v-for="row in completionRows(selectedSubscription.last_completion)"
+                  :key="row.label"
+                  class="detail-meta-row"
+                >
+                  <dt>{{ row.label }}</dt>
+                  <dd>
+                    <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                      row.value
+                    }}</a>
+                    <span v-else>{{ row.value }}</span>
+                  </dd>
+                </div>
+              </dl>
+            </section>
+            <section v-if="subscriptionFiles.length" class="subscription-detail-section">
+              <h4>文件</h4>
+              <div class="subscription-file-list">
+                <div
+                  v-for="file in subscriptionFiles"
+                  :key="file.name || file.target_path || file.source_path"
+                  class="subscription-file-row"
+                >
+                  <div class="subscription-file-main">
+                    <span class="subscription-file-name">{{
+                      file.name || file.target_path || file.source_path
+                    }}</span>
+                    <span
+                      v-if="file.error || file.source_path || file.size"
+                      class="subscription-file-note"
+                      >{{ file.error || file.source_path || formatBytes(file.size) }}</span
+                    >
+                  </div>
+                  <span class="subscription-file-status">{{
+                    file.status || (file.progress != null ? formatPercent(file.progress) : "")
+                  }}</span>
+                </div>
+              </div>
+            </section>
+          </article>
+        </div>
+      </section>
     </div>
   </div>
-
-  <aside id="detail" class="detail-drawer" :class="{ 'is-off': !detailOpen }">
-    <button type="button" class="close" aria-label="关闭" @click="closeDetail">×</button>
-    <div id="detail-body">
-      <div v-if="detailLoading" class="detail-loading" role="status">
-        <div class="spinner" aria-hidden="true"></div>
-        <p>加载详情…</p>
-      </div>
-      <p v-else-if="detailError" class="empty-hint">加载失败：{{ detailError }}</p>
-
-      <article v-else-if="detailKind === 'media' && detailData" class="d-head">
-        <img v-if="detailPoster" :src="detailPoster" alt="" />
-        <h3>{{ detailTitle }}</h3>
-        <div class="detail-type-line">
-          <span class="tag">{{
-            detailMediaType === "douban" ? "豆瓣" : detailMediaType === "tv" ? "剧集" : "电影"
-          }}</span>
-          <span v-if="detailDate" class="tag">{{ detailDate }}</span>
-        </div>
-        <div v-if="externalLinks.length" class="detail-external-ids">
-          <a
-            v-for="link in externalLinks"
-            :key="link.href"
-            class="detail-ext-link tag"
-            :href="link.href"
-            target="_blank"
-            rel="noopener noreferrer"
-            >{{ link.label }}</a
-          >
-        </div>
-        <section v-if="detailDoubanId" class="douban-mark-panel">
-          <div class="douban-mark-head">
-            <h4>豆瓣标记</h4>
-            <span class="douban-mark-status subtle" aria-live="polite">{{
-              doubanInterestStatus
-            }}</span>
-          </div>
-          <div class="douban-mark-controls">
-            <div class="douban-mark-mode tabs tabs-boxed" role="group" aria-label="豆瓣标记状态">
-              <button
-                type="button"
-                class="mteam-tab tab"
-                :class="{ 'is-active tab-active': doubanMark.interest === 'wish' }"
-                @click="setDoubanInterest('wish')"
-              >
-                想看
-              </button>
-              <button
-                type="button"
-                class="mteam-tab tab"
-                :class="{ 'is-active tab-active': doubanMark.interest === 'collect' }"
-                @click="setDoubanInterest('collect')"
-              >
-                看过
-              </button>
-            </div>
-            <label v-if="doubanMark.interest === 'collect'" class="douban-rating-select">
-              <span>评分</span>
-              <select
-                v-model="doubanMark.rating"
-                class="select select-bordered select-sm"
-                :title="selectedDoubanRatingLabel"
-              >
-                <option value="">未评分</option>
-                <option value="5">5 星</option>
-                <option value="4">4 星</option>
-                <option value="3">3 星</option>
-                <option value="2">2 星</option>
-                <option value="1">1 星</option>
-              </select>
-            </label>
-            <button
-              type="button"
-              class="btn btn-sm btn-primary"
-              :disabled="doubanSaveDisabled"
-              @click="saveDoubanInterest"
-            >
-              保存
-            </button>
-          </div>
-          <label class="douban-tag-input">
-            <span>{{ doubanMark.interest === "wish" ? "订阅分类" : "标签" }}</span>
-            <select
-              v-if="doubanMark.interest === 'wish'"
-              v-model="doubanMark.category"
-              class="select select-bordered select-sm"
-              :title="selectedDoubanCategoryLabel"
-            >
-              <option value="">
-                {{ subscriptionCategoriesCache.length ? "选择订阅分类" : "未配置订阅分类" }}
-              </option>
-              <option
-                v-for="category in subscriptionCategoriesCache"
-                :key="category.wanted_tag"
-                :value="category.wanted_tag"
-              >
-                {{ category.name || category.wanted_tag }} · {{ category.wanted_tag }}
-              </option>
-            </select>
-            <input
-              v-else
-              v-model="doubanMark.tags"
-              type="text"
-              class="input input-bordered input-sm"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="可选，例如：想补、冷门、家人一起看"
-            />
-          </label>
-          <div v-if="doubanTagHistory.length" class="douban-tag-history" aria-live="polite">
-            <button
-              v-for="tag in doubanTagHistory.slice(0, 24)"
-              :key="tag"
-              type="button"
-              class="douban-tag-chip"
-              @click="applyDoubanTagSuggestion(tag)"
-            >
-              {{ tag }}
-            </button>
-          </div>
-        </section>
-
-        <p v-if="detailData.tagline" class="tagline-block">{{ detailData.tagline }}</p>
-        <dl v-if="detailMetaRows.length" class="detail-meta">
-          <div v-for="row in detailMetaRows" :key="row.label" class="detail-meta-row">
-            <dt>{{ row.label }}</dt>
-            <dd>
-              <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
-                row.value
-              }}</a>
-              <span v-else>{{ row.value }}</span>
-            </dd>
-          </div>
-        </dl>
-
-        <div v-if="detailMediaType === 'tv'" class="tv-seasons-mount">
-          <h4 class="tv-episodes-heading">分集</h4>
-          <p v-if="!detailSeasons.length" class="subtle">暂无分季信息</p>
-          <div v-else class="tv-seasons-list" role="list">
-            <details
-              v-for="season in detailSeasons"
-              :key="season.season_number"
-              class="tv-season-block"
-              @toggle="loadSeasonEpisodes($event, season.season_number)"
-            >
-              <summary class="tv-season-summary">
-                <span class="tv-season-label"
-                  >第 {{ season.season_number }} 季{{
-                    season.name ? ` · ${season.name}` : ""
-                  }}</span
-                >
-                <span v-if="season.episode_count != null" class="tv-season-meta subtle"
-                  >{{ season.episode_count }} 集</span
-                >
-              </summary>
-              <div class="tv-season-body">
-                <div
-                  v-if="seasonLoading[season.season_number]"
-                  class="inline-loading tv-season-loading"
-                  role="status"
-                >
-                  <div class="spinner spinner-sm"></div>
-                  <span>加载中…</span>
-                </div>
-                <p v-else-if="seasonErrors[season.season_number]" class="empty-hint">
-                  加载失败：{{ seasonErrors[season.season_number] }}
-                </p>
-                <p
-                  v-else-if="!seasonEpisodes[season.season_number]"
-                  class="subtle tv-season-placeholder"
-                >
-                  展开以加载本季分集…
-                </p>
-                <template v-else>
-                  <p v-if="!seasonEpisodes[season.season_number].length" class="subtle">
-                    本季暂无分集数据
-                  </p>
-                  <div
-                    v-for="ep in seasonEpisodes[season.season_number]"
-                    :key="ep.episode_number"
-                    class="tv-episode-row"
-                  >
-                    <div class="tv-ep-thumb">
-                      <img
-                        v-if="episodeStill(ep)"
-                        class="tv-ep-still"
-                        :src="episodeStill(ep)"
-                        alt=""
-                        loading="lazy"
-                      />
-                      <div
-                        v-else
-                        class="tv-ep-still tv-ep-still-placeholder"
-                        aria-hidden="true"
-                      ></div>
-                    </div>
-                    <div class="tv-ep-main">
-                      <div class="tv-ep-title-line">
-                        <span class="tv-ep-num">E{{ ep.episode_number ?? "—" }}</span>
-                        <span class="tv-ep-title">{{
-                          ep.name || `第 ${ep.episode_number} 集`
-                        }}</span>
-                        <span v-if="ep.air_date" class="tv-ep-air">{{ ep.air_date }}</span>
-                      </div>
-                      <p v-if="ep.overview" class="tv-ep-overview">{{ ep.overview }}</p>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </details>
-          </div>
-        </div>
-
-        <p class="overview">{{ detailOverview }}</p>
-        <div class="row-actions mteam-actions">
-          <template v-if="mteamSources.length">
-            <span class="mteam-actions-label subtle">M-Team</span>
-            <div class="mteam-tablist tabs tabs-boxed" role="tablist" aria-label="M-Team 检索路径">
-              <button
-                v-for="source in mteamSources"
-                :key="source.source"
-                type="button"
-                class="mteam-tab tab"
-                :class="{ 'is-active tab-active': activeTorrentSource === source.source }"
-                role="tab"
-                @click="selectTorrentSource(source.source)"
-              >
-                {{ source.label }}
-              </button>
-            </div>
-          </template>
-          <span v-else class="subtle">缺少 IMDb / 豆瓣 ID，且无原标题，无法在 M-Team 检索</span>
-        </div>
-        <div class="torrent-list">
-          <div v-if="torrentsLoading" class="inline-loading" role="status">
-            <div class="spinner spinner-sm"></div>
-            <span>正在加载 M-Team…</span>
-          </div>
-          <p v-else-if="torrentError" class="empty-hint">加载失败：{{ torrentError }}</p>
-          <template v-else-if="torrentRows.length">
-            <h4 class="torrent-list-title">M-Team 种子</h4>
-            <div class="torrent-cards">
-              <article
-                v-for="torrent in torrentRows"
-                :key="torrent.id || torrent.name"
-                class="torrent-card"
-              >
-                <div class="torrent-card-inner">
-                  <a
-                    class="torrent-card-link"
-                    :href="mteamTorrentWebUrl(torrent.id)"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <div class="torrent-name">
-                      {{ torrent.name || torrent.title || torrent.id || "(无标题)" }}
-                    </div>
-                    <div class="torrent-stats">{{ torrentStats(torrent) }}</div>
-                    <div class="torrent-desc">
-                      {{ torrent.smallDescr || torrent.small_descr || "" }}
-                    </div>
-                  </a>
-                  <div class="torrent-card-actions">
-                    <button
-                      v-if="torrent.id"
-                      type="button"
-                      class="btn btn-sm btn-primary torrent-push-trigger"
-                      @click.prevent.stop="openQbPushDialog(torrent)"
-                    >
-                      推送 qB
-                    </button>
-                    <span v-else class="subtle torrent-push-hint" title="无种子 ID，无法推送"
-                      >—</span
-                    >
-                  </div>
-                </div>
-              </article>
-            </div>
-          </template>
-          <p v-else-if="activeTorrentSource" class="empty-hint">
-            未返回种子列表（请检查 M-Team 返回结构或账号权限）。
-          </p>
-        </div>
-      </article>
-
-      <article
-        v-else-if="detailKind === 'subscription' && selectedSubscription"
-        class="subscription-detail"
-        :data-subscription-detail-id="selectedSubscription.subject_id"
-      >
-        <div class="subscription-detail-head">
-          <h3>{{ selectedSubscription.title || selectedSubscription.subject_id }}</h3>
-          <span
-            class="subscription-status badge"
-            :class="`subscription-status-${subscriptionDisplayStatus(selectedSubscription).key}`"
-            >{{ subscriptionDisplayStatus(selectedSubscription).text }}</span
-          >
-        </div>
-        <dl class="detail-meta">
-          <div
-            v-for="row in subscriptionDetailRows(selectedSubscription)"
-            :key="row.label"
-            class="detail-meta-row"
-          >
-            <dt>{{ row.label }}</dt>
-            <dd>
-              <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
-                row.value
-              }}</a>
-              <span v-else>{{ row.value }}</span>
-            </dd>
-          </div>
-        </dl>
-        <div class="row-actions">
-          <button
-            type="button"
-            class="btn btn-secondary"
-            :disabled="subscriptionActionLoading || !canRetrySubscription(selectedSubscription)"
-            @click="retrySubscriptionCurrent(selectedSubscription.subject_id)"
-          >
-            重试当前节点
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            :disabled="subscriptionActionLoading || !canRerunSubscription(selectedSubscription)"
-            @click="rerunSubscription(selectedSubscription.subject_id)"
-          >
-            重跑任务
-          </button>
-          <button
-            v-if="selectedSubscription.last_push"
-            type="button"
-            class="btn btn-secondary"
-            :disabled="subscriptionActionLoading"
-            @click="refreshSubscriptionProgress(selectedSubscription.subject_id)"
-          >
-            刷新下载进度
-          </button>
-          <button
-            v-if="selectedSubscription.last_push"
-            type="button"
-            class="btn btn-primary"
-            :disabled="subscriptionActionLoading"
-            @click="checkSubscriptionCompletion(selectedSubscription.subject_id)"
-          >
-            检查完成并硬链接
-          </button>
-        </div>
-        <p v-if="selectedSubscription.last_error" class="subscription-detail-error">
-          {{ selectedSubscription.last_error }}
-        </p>
-        <section class="subscription-detail-section">
-          <h4>下载</h4>
-          <div
-            v-if="subscriptionProgress(selectedSubscription) != null"
-            class="subscription-detail-download-progress"
-          >
-            <div
-              class="subscription-progress"
-              :aria-label="`下载进度 ${formatPercent(subscriptionProgress(selectedSubscription))}`"
-            >
-              <span
-                :style="{
-                  width: `${Math.round(subscriptionProgress(selectedSubscription) * 100)}%`,
-                }"
-              ></span>
-            </div>
-            <span>{{ formatPercent(subscriptionProgress(selectedSubscription)) }}</span>
-          </div>
-          <dl v-if="selectedSubscription.last_push" class="detail-meta">
-            <div
-              v-for="row in pushRows(selectedSubscription.last_push)"
-              :key="row.label"
-              class="detail-meta-row"
-            >
-              <dt>{{ row.label }}</dt>
-              <dd>
-                <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
-                  row.value
-                }}</a>
-                <span v-else>{{ row.value }}</span>
-              </dd>
-            </div>
-          </dl>
-          <p v-else class="empty-hint">尚未推送，暂无下载进度</p>
-        </section>
-        <section v-if="subscriptionEpisodes.length" class="subscription-detail-section">
-          <h4>分集</h4>
-          <div class="subscription-episode-list">
-            <div
-              v-for="ep in subscriptionEpisodes"
-              :key="ep.label || ep.episode_number"
-              class="subscription-episode-row"
-            >
-              <span class="subscription-episode-title">{{ ep.label || "未识别分集" }}</span>
-              <span class="subscription-episode-state">{{ pushStatusLabel(ep.status) }}</span>
-              <div v-if="ep.progress != null" class="subscription-progress">
-                <span :style="{ width: `${Math.round(Number(ep.progress) * 100)}%` }"></span>
-              </div>
-              <span class="subscription-episode-files"
-                >{{ ep.completed_file_count || ep.linked_file_count || 0 }}/{{
-                  ep.file_count || 0
-                }}</span
-              >
-            </div>
-          </div>
-        </section>
-        <section v-if="selectedSubscription.last_completion" class="subscription-detail-section">
-          <h4>硬链接</h4>
-          <dl class="detail-meta">
-            <div
-              v-for="row in completionRows(selectedSubscription.last_completion)"
-              :key="row.label"
-              class="detail-meta-row"
-            >
-              <dt>{{ row.label }}</dt>
-              <dd>
-                <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
-                  row.value
-                }}</a>
-                <span v-else>{{ row.value }}</span>
-              </dd>
-            </div>
-          </dl>
-        </section>
-        <section v-if="subscriptionFiles.length" class="subscription-detail-section">
-          <h4>文件</h4>
-          <div class="subscription-file-list">
-            <div
-              v-for="file in subscriptionFiles"
-              :key="file.name || file.target_path || file.source_path"
-              class="subscription-file-row"
-            >
-              <div class="subscription-file-main">
-                <span class="subscription-file-name">{{
-                  file.name || file.target_path || file.source_path
-                }}</span>
-                <span
-                  v-if="file.error || file.source_path || file.size"
-                  class="subscription-file-note"
-                  >{{ file.error || file.source_path || formatBytes(file.size) }}</span
-                >
-              </div>
-              <span class="subscription-file-status">{{
-                file.status || (file.progress != null ? formatPercent(file.progress) : "")
-              }}</span>
-            </div>
-          </div>
-        </section>
-      </article>
-    </div>
-  </aside>
 
   <dialog class="modal" :open="qbDialogOpen">
     <form class="modal-box" @submit.prevent="submitQbPush">
@@ -1518,51 +1543,64 @@ const route = useRoute();
 const router = useRouter();
 const routeToPage = {
   main: "main",
+  "media-detail": "detail",
   subscriptions: "subscriptions",
+  "subscription-detail": "detail",
   logs: "logs",
   settings: "settings",
 };
 
-const DETAIL_QUERY_KEYS = ["detail", "id", "doubanTags"];
+const DETAIL_MEDIA_TYPES = ["movie", "tv", "douban"];
 
 function firstQueryValue(value) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function normalizeDetailRouteQuery(query) {
-  const detail = String(firstQueryValue(query?.detail) || "").trim();
-  const id = String(firstQueryValue(query?.id) || "").trim();
-  if (!detail || !id) return null;
-  if (["movie", "tv", "douban"].includes(detail)) {
-    return { kind: "media", mediaType: detail, id };
+function normalizeDetailRoute(routeLike) {
+  const name = String(routeLike?.name || "");
+  const params = routeLike?.params || {};
+  if (name === "media-detail") {
+    const mediaType = String(firstQueryValue(params.mediaType) || "").trim();
+    const id = String(firstQueryValue(params.id) || "").trim();
+    if (DETAIL_MEDIA_TYPES.includes(mediaType) && id) {
+      return { kind: "media", mediaType, id };
+    }
+    return null;
   }
-  if (detail === "subscription") return { kind: "subscription", id };
+  if (name === "subscription-detail") {
+    const id = String(firstQueryValue(params.id) || "").trim();
+    return id ? { kind: "subscription", id } : null;
+  }
   return null;
 }
 
-function detailRouteQueryFromMediaCard(item, fallbackType) {
+function detailRouteLocationFromMediaCard(item, fallbackType) {
   const type = item?.source === "douban" ? "douban" : item?.media_type || fallbackType;
+  const mediaType = DETAIL_MEDIA_TYPES.includes(type) ? type : fallbackType;
   const rawId = type === "douban" ? (item?.id ?? item?.subject_id) : item?.id;
   const id = String(rawId || "").trim();
   if (!id) return null;
-  const query = { detail: type, id };
+  const query = {};
   const tags = Array.isArray(item?.tags) ? item.tags.join(" ") : item?.tags || "";
-  if (type === "douban" && String(tags).trim()) query.doubanTags = String(tags).trim();
-  return query;
+  if (mediaType === "douban" && String(tags).trim()) query.doubanTags = String(tags).trim();
+  return { name: "media-detail", params: { mediaType, id }, query };
 }
 
-function detailRouteQueryFromSubscriptionRecord(record) {
+function detailRouteLocationFromSubscriptionRecord(record) {
   const id = String(record?.subject_id || "").trim();
-  return id ? { detail: "subscription", id } : null;
+  return id ? { name: "subscription-detail", params: { id }, query: {} } : null;
 }
 
-function withoutDetailRouteQuery(query) {
-  const next = { ...query };
-  for (const key of DETAIL_QUERY_KEYS) delete next[key];
-  return next;
+function detailBackRouteLocation(parsed) {
+  return parsed?.kind === "subscription" ? { name: "subscriptions" } : { name: "main" };
 }
 
 const page = computed(() => routeToPage[route.name] || "main");
+const navPage = computed(() => {
+  if (route.name === "media-detail") return "main";
+  if (route.name === "subscription-detail") return "subscriptions";
+  return page.value;
+});
 const error = ref("");
 const toast = reactive({ message: "", kind: "ok", timer: 0 });
 const themeMode = ref(readStoredThemeMode());
@@ -1646,11 +1684,13 @@ const operationLogStatuses = OPERATION_LOG_STATUSES;
 const doubanMark = reactive({ interest: "", rating: "", tags: "", category: "", status: "" });
 
 watch(
-  () => page.value,
-  (next) => {
+  () => [page.value, route.name],
+  ([next]) => {
     clearError();
     if (next === "settings") loadSettings();
-    if (next === "subscriptions") {
+    const inSubscriptionArea =
+      route.name === "subscriptions" || route.name === "subscription-detail";
+    if (inSubscriptionArea) {
       loadSubscriptions({ silent: true });
       startSubscriptionAutoSync();
     } else {
@@ -1664,7 +1704,7 @@ watch(
 );
 
 watch(
-  () => [page.value, route.query.detail, route.query.id, route.query.doubanTags],
+  () => [route.name, route.params.mediaType, route.params.id, route.query.doubanTags],
   () => {
     syncDetailFromRoute().catch((err) => {
       detailOpen.value = true;
@@ -1880,13 +1920,13 @@ async function loadDoubanLibrary(forceRefresh = false) {
 }
 
 function openCardDetail(item, fallbackType) {
-  const detailQuery = detailRouteQueryFromMediaCard(item, fallbackType);
-  if (!detailQuery) return;
-  pushDetailRoute({ name: route.name || "main", query: { ...route.query, ...detailQuery } });
+  const detailLocation = detailRouteLocationFromMediaCard(item, fallbackType);
+  if (!detailLocation) return;
+  pushDetailRoute(detailLocation);
 }
 
 function pushDetailRoute(target) {
-  const alreadyInDetail = !!normalizeDetailRouteQuery(route.query);
+  const alreadyInDetail = !!normalizeDetailRoute(route);
   if (!alreadyInDetail) detailOpenedFromRoutePush = true;
   const navigation = alreadyInDetail ? router.replace(target) : router.push(target);
   navigation.catch(handleRouteNavigationError);
@@ -1899,7 +1939,7 @@ function handleRouteNavigationError(err) {
 }
 
 async function syncDetailFromRoute() {
-  const parsed = normalizeDetailRouteQuery(route.query);
+  const parsed = normalizeDetailRoute(route);
   if (!parsed) {
     detailOpenedFromRoutePush = false;
     closeDetailState();
@@ -2000,19 +2040,32 @@ function closeDetailState() {
 }
 
 function closeDetail() {
-  if (normalizeDetailRouteQuery(route.query)) {
+  const parsed = normalizeDetailRoute(route);
+  if (parsed) {
     if (detailOpenedFromRoutePush) {
       detailOpenedFromRoutePush = false;
       router.back();
       return;
     }
-    router
-      .replace({ name: route.name || "main", query: withoutDetailRouteQuery(route.query) })
-      .catch(handleRouteNavigationError);
+    router.replace(detailBackRouteLocation(parsed)).catch(handleRouteNavigationError);
     return;
   }
   closeDetailState();
 }
+
+const detailPageTitle = computed(() => {
+  if (detailKind.value === "subscription") {
+    return selectedSubscription.value?.title || "订阅详情";
+  }
+  return detailTitle.value || "影视详情";
+});
+
+const detailPageSubtitle = computed(() => {
+  if (detailKind.value === "subscription") return "订阅状态、下载进度与硬链接结果";
+  if (detailMediaType.value === "douban") return "豆瓣资料、标记与 M-Team 种子";
+  if (detailMediaType.value === "tv") return "剧集资料、分集与 M-Team 种子";
+  return "电影资料、豆瓣标记与 M-Team 种子";
+});
 
 const detailTitle = computed(() => detailData.value?.title || detailData.value?.name || "");
 const detailDate = computed(
@@ -3207,16 +3260,13 @@ function subscriptionCardNotice(key, kind, text) {
 }
 
 function openSubscriptionDetail(record) {
-  const detailQuery = detailRouteQueryFromSubscriptionRecord(record);
-  if (!detailQuery) return;
-  pushDetailRoute({
-    name: "subscriptions",
-    query: { ...withoutDetailRouteQuery(route.query), ...detailQuery },
-  });
+  const detailLocation = detailRouteLocationFromSubscriptionRecord(record);
+  if (!detailLocation) return;
+  pushDetailRoute(detailLocation);
 }
 
 function selectedSubscriptionRouteId() {
-  const parsed = normalizeDetailRouteQuery(route.query);
+  const parsed = normalizeDetailRoute(route);
   return parsed?.kind === "subscription" ? parsed.id : "";
 }
 

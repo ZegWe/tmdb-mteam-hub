@@ -656,69 +656,31 @@ summary:focus-visible {
   flex-shrink: 0;
 }
 
-#detail.detail-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
+.detail-page {
+  min-height: 100vh;
+}
+
+.detail-page-top {
   display: flex;
-  flex-direction: column;
-  width: min(640px, 100vw);
-  height: 100dvh;
-  min-width: 0;
-  max-width: 100vw;
-  background: var(--surface);
-  border-left: 1px solid var(--border);
-  z-index: 40;
-  overflow: hidden;
-  padding: 0;
-  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.35);
-  transition: transform 0.2s ease;
-  will-change: transform;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
-#detail.detail-drawer.is-off {
-  transform: translateX(100%);
-  pointer-events: none;
+.detail-page-top .actions {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
-#detail.detail-drawer .close {
-  position: absolute;
-  top: 0.85rem;
-  right: 0.85rem;
-  z-index: 2;
-  display: grid;
-  place-items: center;
-  width: 2.25rem;
-  height: 2.25rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  color: var(--muted);
-  font-size: 1.5rem;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-  box-shadow: var(--shadow-sm);
-}
-
-#detail.detail-drawer .close:hover {
-  color: var(--text);
-  border-color: var(--accent-dim);
-}
-
-#detail-body {
-  flex: 1 1 auto;
+.detail-body {
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 1.25rem 1.35rem 2rem;
-  scrollbar-gutter: stable;
+  width: min(1180px, 100%);
+  padding: 1.25rem 1.5rem 3rem;
 }
 
-#detail-body > article {
+.detail-body > article {
   min-width: 0;
-  padding-right: 2.4rem;
 }
 
 .d-head,
@@ -2214,24 +2176,17 @@ code {
     grid-template-columns: 1fr;
   }
 
-  #detail.detail-drawer {
-    width: 100vw;
-    border-left: 0;
+  .detail-page-top {
+    flex-direction: column;
   }
 
-  #detail.detail-drawer .close {
-    top: 0.65rem;
-    right: 0.65rem;
-    width: 2.1rem;
-    height: 2.1rem;
+  .detail-page-top .actions,
+  .detail-page-top .btn {
+    width: 100%;
   }
 
-  #detail-body {
+  .detail-body {
     padding: 0.9rem 0.85rem calc(2rem + env(safe-area-inset-bottom, 0px));
-  }
-
-  #detail-body > article {
-    padding-right: 2.25rem;
   }
 
   .d-head img {
