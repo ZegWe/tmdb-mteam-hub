@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(__dirname, "../App.vue"), "utf8");
+const subscriptionDetailSource = readFileSync(
+  resolve(__dirname, "../components/SubscriptionDetailView.vue"),
+  "utf8",
+);
 const stylesSource = readFileSync(resolve(__dirname, "../styles.css"), "utf8");
 const constantsStart = appSource.indexOf("const SUB_STATUS_LABELS");
 const constantsEnd = appSource.indexOf("\nconst OPERATION_LOG_CATEGORIES", constantsStart);
@@ -43,12 +47,12 @@ function cssBlock(selector) {
   return stylesSource.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
 }
 
-function sourceBetween(start, end, description) {
-  const startIndex = appSource.indexOf(start);
+function sourceBetween(start, end, description, source = appSource) {
+  const startIndex = source.indexOf(start);
   assert.notEqual(startIndex, -1, `${description} should have a start marker`);
-  const endIndex = appSource.indexOf(end, startIndex);
+  const endIndex = source.indexOf(end, startIndex);
   assert.notEqual(endIndex, -1, `${description} should have an end marker`);
-  return appSource.slice(startIndex, endIndex);
+  return source.slice(startIndex, endIndex);
 }
 
 const failedRecord = {
@@ -194,6 +198,7 @@ assert.match(
     "<h4>下载</h4>",
     '<section v-if="subscriptionEpisodes.length"',
     "subscription detail download section",
+    subscriptionDetailSource,
   );
   assert.match(
     detailDownloadSource,
