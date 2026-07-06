@@ -38,6 +38,19 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function cssBlock(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return stylesSource.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+}
+
+function sourceBetween(start, end, description) {
+  const startIndex = appSource.indexOf(start);
+  assert.notEqual(startIndex, -1, `${description} should have a start marker`);
+  const endIndex = appSource.indexOf(end, startIndex);
+  assert.notEqual(endIndex, -1, `${description} should have an end marker`);
+  return appSource.slice(startIndex, endIndex);
+}
+
 const failedRecord = {
   status: "failed",
   processing_stage: "error",
@@ -106,6 +119,15 @@ assert.match(
   /\.subscription-list\s*\{[\s\S]*grid-auto-rows:\s*[^;]+;/,
   "subscription cards should render in stable grid rows",
 );
+{
+  const rowHeight = Number(
+    cssBlock(".subscription-list").match(/grid-auto-rows:\s*([\d.]+)px/)?.[1],
+  );
+  assert.ok(
+    rowHeight >= 300,
+    "subscription card rows should be tall enough for two-line titles, notices, and actions",
+  );
+}
 assert.match(
   stylesSource,
   /\.subscription-card\s*\{[\s\S]*height:\s*100%;[\s\S]*overflow:\s*hidden;/,
@@ -113,13 +135,76 @@ assert.match(
 );
 assert.match(
   stylesSource,
-  /\.subscription-card-actions\s*\{[\s\S]*margin-top:\s*auto;/,
-  "subscription card actions should stay anchored when text is clamped",
+  /\.subscription-card\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-rows:/,
+  "subscription cards should use fixed row slots so text is not clipped by auto margins",
+);
+assert.match(
+  cssBlock(".subscription-card-meta"),
+  /flex-wrap:\s*wrap/,
+  "subscription card metadata should wrap onto two lines instead of clipping long text",
+);
+assert.doesNotMatch(
+  cssBlock(".subscription-card-meta"),
+  /flex-wrap:\s*nowrap/,
+  "subscription card metadata should not force all fields onto one clipped line",
+);
+{
+  const metaHeight = Number(
+    cssBlock(".subscription-card-meta").match(/max-height:\s*([\d.]+)rem/)?.[1],
+  );
+  assert.ok(
+    metaHeight >= 2.6,
+    "subscription card metadata should reserve enough height for two rows",
+  );
+}
+assert.match(
+  appSource,
+  /class="subscription-card-notices"/,
+  "subscription card notices should render inside a reserved notice slot",
+);
+assert.match(
+  stylesSource,
+  /\.subscription-card-notices\s*\{[\s\S]*min-height:\s*[^;]+;[\s\S]*overflow:\s*hidden;/,
+  "subscription card notices should reserve enough full-line space before clipping",
+);
+assert.doesNotMatch(
+  cssBlock(".subscription-card-actions"),
+  /margin-top:\s*auto/,
+  "subscription card actions should not push notice text into partial clipping",
 );
 assert.match(
   stylesSource,
   /\.subscription-card-notice\s*\{[\s\S]*-webkit-line-clamp:\s*2;/,
   "subscription card notices should be clamped instead of resizing cards",
+);
+{
+  const cardSource = sourceBetween(
+    'v-for="record in subscriptionRecords"',
+    '<div class="subscription-card-actions"',
+    "subscription card template",
+  );
+  assert.doesNotMatch(
+    cardSource,
+    /subscriptionProgress\(record\)|subscription-card-progress|下载进度/,
+    "subscription cards should not show download progress; progress belongs in detail download section",
+  );
+}
+{
+  const detailDownloadSource = sourceBetween(
+    "<h4>下载</h4>",
+    '<section v-if="subscriptionEpisodes.length"',
+    "subscription detail download section",
+  );
+  assert.match(
+    detailDownloadSource,
+    /subscription-detail-download-progress[\s\S]*subscriptionProgress\(selectedSubscription\)/,
+    "subscription detail download section should show the overall download progress",
+  );
+}
+assert.doesNotMatch(
+  cssBlock(".subscription-progress"),
+  /margin-top:/,
+  "subscription progress bars should not add layout outside the reserved slot",
 );
 assert.doesNotMatch(
   appSource,

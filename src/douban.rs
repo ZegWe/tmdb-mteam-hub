@@ -13,9 +13,11 @@ const DESKTOP_CHROME_UA: &str = concat!(
     "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 );
 const AUTH_COOKIE_NAME: &str = "dbcl2";
-const SEARCH_URL: &str = "https://search.douban.com/movie/subject_search";
 const SUBJECT_URL_PREFIX: &str = "https://movie.douban.com/subject/";
 const SUBJECT_INTEREST_URL_PREFIX: &str = "https://movie.douban.com/j/subject/";
+const REXXAR_SEARCH_URL: &str = "https://m.douban.com/rexxar/api/v2/search/subjects";
+const REXXAR_MOVIE_URL_PREFIX: &str = "https://m.douban.com/rexxar/api/v2/movie/";
+const REXXAR_MOVIE_REFERER_PREFIX: &str = "https://m.douban.com/movie/subject/";
 const MOVIE_BASE_URL: &str = "https://movie.douban.com/";
 const MINE_URL: &str = "https://movie.douban.com/mine";
 const QR_CODE_URL: &str = "https://accounts.douban.com/j/mobile/login/qrlogin_code";
@@ -113,6 +115,14 @@ pub struct DoubanSubjectDetail {
     pub subject_id: String,
     pub url: String,
     pub title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub original_title: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aka: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub countries: Vec<String>,
     pub image: String,
     pub poster_url: String,
     pub directors: Vec<String>,
@@ -420,47 +430,152 @@ pub async fn search(
     if limit < 1 {
         return Err(DoubanError::bad_request("limit 必须大于 0"));
     }
-    let cookie = require_auth_cookie(cookie_header)?;
-    let url = Url::parse_with_params(
-        SEARCH_URL,
-        &[("search_text", query.trim()), ("cat", "1002")],
-    )
-    .map_err(|e| DoubanError::upstream(format!("构造豆瓣搜索 URL 失败: {e}")))?;
-    let html = fetch_html(url.as_str(), &cookie, "https://movie.douban.com/").await?;
-    let data = extract_search_data(&html)?;
-    let items = data
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| DoubanError::upstream("豆瓣搜索结果结构异常: 缺少 items"))?;
+    let cookie = normalize_cookie_header(cookie_header);
+    let count = limit.to_string();
+    let mut url = Url::parse(REXXAR_SEARCH_URL)
+        .map_err(|e| DoubanError::upstream(format!("构造豆瓣 rexxar 搜索 URL 失败: {e}")))?;
+    url.query_pairs_mut()
+        .append_pair("q", query.trim())
+        .append_pair("type", "movie")
+        .append_pair("start", "0")
+        .append_pair("count", &count);
+    let referer = format!(
+        "https://m.douban.com/search/?query={}",
+        percent_encode_query_component(query.trim())
+    );
+    let data = fetch_rexxar_json(url, &cookie, &referer).await?;
+    search_results_from_rexxar_json(&data, limit)
+}
 
+pub async fn subject_detail(
+    cookie_header: &str,
+    subject: &str,
+) -> Result<DoubanSubjectDetail, DoubanError> {
+    let subject_id = subject_id(subject)?;
+    let cookie = normalize_cookie_header(cookie_header);
+    let data = fetch_rexxar_subject(&subject_id, &cookie).await?;
+    let mut detail = subject_detail_from_rexxar_json(&subject_id, &data)?;
+    if has_auth_cookie(&cookie) {
+        if let Ok(html) = fetch_html(&subject_url(&subject_id), &cookie, MOVIE_BASE_URL).await {
+            let (user_interest, user_rating) = subject_user_interest_from_html(&html);
+            if user_interest.is_some() {
+                detail.user_interest = user_interest;
+                detail.user_rating = user_rating.or(detail.user_rating);
+            }
+        }
+    }
+    Ok(detail)
+}
+
+async fn fetch_rexxar_subject(subject_id: &str, cookie_header: &str) -> Result<Value, DoubanError> {
+    let mut url = Url::parse(&format!("{REXXAR_MOVIE_URL_PREFIX}{subject_id}"))
+        .map_err(|e| DoubanError::upstream(format!("构造豆瓣 rexxar 详情 URL 失败: {e}")))?;
+    url.query_pairs_mut()
+        .append_pair("ck", "")
+        .append_pair("for_mobile", "1");
+    let referer = format!("{REXXAR_MOVIE_REFERER_PREFIX}{subject_id}/");
+    fetch_rexxar_json(url, cookie_header, &referer).await
+}
+
+async fn fetch_rexxar_json(
+    url: Url,
+    cookie_header: &str,
+    referer: &str,
+) -> Result<Value, DoubanError> {
+    let client = Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| DoubanError::upstream(format!("创建豆瓣 rexxar 客户端失败: {e}")))?;
+    let mut req = client
+        .get(url)
+        .header("User-Agent", DESKTOP_CHROME_UA)
+        .header("Accept", "application/json")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Origin", "https://m.douban.com")
+        .header("Referer", referer);
+    if !cookie_header.trim().is_empty() {
+        req = req.header("Cookie", cookie_header);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| DoubanError::upstream(format!("豆瓣 rexxar 请求失败: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| DoubanError::upstream(format!("读取豆瓣 rexxar 响应失败: {e}")))?;
+    if !status.is_success() {
+        return Err(DoubanError::upstream(format!(
+            "豆瓣 rexxar 接口 HTTP {status}: {}",
+            rexxar_error_message(&text).unwrap_or_else(|| text.chars().take(120).collect())
+        )));
+    }
+    serde_json::from_str::<Value>(&text).map_err(|e| {
+        DoubanError::upstream(format!(
+            "解析豆瓣 rexxar JSON 失败: {e}: {}",
+            text.chars().take(120).collect::<String>()
+        ))
+    })
+}
+
+fn rexxar_error_message(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value_to_string(value.get("localized_message"))
+        .filter(|s| !s.is_empty())
+        .or_else(|| value_to_string(value.get("msg")))
+}
+
+fn search_results_from_rexxar_json(
+    data: &Value,
+    limit: usize,
+) -> Result<Vec<DoubanSearchResult>, DoubanError> {
+    let items = data
+        .get("subjects")
+        .and_then(|v| v.get("items"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| DoubanError::upstream("豆瓣 rexxar 搜索结果结构异常: 缺少 subjects.items"))?;
     let mut out = Vec::new();
     for item in items {
-        if item.get("tpl_name").and_then(Value::as_str) != Some("search_subject") {
+        if value_to_string(item.get("layout")).as_deref() != Some("subject") {
             continue;
         }
-        let subject_id = value_to_string(item.get("id")).unwrap_or_default();
+        if value_to_string(item.get("target_type")).as_deref() != Some("movie") {
+            continue;
+        }
+        let Some(target) = item.get("target") else {
+            continue;
+        };
+        let subject_id = value_to_string(target.get("id"))
+            .or_else(|| value_to_string(item.get("target_id")))
+            .unwrap_or_default();
         if subject_id.is_empty() {
             continue;
         }
-        let title = strip_html(&value_to_string(item.get("title")).unwrap_or_default());
-        let url = value_to_string(item.get("url"))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| subject_url(&subject_id));
-        let cover_url = best_image_url_from_value(item)
+        let title = value_to_string(target.get("title")).unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let cover_url = best_image_url_from_value(target)
             .as_deref()
             .and_then(proxied_image_url)
             .unwrap_or_default();
-        let rating = rating_from_value(item.get("rating"));
+        let rating = rating_from_value(target.get("rating"));
         let vote_average = rating.value;
         out.push(DoubanSearchResult {
             source: "douban",
             media_type: "douban",
             id: subject_id.clone(),
-            subject_id,
+            subject_id: subject_id.clone(),
             title,
-            url,
-            abstract_text: strip_html(&value_to_string(item.get("abstract")).unwrap_or_default()),
-            abstract_2: strip_html(&value_to_string(item.get("abstract_2")).unwrap_or_default()),
+            url: value_to_string(target.get("url"))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| subject_url(&subject_id)),
+            abstract_text: value_to_string(target.get("card_subtitle"))
+                .or_else(|| value_to_string(target.get("abstract")))
+                .unwrap_or_default(),
+            abstract_2: value_to_string(target.get("year")).unwrap_or_default(),
             poster_url: cover_url.clone(),
             cover_url,
             rating,
@@ -473,87 +588,48 @@ pub async fn search(
     Ok(out)
 }
 
-pub async fn subject_detail(
-    cookie_header: &str,
-    subject: &str,
-) -> Result<DoubanSubjectDetail, DoubanError> {
-    let cookie = require_auth_cookie(cookie_header)?;
-    let subject_id = subject_id(subject)?;
-    let url = subject_url(&subject_id);
-    let html = fetch_html(&url, &cookie, "https://movie.douban.com/").await?;
-    subject_detail_from_html(&subject_id, &url, &html)
-}
-
-fn subject_detail_from_html(
+fn subject_detail_from_rexxar_json(
     subject_id: &str,
-    url: &str,
-    html: &str,
+    data: &Value,
 ) -> Result<DoubanSubjectDetail, DoubanError> {
-    let data = first_ld_json(html).ok();
-    let null = Value::Null;
-    let data_ref = data.as_ref().unwrap_or(&null);
-    let title = value_to_string(data_ref.get("name"))
+    let title = value_to_string(data.get("title"))
         .filter(|s| !s.is_empty())
-        .or_else(|| extract_subject_title(html))
+        .or_else(|| value_to_string(data.get("original_title")).filter(|s| !s.is_empty()))
         .unwrap_or_default();
     if title.is_empty() {
-        return Err(DoubanError::upstream("无法从豆瓣详情页解析标题"));
+        return Err(DoubanError::upstream("无法从豆瓣 rexxar 详情解析标题"));
     }
-    let image = best_subject_image_url(data_ref, html)
+    let image = best_image_url_from_value(data)
         .as_deref()
         .and_then(proxied_image_url)
         .unwrap_or_default();
-    let summary = extract_summary(html)
-        .filter(|s| !s.is_empty())
-        .or_else(|| value_to_string(data_ref.get("description")))
-        .unwrap_or_default();
-    let directors = non_empty_or_else(people_names(data_ref.get("director")), || {
-        tag_texts_by_marker(html, "rel=\"v:directedby\"")
-    });
-    let writers = non_empty_or_else(people_names(data_ref.get("author")), || {
-        info_field_values(html, &["编剧"])
-    });
-    let actors = non_empty_or_else(people_names(data_ref.get("actor")), || {
-        tag_texts_by_marker(html, "rel=\"v:starring\"")
-    });
-    let genres = non_empty_or_else(string_list(data_ref.get("genre")), || {
-        tag_texts_by_marker(html, "property=\"v:genre\"")
-    });
-    let date_published = value_to_string(data_ref.get("datePublished"))
-        .filter(|s| !s.is_empty())
-        .or_else(|| first_tag_attr_by_marker(html, "property=\"v:initialreleasedate\"", "content"))
-        .or_else(|| first_tag_text_by_marker(html, "property=\"v:initialreleasedate\""))
-        .or_else(|| first_info_field_value(html, &["上映日期", "首播"]))
-        .unwrap_or_default();
-    let duration = value_to_string(data_ref.get("duration"))
-        .filter(|s| !s.is_empty())
-        .or_else(|| first_tag_attr_by_marker(html, "property=\"v:runtime\"", "content"))
-        .or_else(|| first_tag_text_by_marker(html, "property=\"v:runtime\""))
-        .or_else(|| first_info_field_value(html, &["片长", "单集片长"]))
-        .unwrap_or_default();
-    let rating = rating_from_value(data_ref.get("aggregateRating"));
-    let rating = if rating.value.is_some() || rating.count.is_some() {
-        rating
-    } else {
-        rating_from_html(html)
-    };
-    let (user_interest, user_rating) = extract_subject_user_interest(html);
+    let rating = rating_from_value(data.get("rating"));
+    let (user_interest, user_rating) = rexxar_user_interest(data.get("interest"));
     Ok(DoubanSubjectDetail {
         source: "douban",
         media_type: "douban",
         id: subject_id.to_string(),
         subject_id: subject_id.to_string(),
-        url: url.to_string(),
+        url: value_to_string(data.get("url"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| subject_url(subject_id)),
         title,
+        original_title: value_to_string(data.get("original_title")).unwrap_or_default(),
+        aka: string_list(data.get("aka")),
+        languages: string_list(data.get("languages")),
+        countries: string_list(data.get("countries")),
         poster_url: image.clone(),
         image,
-        directors,
-        writers,
-        actors,
-        genres,
-        date_published,
-        duration,
-        summary,
+        directors: people_names(data.get("directors")),
+        writers: people_names(data.get("writers")),
+        actors: people_names(data.get("actors")),
+        genres: string_list(data.get("genres")),
+        date_published: value_to_string(data.get("release_date"))
+            .filter(|s| !s.is_empty())
+            .or_else(|| first_string_from_value(data.get("pubdate")))
+            .unwrap_or_default(),
+        duration: first_string_from_value(data.get("durations")).unwrap_or_default(),
+        summary: value_to_string(data.get("intro")).unwrap_or_default(),
         rating,
         user_interest,
         user_rating,
@@ -1124,121 +1200,6 @@ fn extract_user_rating(block: &str) -> Option<u8> {
         .find(|n| block.contains(&format!("rating{n}-t")))
 }
 
-fn extract_subject_user_interest(html: &str) -> (Option<DoubanInterest>, Option<u8>) {
-    let Some(block) = extract_interest_level_block(html) else {
-        return (None, None);
-    };
-    let text = strip_html(block);
-    let interest = if text.contains("我想看") {
-        Some(DoubanInterest::Wish)
-    } else if text.contains("我看过") {
-        Some(DoubanInterest::Collect)
-    } else {
-        None
-    };
-    let rating = match interest {
-        Some(DoubanInterest::Collect) => extract_user_rating(block),
-        _ => None,
-    };
-    (interest, rating)
-}
-
-fn extract_interest_level_block(html: &str) -> Option<&str> {
-    let lower = html.to_lowercase();
-    let idx = lower
-        .find("id=\"interest_sect_level\"")
-        .or_else(|| lower.find("id='interest_sect_level'"))?;
-    let tag_start = html[..idx].rfind('<')?;
-    let tag_end = html[tag_start..].find('>')? + tag_start + 1;
-    if lower[tag_start..tag_end].starts_with("<div") {
-        matching_div_end(html, tag_end).map(|end| &html[tag_start..end])
-    } else {
-        html[tag_end..]
-            .find("</div>")
-            .map(|end_rel| &html[tag_start..tag_end + end_rel + "</div>".len()])
-    }
-}
-
-fn extract_search_data(html: &str) -> Result<Value, DoubanError> {
-    let Some(marker_idx) = html.find("window.__DATA__") else {
-        return Err(DoubanError::upstream("豆瓣搜索页缺少 window.__DATA__"));
-    };
-    let Some(eq_rel) = html[marker_idx..].find('=') else {
-        return Err(DoubanError::upstream("豆瓣搜索页数据结构异常"));
-    };
-    let data_start = marker_idx + eq_rel + 1;
-    let raw = extract_js_object(&html[data_start..])
-        .ok_or_else(|| DoubanError::upstream("无法提取豆瓣搜索 JSON"))?;
-    serde_json::from_str(raw)
-        .map_err(|e| DoubanError::upstream(format!("解析豆瓣搜索 JSON 失败: {e}")))
-}
-
-fn extract_js_object(s: &str) -> Option<&str> {
-    let start = s.find('{')?;
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (idx, ch) in s[start..].char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let end = start + idx + ch.len_utf8();
-                    return Some(&s[start..end]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn first_ld_json(html: &str) -> Result<Value, DoubanError> {
-    let lower = html.to_lowercase();
-    let mut offset = 0usize;
-    while let Some(rel) = lower[offset..].find("application/ld+json") {
-        let mime_idx = offset + rel;
-        let Some(tag_end_rel) = html[mime_idx..].find('>') else {
-            break;
-        };
-        let content_start = mime_idx + tag_end_rel + 1;
-        let Some(content_end_rel) = lower[content_start..].find("</script>") else {
-            break;
-        };
-        let raw = html[content_start..content_start + content_end_rel].trim();
-        if let Ok(v) = serde_json::from_str::<Value>(raw) {
-            if v.is_object() {
-                return Ok(v);
-            }
-        }
-        offset = content_start + content_end_rel + "</script>".len();
-    }
-    Err(DoubanError::upstream(
-        "豆瓣详情页缺少 application/ld+json 数据",
-    ))
-}
-
-fn extract_summary(html: &str) -> Option<String> {
-    let marker = "property=\"v:summary\"";
-    let idx = html.find(marker)?;
-    let start_tag_start = html[..idx].rfind('<')?;
-    let tag_end = html[start_tag_start..].find('>')? + start_tag_start + 1;
-    let end = html[tag_end..].find("</span>")? + tag_end;
-    Some(normalize_ws(&strip_html(&html[tag_end..end])))
-}
-
 fn extract_title(html: &str) -> Option<String> {
     let lower = html.to_lowercase();
     let start = lower.find("<title")?;
@@ -1301,82 +1262,14 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
-fn non_empty_or_else<F>(values: Vec<String>, fallback: F) -> Vec<String>
-where
-    F: FnOnce() -> Vec<String>,
-{
-    if values.is_empty() {
-        fallback()
-    } else {
-        values
+fn first_string_from_value(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|v| value_to_string(Some(v)))
+            .find(|s| !s.is_empty()),
+        v => value_to_string(Some(v)).filter(|s| !s.is_empty()),
     }
-}
-
-fn extract_subject_title(html: &str) -> Option<String> {
-    first_tag_text_by_marker(html, "property=\"v:itemreviewed\"")
-        .or_else(|| first_tag_text_by_marker(html, "<h1"))
-        .or_else(|| {
-            extract_title(html).map(|s| {
-                s.trim_end_matches("(豆瓣)")
-                    .trim_end_matches("豆瓣")
-                    .trim()
-                    .to_string()
-            })
-        })
-        .filter(|s| !s.is_empty())
-}
-
-fn rating_from_html(html: &str) -> DoubanRating {
-    let value = first_tag_text_by_marker(html, "property=\"v:average\"")
-        .or_else(|| first_element_text_by_class(html, "rating_num"))
-        .and_then(|s| s.parse::<f64>().ok());
-    let count = first_tag_text_by_marker(html, "property=\"v:votes\"")
-        .and_then(|s| s.replace(',', "").parse::<u64>().ok());
-    DoubanRating {
-        value,
-        count,
-        info: String::new(),
-        star_count: None,
-    }
-}
-
-fn first_tag_text_by_marker(html: &str, marker: &str) -> Option<String> {
-    tag_texts_by_marker(html, marker).into_iter().next()
-}
-
-fn tag_texts_by_marker(html: &str, marker: &str) -> Vec<String> {
-    let lower = html.to_lowercase();
-    let marker = marker.to_lowercase();
-    let mut offset = 0usize;
-    let mut out = Vec::new();
-    while let Some(rel) = lower[offset..].find(&marker) {
-        let idx = offset + rel;
-        let tag_start = if lower[idx..].starts_with('<') {
-            idx
-        } else if let Some(start) = html[..idx].rfind('<') {
-            start
-        } else {
-            offset = idx + marker.len();
-            continue;
-        };
-        let Some(tag_end_rel) = html[tag_start..].find('>') else {
-            break;
-        };
-        let tag_end = tag_start + tag_end_rel + 1;
-        let Some(name) = tag_name(&html[tag_start..tag_end]) else {
-            offset = idx + marker.len();
-            continue;
-        };
-        let close = format!("</{name}>");
-        if let Some(end_rel) = lower[tag_end..].find(&close) {
-            let text = strip_html(&html[tag_end..tag_end + end_rel]);
-            if !text.is_empty() {
-                push_unique(&mut out, &text);
-            }
-        }
-        offset = tag_end;
-    }
-    out
 }
 
 fn first_tag_attr_by_marker(html: &str, marker: &str, attr: &str) -> Option<String> {
@@ -1392,70 +1285,97 @@ fn first_tag_attr_by_marker(html: &str, marker: &str, attr: &str) -> Option<Stri
     attr_value(&html[tag_start..tag_end], attr).filter(|s| !s.is_empty())
 }
 
-fn first_info_field_value(html: &str, labels: &[&str]) -> Option<String> {
-    info_field_values(html, labels).into_iter().next()
-}
-
-fn info_field_values(html: &str, labels: &[&str]) -> Vec<String> {
-    for label in labels {
-        if let Some(raw) = info_field_raw(html, label) {
-            let values = split_info_values(&raw);
-            if !values.is_empty() {
-                return values;
-            }
-        }
-    }
-    Vec::new()
-}
-
-fn info_field_raw(html: &str, label: &str) -> Option<String> {
-    let block = extract_info_block(html).unwrap_or(html);
-    let label_idx = block.find(label)?;
-    let after_label = label_idx + label.len();
-    let value_start = block[after_label..]
-        .find("</span>")
-        .map(|idx| after_label + idx + "</span>".len())
-        .unwrap_or(after_label);
-    let value_end = block[value_start..]
-        .find("<br")
-        .map(|idx| value_start + idx)
-        .unwrap_or_else(|| block.len());
-    let text = strip_html(&block[value_start..value_end])
-        .trim_start_matches(':')
-        .trim_start_matches('：')
-        .trim()
-        .to_string();
-    (!text.is_empty()).then_some(text)
-}
-
-fn extract_info_block(html: &str) -> Option<&str> {
-    let lower = html.to_lowercase();
-    let idx = lower
-        .find("id=\"info\"")
-        .or_else(|| lower.find("id='info'"))?;
-    let tag_start = html[..idx].rfind('<')?;
-    let tag_end = html[tag_start..].find('>')? + tag_start + 1;
-    if lower[tag_start..tag_end].starts_with("<div") {
-        matching_div_end(html, tag_end).map(|end| &html[tag_start..end])
+fn rexxar_user_interest(value: Option<&Value>) -> (Option<DoubanInterest>, Option<u8>) {
+    let Some(Value::Object(obj)) = value else {
+        return (None, None);
+    };
+    let status = ["status", "interest", "type", "state"]
+        .into_iter()
+        .filter_map(|key| value_to_string(obj.get(key)))
+        .find(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let interest = if status.contains("wish") || status.contains("mark") || status.contains("想看")
+    {
+        Some(DoubanInterest::Wish)
+    } else if status.contains("collect")
+        || status.contains("done")
+        || status.contains("watched")
+        || status.contains("看过")
+    {
+        Some(DoubanInterest::Collect)
     } else {
-        html[tag_end..]
-            .find("</div>")
-            .map(|end_rel| &html[tag_start..tag_end + end_rel + "</div>".len()])
-    }
+        None
+    };
+    let rating = obj
+        .get("rating")
+        .and_then(rexxar_user_rating)
+        .or_else(|| obj.get("rating_value").and_then(rexxar_user_rating))
+        .or_else(|| obj.get("star_count").and_then(rexxar_user_rating));
+    (interest, rating)
 }
 
-fn split_info_values(raw: &str) -> Vec<String> {
-    raw.split('/')
-        .map(normalize_ws)
-        .map(|s| {
-            s.trim()
-                .trim_matches(',')
-                .trim_matches('，')
-                .trim()
-                .to_string()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
+fn subject_user_interest_from_html(html: &str) -> (Option<DoubanInterest>, Option<u8>) {
+    let Some(block) = element_block_by_id(html, "interest_sect_level") else {
+        return (None, None);
+    };
+    let text = normalize_ws(&strip_html(block));
+    let interest = if text.contains("我想看") {
+        Some(DoubanInterest::Wish)
+    } else if text.contains("我看过") {
+        Some(DoubanInterest::Collect)
+    } else {
+        None
+    };
+    let rating = extract_user_rating(block);
+    (interest, rating)
+}
+
+fn element_block_by_id<'a>(html: &'a str, id: &str) -> Option<&'a str> {
+    let markers = [
+        format!("id=\"{id}\""),
+        format!("id='{id}'"),
+        format!("id = \"{id}\""),
+        format!("id = '{id}'"),
+    ];
+    for marker in markers {
+        let Some(idx) = html.find(&marker) else {
+            continue;
+        };
+        let Some(tag_start) = html[..idx].rfind('<') else {
+            continue;
+        };
+        let tag_end = html[tag_start..].find('>').map(|i| tag_start + i + 1)?;
+        let tag = &html[tag_start..tag_end];
+        let Some(name) = tag_name(tag) else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("div") {
+            let end = matching_div_end(html, tag_end)?;
+            return Some(&html[tag_start..end]);
+        }
+        let close = format!("</{name}>");
+        let end = html[tag_end..].find(&close).map(|i| tag_end + i + close.len())?;
+        return Some(&html[tag_start..end]);
+    }
+    None
+}
+
+fn rexxar_user_rating(value: &Value) -> Option<u8> {
+    let raw = match value {
+        Value::Object(obj) => obj
+            .get("value")
+            .or_else(|| obj.get("star_count"))
+            .or_else(|| obj.get("rating"))
+            .and_then(number_from_value)?,
+        v => number_from_value(v)?,
+    };
+    let stars = if raw > 5.0 && raw <= 10.0 {
+        (raw / 2.0).round()
+    } else {
+        raw.round()
+    };
+    ((1.0..=5.0).contains(&stars)).then_some(stars as u8)
 }
 
 fn best_image_url_from_value(value: &Value) -> Option<String> {
@@ -1744,12 +1664,23 @@ fn clean_douban_image_url(raw: &str) -> Option<String> {
         s = format!("https://{rest}");
     }
     let mut url = Url::parse(&s).ok()?;
-    url.set_query(None);
+    let query = url
+        .query()
+        .filter(|query| is_allowed_douban_image_query(query))
+        .map(ToOwned::to_owned);
+    url.set_query(query.as_deref());
     url.set_fragment(None);
     if !is_allowed_douban_image_url(&url) {
         return None;
     }
     Some(url.to_string())
+}
+
+fn is_allowed_douban_image_query(query: &str) -> bool {
+    query.starts_with("imageView2/")
+        && query
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.'))
 }
 
 fn is_allowed_douban_image_url(url: &Url) -> bool {
@@ -1842,6 +1773,17 @@ mod tests {
     }
 
     #[test]
+    fn proxied_image_url_preserves_rexxar_image_view_query() {
+        let url = proxied_image_url(
+            "https://qnmob3.doubanio.com/view/photo/large/public/p480747492.jpg?imageView2/0/q/80/w/9999/h/120/format/jpg",
+        )
+        .expect("proxy url");
+
+        assert!(url.contains("qnmob3.doubanio.com"));
+        assert!(url.contains("imageView2%2F0%2Fq%2F80%2Fw%2F9999%2Fh%2F120%2Fformat%2Fjpg"));
+    }
+
+    #[test]
     fn image_fetch_candidates_prefer_large_and_keep_original() {
         let candidates = image_fetch_candidates(
             "https://img2.doubanio.com/view/photo/s_ratio_poster/public/p1.webp",
@@ -1925,85 +1867,136 @@ mod tests {
     }
 
     #[test]
-    fn extract_subject_user_interest_reads_current_state() {
-        let wish_html = r#"
-        <div id="interest_sect_level">
-          <span>我想看这部电视剧</span>
-          <a class="collect_btn" name="pbtn-35634021">修改</a>
+    fn subject_detail_from_rexxar_json_keeps_title_languages_separate() {
+        let data = json!({
+            "id": "1292052",
+            "title": "肖申克的救赎",
+            "original_title": "The Shawshank Redemption",
+            "aka": ["月黑高飞(港)", "刺激1995(台)"],
+            "url": "https://movie.douban.com/subject/1292052/",
+            "cover_url": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p480747492.jpg",
+            "directors": [{"name": "弗兰克·德拉邦特"}],
+            "actors": [{"name": "蒂姆·罗宾斯"}, {"name": "摩根·弗里曼"}],
+            "genres": ["剧情", "犯罪"],
+            "pubdate": ["1994-09-10(多伦多电影节)"],
+            "durations": ["142分钟"],
+            "intro": "剧情简介",
+            "rating": {
+                "count": 3300949,
+                "star_count": 5.0,
+                "value": 9.7
+            },
+            "languages": ["英语"],
+            "countries": ["美国"]
+        });
+
+        let detail = subject_detail_from_rexxar_json("1292052", &data).expect("rexxar detail");
+
+        assert_eq!(detail.title, "肖申克的救赎");
+        assert_eq!(detail.original_title, "The Shawshank Redemption");
+        assert_eq!(detail.aka, vec!["月黑高飞(港)", "刺激1995(台)"]);
+        assert_eq!(detail.languages, vec!["英语"]);
+        assert_eq!(detail.countries, vec!["美国"]);
+        assert_eq!(detail.date_published, "1994-09-10(多伦多电影节)");
+        assert_eq!(detail.duration, "142分钟");
+        assert_eq!(detail.summary, "剧情简介");
+        assert_eq!(detail.directors, vec!["弗兰克·德拉邦特"]);
+        assert!(detail.writers.is_empty());
+        assert_eq!(detail.actors, vec!["蒂姆·罗宾斯", "摩根·弗里曼"]);
+        assert_eq!(detail.genres, vec!["剧情", "犯罪"]);
+        assert_eq!(detail.rating.value, Some(9.7));
+        assert_eq!(detail.rating.count, Some(3300949));
+        assert_eq!(detail.rating.star_count, Some(5.0));
+        assert!(detail.poster_url.starts_with("/api/douban/image?url="));
+    }
+
+    #[test]
+    fn subject_user_interest_from_html_reads_wish_state() {
+        let html = r#"
+        <div id="interest_sect_level" class="clearfix">
+          <div class="j a_stars">
+            <span class="mr10">
+              我想看这部电影
+              <span class="collection_date">2026-06-24</span>
+            </span>
+          </div>
         </div>
         "#;
-        let (interest, rating) = extract_subject_user_interest(wish_html);
+
+        let (interest, rating) = subject_user_interest_from_html(html);
+
         assert!(matches!(interest, Some(DoubanInterest::Wish)));
-        assert_eq!(rating, None);
-
-        let collect_html = r#"
-        <div id="interest_sect_level">
-          <span>我看过这部电影</span>
-          <span id="rating">
-            <input id="n_rating" type="hidden" value="2" />
-          </span>
-        </div>
-        "#;
-        let (interest, rating) = extract_subject_user_interest(collect_html);
-        assert!(matches!(interest, Some(DoubanInterest::Collect)));
-        assert_eq!(rating, Some(2));
-
-        let legacy_collect_html = r#"
-        <div id="interest_sect_level">
-          <span>我看过这部电影</span>
-          <span class="rating4-t"></span>
-        </div>
-        "#;
-        let (interest, rating) = extract_subject_user_interest(legacy_collect_html);
-        assert!(matches!(interest, Some(DoubanInterest::Collect)));
-        assert_eq!(rating, Some(4));
-
-        let empty_html = r#"<div id="interest_sect_level"><a name="pbtn-1-wish">想看</a></div>"#;
-        let (interest, rating) = extract_subject_user_interest(empty_html);
-        assert!(interest.is_none());
         assert_eq!(rating, None);
     }
 
     #[test]
-    fn subject_detail_from_html_falls_back_without_ld_json() {
+    fn subject_user_interest_from_html_reads_collect_state_and_rating() {
         let html = r#"
-        <html>
-          <head><title>三命 (豆瓣)</title></head>
-          <body>
-            <h1><span property="v:itemreviewed">三命</span> <span class="year">(2025)</span></h1>
-            <img rel="v:image" src="https://img2.doubanio.com/view/photo/s_ratio_poster/public/p356.jpg" />
-            <div id="info">
-              <span class="pl">导演</span>: <span class="attrs"><a rel="v:directedBy">张三</a></span><br/>
-              <span class="pl">编剧</span>: <span class="attrs"><a>李四</a> / <a>王五</a></span><br/>
-              <span class="pl">主演</span>: <span class="attrs"><a rel="v:starring">赵六</a></span><br/>
-              <span class="pl">类型</span>: <span property="v:genre">剧情</span> / <span property="v:genre">悬疑</span><br/>
-              <span class="pl">首播</span>: <span property="v:initialReleaseDate" content="2025-03-31">2025-03-31(中国香港)</span><br/>
-              <span class="pl">单集片长</span>: <span property="v:runtime" content="45分钟">45分钟</span><br/>
-            </div>
-            <strong class="rating_num" property="v:average">7.1</strong>
-            <span property="v:votes">1234</span>
-            <span property="v:summary">  简介内容  </span>
-          </body>
-        </html>
+        <div id="interest_sect_level" class="clearfix">
+          <div class="j a_stars">
+            <span class="mr10">我看过这部电影</span>
+            我的评价:
+            <input id="n_rating" type="hidden" value="4" />
+          </div>
+        </div>
         "#;
 
-        let detail = subject_detail_from_html(
-            "35634021",
-            "https://movie.douban.com/subject/35634021/",
-            html,
-        )
-        .expect("fallback detail");
+        let (interest, rating) = subject_user_interest_from_html(html);
 
-        assert_eq!(detail.title, "三命");
-        assert_eq!(detail.directors, vec!["张三"]);
-        assert_eq!(detail.writers, vec!["李四", "王五"]);
-        assert_eq!(detail.actors, vec!["赵六"]);
-        assert_eq!(detail.genres, vec!["剧情", "悬疑"]);
-        assert_eq!(detail.date_published, "2025-03-31");
-        assert_eq!(detail.duration, "45分钟");
-        assert_eq!(detail.summary, "简介内容");
-        assert_eq!(detail.rating.value, Some(7.1));
-        assert_eq!(detail.rating.count, Some(1234));
-        assert!(detail.poster_url.starts_with("/api/douban/image?url="));
+        assert!(matches!(interest, Some(DoubanInterest::Collect)));
+        assert_eq!(rating, Some(4));
+    }
+
+    #[test]
+    fn search_results_from_rexxar_json_read_subject_targets() {
+        let data = json!({
+            "subjects": {
+                "items": [
+                    {
+                        "layout": "subject",
+                        "target_id": "1292052",
+                        "target_type": "movie",
+                        "type_name": "电影",
+                        "target": {
+                            "id": "1292052",
+                            "title": "肖申克的救赎",
+                            "year": "1994",
+                            "card_subtitle": "美国 / 剧情 犯罪 / 弗兰克·德拉邦特",
+                            "cover_url": "https://qnmob3.doubanio.com/view/photo/large/public/p480747492.jpg?imageView2/0/q/80",
+                            "rating": {
+                                "count": 3300949,
+                                "star_count": 5.0,
+                                "value": 9.7
+                            },
+                            "uri": "douban://douban.com/movie/1292052"
+                        }
+                    },
+                    {
+                        "layout": "review",
+                        "target_type": "review",
+                        "target": { "id": "skip", "title": "跳过" }
+                    }
+                ]
+            }
+        });
+
+        let items = search_results_from_rexxar_json(&data, 10).expect("rexxar search results");
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.id, "1292052");
+        assert_eq!(item.subject_id, "1292052");
+        assert_eq!(item.title, "肖申克的救赎");
+        assert_eq!(
+            item.abstract_text,
+            "美国 / 剧情 犯罪 / 弗兰克·德拉邦特"
+        );
+        assert_eq!(item.abstract_2, "1994");
+        assert_eq!(item.url, "https://movie.douban.com/subject/1292052/");
+        assert_eq!(item.rating.value, Some(9.7));
+        assert_eq!(item.rating.count, Some(3300949));
+        assert_eq!(item.rating.star_count, Some(5.0));
+        assert_eq!(item.vote_average, Some(9.7));
+        assert!(item.poster_url.starts_with("/api/douban/image?url="));
     }
 }

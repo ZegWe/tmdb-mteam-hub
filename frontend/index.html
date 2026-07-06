@@ -4,8 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TMDB · M-Team</title>
+    <script>
+      (() => {
+        try {
+          const key = "tmdb-mteam-theme-mode";
+          const stored = localStorage.getItem(key);
+          const mode = ["system", "light", "dark"].includes(stored) ? stored : "system";
+          const dark =
+            mode === "dark" ||
+            (mode === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+          const scheme = dark ? "dark" : "light";
+          document.documentElement.dataset.colorScheme = scheme;
+          document.documentElement.style.colorScheme = scheme;
+        } catch {}
+      })();
+    </script>
   </head>
   <body data-theme="mediahub" class="bg-base-200 text-base-content">
+    <script>
+      document.body.dataset.theme =
+        document.documentElement.dataset.colorScheme === "dark" ? "mediahub-dark" : "mediahub";
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
   </body>

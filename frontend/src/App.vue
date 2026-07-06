@@ -39,6 +39,43 @@
           设置
         </button>
       </nav>
+      <button
+        type="button"
+        class="theme-toggle"
+        :aria-label="themeToggleLabel"
+        :title="themeToggleLabel"
+        @click="cycleThemeMode"
+      >
+        <svg
+          v-if="themeMode === 'system'"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          class="theme-toggle-icon"
+        >
+          <path d="M4 5.5h16v10H4z" />
+          <path d="M9 19h6" />
+          <path d="M12 15.5V19" />
+        </svg>
+        <svg
+          v-else-if="themeMode === 'dark'"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          class="theme-toggle-icon"
+        >
+          <path d="M20 14.5A7.5 7.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" aria-hidden="true" class="theme-toggle-icon">
+          <path d="M12 4V2" />
+          <path d="M12 22v-2" />
+          <path d="M4.93 4.93 3.51 3.51" />
+          <path d="m20.49 20.49-1.42-1.42" />
+          <path d="M4 12H2" />
+          <path d="M22 12h-2" />
+          <path d="m4.93 19.07-1.42 1.42" />
+          <path d="m20.49 3.51-1.42 1.42" />
+          <circle cx="12" cy="12" r="4" />
+        </svg>
+      </button>
     </aside>
 
     <div class="app-content">
@@ -124,6 +161,7 @@
 
         <main
           class="layout"
+          :class="{ 'search-layout': currentView === 'search' }"
           id="main-layout"
           aria-live="polite"
           :aria-busy="searchLoading ? 'true' : 'false'"
@@ -148,6 +186,7 @@
                 v-for="item in movies"
                 :key="cardKey(item, 'movie')"
                 class="card media-card bg-base-100 border border-base-300 shadow-sm"
+                :class="{ 'media-card-search': currentView === 'search' }"
                 @click="openCardDetail(item, 'movie')"
               >
                 <img :src="itemImageUrl(item) || transparentPixel" alt="" loading="lazy" />
@@ -169,6 +208,7 @@
                 v-for="item in tv"
                 :key="cardKey(item, 'tv')"
                 class="card media-card bg-base-100 border border-base-300 shadow-sm"
+                :class="{ 'media-card-search': currentView === 'search' }"
                 @click="openCardDetail(item, 'tv')"
               >
                 <img :src="itemImageUrl(item) || transparentPixel" alt="" loading="lazy" />
@@ -248,24 +288,16 @@
                 <span class="subscription-stage-label">{{ node.label }}</span>
               </span>
             </div>
-            <div
-              v-if="subscriptionProgress(record) != null"
-              class="subscription-progress"
-              :aria-label="`下载进度 ${formatPercent(subscriptionProgress(record))}`"
-            >
-              <span :style="{ width: `${Math.round(subscriptionProgress(record) * 100)}%` }"></span>
+            <div class="subscription-card-notices">
+              <p
+                v-for="notice in subscriptionCardNotices(record)"
+                :key="notice.key"
+                class="subscription-card-notice"
+                :class="`subscription-card-notice-${notice.kind}`"
+              >
+                {{ notice.text }}
+              </p>
             </div>
-            <div v-if="subscriptionProgress(record) != null" class="subscription-card-progress">
-              {{ formatPercent(subscriptionProgress(record)) }}
-            </div>
-            <p
-              v-for="notice in subscriptionCardNotices(record)"
-              :key="notice.key"
-              class="subscription-card-notice"
-              :class="`subscription-card-notice-${notice.kind}`"
-            >
-              {{ notice.text }}
-            </p>
             <div class="subscription-card-actions" @click.stop>
               <button
                 type="button"
@@ -1095,15 +1127,6 @@
             >{{ subscriptionDisplayStatus(selectedSubscription).text }}</span
           >
         </div>
-        <div
-          v-if="subscriptionProgress(selectedSubscription) != null"
-          class="subscription-progress"
-          :aria-label="`下载进度 ${formatPercent(subscriptionProgress(selectedSubscription))}`"
-        >
-          <span
-            :style="{ width: `${Math.round(subscriptionProgress(selectedSubscription) * 100)}%` }"
-          ></span>
-        </div>
         <dl class="detail-meta">
           <div
             v-for="row in subscriptionDetailRows(selectedSubscription)"
@@ -1160,6 +1183,22 @@
         </p>
         <section class="subscription-detail-section">
           <h4>下载</h4>
+          <div
+            v-if="subscriptionProgress(selectedSubscription) != null"
+            class="subscription-detail-download-progress"
+          >
+            <div
+              class="subscription-progress"
+              :aria-label="`下载进度 ${formatPercent(subscriptionProgress(selectedSubscription))}`"
+            >
+              <span
+                :style="{
+                  width: `${Math.round(subscriptionProgress(selectedSubscription) * 100)}%`,
+                }"
+              ></span>
+            </div>
+            <span>{{ formatPercent(subscriptionProgress(selectedSubscription)) }}</span>
+          </div>
           <dl v-if="selectedSubscription.last_push" class="detail-meta">
             <div
               v-for="row in pushRows(selectedSubscription.last_push)"
@@ -1415,6 +1454,66 @@ const OPERATION_LOG_ACTION_LABELS = {
   subscription_sync_error: "订阅同步错误",
 };
 
+const THEME_STORAGE_KEY = "tmdb-mteam-theme-mode";
+const THEME_MODES = ["system", "light", "dark"];
+const THEME_MODE_LABELS = {
+  system: "主题：跟随系统",
+  light: "主题：浅色",
+  dark: "主题：深色",
+};
+
+function normalizeThemeMode(value) {
+  return THEME_MODES.includes(value) ? value : "system";
+}
+
+function resolveThemeScheme(mode, prefersDark) {
+  const normalized = normalizeThemeMode(mode);
+  if (normalized === "dark") return "dark";
+  if (normalized === "light") return "light";
+  return prefersDark ? "dark" : "light";
+}
+
+function nextThemeMode(mode) {
+  const normalized = normalizeThemeMode(mode);
+  const index = THEME_MODES.indexOf(normalized);
+  return THEME_MODES[(index + 1) % THEME_MODES.length];
+}
+
+function themeModeLabel(mode) {
+  return THEME_MODE_LABELS[normalizeThemeMode(mode)];
+}
+
+function readStoredThemeMode() {
+  if (typeof window === "undefined") return "system";
+  try {
+    return normalizeThemeMode(window.localStorage.getItem(THEME_STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+
+function storeThemeMode(mode) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, normalizeThemeMode(mode));
+  } catch {}
+}
+
+function readSystemPrefersDark() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function applyThemeScheme(scheme) {
+  if (typeof document === "undefined") return;
+  const normalized = scheme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.colorScheme = normalized;
+  document.documentElement.style.colorScheme = normalized;
+  if (document.body) {
+    document.body.dataset.theme = normalized === "dark" ? "mediahub-dark" : "mediahub";
+  }
+}
+
 const route = useRoute();
 const router = useRouter();
 const routeToPage = {
@@ -1466,6 +1565,14 @@ function withoutDetailRouteQuery(query) {
 const page = computed(() => routeToPage[route.name] || "main");
 const error = ref("");
 const toast = reactive({ message: "", kind: "ok", timer: 0 });
+const themeMode = ref(readStoredThemeMode());
+const systemPrefersDark = ref(readSystemPrefersDark());
+const resolvedThemeScheme = computed(() =>
+  resolveThemeScheme(themeMode.value, systemPrefersDark.value),
+);
+const themeToggleLabel = computed(() => themeModeLabel(themeMode.value));
+let themePreferenceCleanup = null;
+applyThemeScheme(resolvedThemeScheme.value);
 
 const searchSource = ref("tmdb");
 const query = ref("");
@@ -1568,14 +1675,49 @@ watch(
   { immediate: true },
 );
 
+watch(resolvedThemeScheme, (scheme) => {
+  applyThemeScheme(scheme);
+});
+
+watch(themeMode, (mode) => {
+  storeThemeMode(mode);
+});
+
 onMounted(() => {
   loadSettings();
   if (page.value === "subscriptions") startSubscriptionAutoSync();
+  themePreferenceCleanup = watchSystemThemePreference((prefersDark) => {
+    systemPrefersDark.value = prefersDark;
+  });
 });
 
 onBeforeUnmount(() => {
   stopSubscriptionAutoSync();
+  if (themePreferenceCleanup) {
+    themePreferenceCleanup();
+    themePreferenceCleanup = null;
+  }
 });
+
+function watchSystemThemePreference(onChange) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  onChange(media.matches);
+  const listener = (event) => onChange(event.matches);
+  if (typeof media.addEventListener === "function") {
+    media.addEventListener("change", listener);
+    return () => media.removeEventListener("change", listener);
+  }
+  if (typeof media.addListener === "function") {
+    media.addListener(listener);
+    return () => media.removeListener(listener);
+  }
+  return null;
+}
+
+function cycleThemeMode() {
+  themeMode.value = nextThemeMode(themeMode.value);
+}
 
 function go(target) {
   const path =
@@ -1650,7 +1792,7 @@ function cardSubtitle(item) {
       currentView.value === "douban-library"
         ? [item.date || item.abstract_text || item.abstract || item.abstract_2 || ""]
         : [
-            item.abstract_text || item.abstract || item.abstract_2 || "",
+            item.year || item.abstract_2 || item.date || "",
             ratingValue != null ? `★ ${Number(ratingValue).toFixed(1)}` : "",
           ];
     return bits.filter(Boolean).join(" · ");
@@ -1965,6 +2107,15 @@ function tmdbMetaRows(data, mediaType) {
 
 function doubanMetaRows(data) {
   const rows = [];
+  const originalTitle = String(data.original_title || "").trim();
+  const localizedTitle = String(data.title || "").trim();
+  if (originalTitle && originalTitle !== localizedTitle) rows.push(["原名", originalTitle]);
+  const aka = joinNames(data.aka);
+  if (aka) rows.push(["又名", aka]);
+  const countries = joinNames(data.countries);
+  if (countries) rows.push(["国家/地区", countries]);
+  const languages = joinNames(data.languages);
+  if (languages) rows.push(["语言", languages]);
   if (data.rating?.value != null)
     rows.push([
       "评分",

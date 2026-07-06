@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  color-scheme: light;
   --background: #f7f8f7;
   --foreground: #18181b;
   --card: #ffffff;
@@ -42,6 +43,35 @@
     -apple-system,
     BlinkMacSystemFont,
     sans-serif;
+}
+
+:root[data-color-scheme="dark"] {
+  color-scheme: dark;
+  --background: #111313;
+  --foreground: #eef2f1;
+  --card: #191d1c;
+  --card-foreground: #eef2f1;
+  --popover: #1d2221;
+  --popover-foreground: #eef2f1;
+  --primary: #e7f6f1;
+  --primary-foreground: #0b1110;
+  --secondary: #22302d;
+  --secondary-foreground: #d7f5ee;
+  --muted-bg: #202625;
+  --muted-foreground: #9aa5a2;
+  --accent-bg: #123a35;
+  --accent-foreground: #9ee8d8;
+  --destructive: #f87171;
+  --destructive-foreground: #190707;
+  --border: #303a37;
+  --input: #3b4642;
+  --ring: #5eead4;
+  --success: #34d399;
+  --warning: #f59e0b;
+  --info: #60a5fa;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 18px 42px rgba(0, 0, 0, 0.42);
+  --accent-dim: #2dd4bf;
 }
 
 * {
@@ -124,6 +154,8 @@ summary:focus-visible {
   position: sticky;
   top: 0;
   align-self: start;
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
   padding: 1.25rem 0.9rem;
   border-right: 1px solid var(--border);
@@ -171,6 +203,39 @@ summary:focus-visible {
   color: var(--accent-foreground);
   background: var(--accent-bg);
   border-color: color-mix(in srgb, var(--ring) 34%, var(--border));
+}
+
+.theme-toggle {
+  width: 2.4rem;
+  height: 2.4rem;
+  min-height: 2.4rem;
+  margin-top: auto;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--ring) 42%, var(--border));
+  background: var(--muted-bg);
+}
+
+.theme-toggle-icon {
+  width: 1.15rem;
+  height: 1.15rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .app-content {
@@ -391,6 +456,10 @@ summary:focus-visible {
   .layout {
     grid-template-columns: 1fr 1fr;
   }
+
+  .layout.search-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .layout h2 {
@@ -438,16 +507,17 @@ summary:focus-visible {
 .card .meta {
   padding: 0.5rem 0.6rem 0.65rem;
   flex: 1 1 auto;
-  min-height: 4.55rem;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  text-align: center;
 }
 
 .card .title {
   font-size: 0.82rem;
   font-weight: 600;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -457,9 +527,46 @@ summary:focus-visible {
   color: var(--muted);
   margin-top: 0.2rem;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.media-card-search {
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.media-card-search img {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  flex: 0 0 auto;
+}
+
+.media-card-search .meta {
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0.6rem 0.8rem;
+  text-align: center;
+}
+
+.media-card-search .title,
+.media-card-search .subtle {
+  width: 100%;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: initial;
+}
+
+.media-card-search .subtle {
+  margin-top: 0.15rem;
 }
 
 .banner {
@@ -1122,12 +1229,15 @@ a.torrent-card-link:visited {
   padding: 0.5rem 1.5rem 3rem;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  grid-auto-rows: 260px;
+  grid-auto-rows: 300px;
   align-items: stretch;
   gap: 0.75rem;
 }
 
 .subscription-card {
+  display: grid;
+  grid-template-rows: minmax(2.7rem, auto) 2.65rem 1.65rem minmax(4.25rem, 1fr) auto;
+  row-gap: 0.55rem;
   height: 100%;
   min-height: 0;
   padding: 0.85rem 0.9rem;
@@ -1153,6 +1263,10 @@ a.torrent-card-link:visited {
   justify-content: space-between;
   gap: 0.65rem;
   min-width: 0;
+}
+
+.subscription-card-head {
+  min-height: 2.7rem;
 }
 
 .subscription-card h2,
@@ -1213,11 +1327,16 @@ a.torrent-card-link:visited {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem 0.55rem;
-  margin-top: 0.55rem;
-  max-height: 2.35rem;
+  min-height: 2.65rem;
+  max-height: 2.65rem;
   overflow: hidden;
   color: var(--muted);
   font-size: 0.75rem;
+  line-height: 1.15rem;
+}
+
+.subscription-card-meta span {
+  flex: 0 0 auto;
 }
 
 .subscription-episode-count {
@@ -1227,19 +1346,20 @@ a.torrent-card-link:visited {
 .subscription-stage-track {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: start;
   gap: 0.25rem;
-  margin-top: 0.75rem;
+  min-height: 1.65rem;
 }
 
 .subscription-stage-node {
   position: relative;
   display: grid;
-  grid-template-rows: 0.65rem auto;
+  grid-template-rows: 0.65rem 1rem;
   justify-items: center;
   min-width: 0;
   color: var(--muted);
   font-size: 0.66rem;
-  line-height: 1.15;
+  line-height: 1.2;
   text-align: center;
 }
 
@@ -1300,7 +1420,6 @@ a.torrent-card-link:visited {
 
 .subscription-progress {
   height: 7px;
-  margin-top: 0.75rem;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
@@ -1313,14 +1432,31 @@ a.torrent-card-link:visited {
   background: linear-gradient(90deg, var(--accent), #7ccf9a);
 }
 
-.subscription-card-progress {
-  margin-top: 0.35rem;
+.subscription-detail-download-progress {
+  display: grid;
+  grid-template-rows: 7px 1rem;
+  gap: 0.35rem;
+  align-content: start;
+  margin-bottom: 0.75rem;
+}
+
+.subscription-detail-download-progress span {
   color: var(--muted);
   font-size: 0.72rem;
+  line-height: 1rem;
+}
+
+.subscription-card-notices {
+  display: grid;
+  align-content: start;
+  gap: 0.25rem;
+  min-height: 5.75rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .subscription-card-notice {
-  margin: 0.65rem 0 0;
+  margin: 0;
   font-size: 0.76rem;
   line-height: 1.45;
   word-break: break-word;
@@ -1349,9 +1485,9 @@ a.torrent-card-link:visited {
 .subscription-card-actions {
   display: flex;
   flex-wrap: wrap;
+  align-self: end;
   gap: 0.4rem;
-  margin-top: auto;
-  padding-top: 0.75rem;
+  min-height: 2rem;
 }
 
 .subscription-detail {
@@ -1982,6 +2118,9 @@ code {
   .side-nav {
     position: sticky;
     z-index: 20;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
     min-height: 0;
     padding: 0.75rem;
     border-right: 0;
@@ -1993,12 +2132,18 @@ code {
   }
 
   .nav-list {
+    flex: 1 1 auto;
     margin-top: 0;
     grid-template-columns: 1fr 1fr;
   }
 
   .nav-item {
     text-align: center;
+  }
+
+  .theme-toggle {
+    flex: 0 0 2.4rem;
+    margin-top: 0;
   }
 
   .app-toast {
