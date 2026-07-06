@@ -142,6 +142,27 @@ assert.match(
 
 assert.match(
   appSource,
+  /parsed\.kind === "media" && route\.name === "media-detail"/,
+  "media detail routes should load detail data while page is detail",
+);
+assert.match(
+  appSource,
+  /parsed\.kind === "subscription" && route\.name === "subscription-detail"/,
+  "subscription detail routes should load detail data while page is detail",
+);
+assert.doesNotMatch(
+  appSource,
+  /parsed\.kind === "media" && page\.value === "main"/,
+  "media detail route sync should not require the list page to be active",
+);
+assert.doesNotMatch(
+  appSource,
+  /parsed\.kind === "subscription" && page\.value === "subscriptions"/,
+  "subscription detail route sync should not require the list page to be active",
+);
+
+assert.match(
+  appSource,
   /route\.name,\s*route\.params\.mediaType,\s*route\.params\.id,\s*route\.query\.doubanTags/,
   "route watcher should observe detail route fields",
 );

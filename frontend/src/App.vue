@@ -1555,13 +1555,13 @@ async function syncDetailFromRoute() {
     return;
   }
 
-  if (parsed.kind === "media" && page.value === "main") {
+  if (parsed.kind === "media" && route.name === "media-detail") {
     const doubanTags = normalizeDoubanTags(firstQueryValue(route.query.doubanTags) || "");
     await loadMediaDetailFromRoute(parsed.mediaType, parsed.id, { doubanTags });
     return;
   }
 
-  if (parsed.kind === "subscription" && page.value === "subscriptions") {
+  if (parsed.kind === "subscription" && route.name === "subscription-detail") {
     await loadSubscriptionDetailFromRoute(parsed.id);
     return;
   }
