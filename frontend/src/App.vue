@@ -2683,15 +2683,20 @@ function subscriptionLifecycleKey(record) {
 }
 
 function subscriptionAttentionKey(record) {
+  const status = normalizedStatus(record?.status);
+  const stage = normalizedStatus(record?.processing_stage);
   const tags = Array.isArray(record?.attention_tags)
     ? record.attention_tags.map((tag) => normalizedStatus(tag))
     : [];
-  if (normalizedStatus(record?.status) === "skipped") tags.push("skipped");
-  if (normalizedStatus(record?.status) === "failed") tags.push("failed");
-  if (["no_candidates", "no_match"].includes(normalizedStatus(record?.processing_stage))) {
-    tags.push("waiting_release");
+  const activeTags = tags.filter(
+    (tag) => tag !== "skipped" || status === "skipped" || stage === "skipped",
+  );
+  if (status === "skipped" || stage === "skipped") activeTags.push("skipped");
+  if (status === "failed") activeTags.push("failed");
+  if (["no_candidates", "no_match"].includes(stage)) {
+    activeTags.push("waiting_release");
   }
-  return SUB_ATTENTION_PRIORITY.find((tag) => tags.includes(tag)) || "";
+  return SUB_ATTENTION_PRIORITY.find((tag) => activeTags.includes(tag)) || "";
 }
 
 function subscriptionStageTrackLabel(record) {

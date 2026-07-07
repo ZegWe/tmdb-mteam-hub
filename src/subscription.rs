@@ -2845,6 +2845,9 @@ fn apply_status_update(
             ) {
                 record.last_error = None;
                 record.skip_reason = None;
+                record
+                    .attention_tags
+                    .retain(|tag| *tag != SubscriptionAttentionTag::Skipped);
             }
             apply_status_stage(record, now);
             false
@@ -3937,6 +3940,9 @@ mod tests {
         let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
         rec.status = WantedSubscriptionStatus::Skipped;
         rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
+        apply_status_stage(&mut rec, 120);
+        assert!(rec.attention_tags.contains(&SubscriptionAttentionTag::Skipped));
+
         apply_status_update(
             &mut rec,
             WantedStatusUpdate {
@@ -3950,6 +3956,7 @@ mod tests {
 
         assert_eq!(rec.status, WantedSubscriptionStatus::Matching);
         assert_eq!(rec.skip_reason, None);
+        assert!(!rec.attention_tags.contains(&SubscriptionAttentionTag::Skipped));
         assert_eq!(rec.processing_stage.as_deref(), Some("searching"));
     }
 

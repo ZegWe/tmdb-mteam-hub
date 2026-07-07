@@ -308,6 +308,18 @@ assert.deepEqual(
   "subscription lifecycle helper should expose a fixed state graph",
 );
 
+assert.equal(
+  helpers
+    .subscriptionLifecycleNodes({
+      status: "matching",
+      lifecycle_state: "searching",
+      attention_tags: ["skipped"],
+    })
+    .find((node) => node.state === "current").attention,
+  "",
+  "active subscriptions should not keep displaying stale skipped attention",
+);
+
 assert.match(
   subscriptionDetailSource,
   /class="subscription-state-graph"/,
