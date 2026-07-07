@@ -56,6 +56,7 @@ impl Default for SubscriptionLifecycleState {
 }
 
 impl SubscriptionLifecycleState {
+    #[allow(dead_code)]
     pub const ALL: [Self; 6] = [
         Self::Queued,
         Self::Meta,
@@ -191,6 +192,7 @@ pub struct OperationLaneState {
     pub failure: Option<SubscriptionFailure>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvTargetRange {
     pub season_number: u32,
@@ -200,6 +202,7 @@ pub struct TvTargetRange {
 }
 
 impl TvTargetRange {
+    #[allow(dead_code)]
     pub fn episodes(season_number: u32, start_episode: u32, end_episode: u32) -> Self {
         Self {
             season_number,
@@ -218,6 +221,7 @@ pub struct CoverageRange {
 }
 
 impl CoverageRange {
+    #[allow(dead_code)]
     pub fn single(season_number: u32, episode_number: u32) -> Self {
         Self {
             season_number,
@@ -226,6 +230,7 @@ impl CoverageRange {
         }
     }
 
+    #[allow(dead_code)]
     pub fn range(season_number: u32, start_episode: u32, end_episode: u32) -> Self {
         Self {
             season_number,
@@ -234,11 +239,13 @@ impl CoverageRange {
         }
     }
 
+    #[allow(dead_code)]
     pub fn contains_episode(self, episode_number: u32) -> bool {
         self.start_episode <= episode_number && episode_number <= self.end_episode
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageTrust {
@@ -287,6 +294,7 @@ pub enum DownloadTaskState {
     Superseded,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionDueOperation {
     MovieMeta,
@@ -297,6 +305,7 @@ pub enum SubscriptionDueOperation {
     TvLane(TvLaneKind),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TvLaneKind {
     Link,
@@ -304,6 +313,7 @@ pub enum TvLaneKind {
     Search,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovieOperationOutcome {
     Advanced(SubscriptionLifecycleState),
@@ -760,6 +770,7 @@ impl WantedSubscriptionStore {
         self.load_state_unlocked(account_key, now).await
     }
 
+    #[allow(dead_code)]
     pub async fn apply_wish_items(
         &self,
         account_key: &str,
@@ -2068,6 +2079,7 @@ pub fn derive_legacy_status(record: &WantedSubscriptionRecord) -> WantedSubscrip
     }
 }
 
+#[allow(dead_code)]
 pub fn initialize_tv_targets(
     record: &mut WantedSubscriptionRecord,
     target: TvTargetRange,
@@ -2132,6 +2144,7 @@ pub fn initialize_tv_targets(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn bind_task_to_episodes(
     tv: &mut TvSubscriptionState,
     task_id: &str,
@@ -2177,6 +2190,7 @@ pub fn bind_task_to_episodes(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn apply_verified_coverage(
     tv: &mut TvSubscriptionState,
     task_id: &str,
@@ -2234,6 +2248,7 @@ pub fn apply_verified_coverage(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn recalculate_search_cursor(tv: &mut TvSubscriptionState) {
     tv.search_cursor_episode = tv
         .episodes
@@ -2253,6 +2268,7 @@ pub fn recalculate_search_cursor(tv: &mut TvSubscriptionState) {
         .or_else(|| Some(tv.episode_total.saturating_add(1)));
 }
 
+#[allow(dead_code)]
 pub fn block_episode_assignment(
     tv: &mut TvSubscriptionState,
     season: u32,
@@ -2267,6 +2283,7 @@ pub fn block_episode_assignment(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn skip_episode_range(
     tv: &mut TvSubscriptionState,
     season: u32,
@@ -2298,6 +2315,7 @@ pub fn skip_episode_range(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn unskip_episode_range(
     tv: &mut TvSubscriptionState,
     season: u32,
@@ -2327,6 +2345,7 @@ pub fn unskip_episode_range(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn tv_episode_mut(
     tv: &mut TvSubscriptionState,
     season: u32,
@@ -2338,6 +2357,7 @@ fn tv_episode_mut(
         .ok_or_else(|| format!("episode S{season:02}E{episode:02} not found"))
 }
 
+#[allow(dead_code)]
 pub fn derive_tv_parent_lifecycle(record: &mut WantedSubscriptionRecord) {
     let Some(tv) = record.tv.as_ref() else {
         return;
@@ -2361,6 +2381,7 @@ pub fn derive_tv_parent_lifecycle(record: &mut WantedSubscriptionRecord) {
     record.status = derive_legacy_status(record);
 }
 
+#[allow(dead_code)]
 pub fn tv_is_complete(tv: &TvSubscriptionState) -> bool {
     let cursor_done = tv.search_cursor_episode.unwrap_or(1) > tv.episode_total
         || tv.episodes.iter().all(|ep| {
@@ -2380,6 +2401,7 @@ pub fn tv_is_complete(tv: &TvSubscriptionState) -> bool {
         })
 }
 
+#[allow(dead_code)]
 pub fn tv_has_linkable_or_linking_work(tv: &TvSubscriptionState) -> bool {
     tv.download_tasks.iter().any(|task| {
         matches!(
@@ -2394,6 +2416,7 @@ pub fn tv_has_linkable_or_linking_work(tv: &TvSubscriptionState) -> bool {
     })
 }
 
+#[allow(dead_code)]
 pub fn tv_has_active_downloads(tv: &TvSubscriptionState) -> bool {
     tv.download_tasks.iter().any(|task| {
         matches!(
@@ -2406,6 +2429,7 @@ pub fn tv_has_active_downloads(tv: &TvSubscriptionState) -> bool {
     })
 }
 
+#[allow(dead_code)]
 pub fn tv_has_uncovered_or_waiting_cursor(tv: &TvSubscriptionState) -> bool {
     tv.search_cursor_episode
         .is_some_and(|cursor| cursor <= tv.episode_total)
@@ -2418,6 +2442,7 @@ pub fn tv_has_uncovered_or_waiting_cursor(tv: &TvSubscriptionState) -> bool {
         })
 }
 
+#[allow(dead_code)]
 pub fn select_due_operation(
     record: &WantedSubscriptionRecord,
     now: u64,
@@ -2466,6 +2491,7 @@ pub fn select_due_operation(
     }
 }
 
+#[allow(dead_code)]
 pub fn select_due_tv_lane(record: &WantedSubscriptionRecord, now: u64) -> Option<TvLaneKind> {
     let tv = record.tv.as_ref()?;
     if lane_due(&tv.lanes.link, now) {
@@ -2484,6 +2510,7 @@ pub fn select_due_tv_lane(record: &WantedSubscriptionRecord, now: u64) -> Option
     None
 }
 
+#[allow(dead_code)]
 pub fn apply_movie_operation_outcome(
     record: &mut WantedSubscriptionRecord,
     outcome: MovieOperationOutcome,
@@ -2507,14 +2534,17 @@ pub fn apply_movie_operation_outcome(
     record.status = derive_legacy_status(record);
 }
 
+#[allow(dead_code)]
 fn record_due(record: &WantedSubscriptionRecord, now: u64) -> bool {
     record.force_eligible_once || record.next_attempt_at.is_some_and(|due| due <= now)
 }
 
+#[allow(dead_code)]
 fn lane_due(lane: &OperationLaneState, now: u64) -> bool {
     lane.force_eligible_once || lane.next_attempt_at.is_some_and(|due| due <= now)
 }
 
+#[allow(dead_code)]
 fn tv_lane_forced(tv: &TvSubscriptionState) -> bool {
     tv.lanes.search.force_eligible_once
         || tv.lanes.progress.force_eligible_once
@@ -2535,6 +2565,7 @@ impl WantedSubscriptionState {
     }
 }
 
+#[allow(dead_code)]
 fn apply_wish_items_to_state(
     state: &mut WantedSubscriptionState,
     items: &[DoubanLibraryItem],
@@ -2610,6 +2641,7 @@ fn apply_wish_items_with_details_to_state(
     }
 }
 
+#[allow(dead_code)]
 fn record_from_item(
     item: &DoubanLibraryItem,
     return_order: usize,
@@ -2683,6 +2715,7 @@ fn record_from_item_with_detail(
     record
 }
 
+#[allow(dead_code)]
 fn refresh_record_from_item(
     record: &mut WantedSubscriptionRecord,
     item: &DoubanLibraryItem,
