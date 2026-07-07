@@ -43,6 +43,14 @@ pub struct SubscriptionWatcherConfig {
     pub library_limit: usize,
     #[serde(default = "default_subscription_max_retries")]
     pub max_retries: u32,
+    #[serde(default = "default_subscription_search_interval_secs")]
+    pub search_interval_secs: u64,
+    #[serde(default = "default_subscription_progress_interval_secs")]
+    pub progress_interval_secs: u64,
+    #[serde(default = "default_subscription_link_retry_interval_secs")]
+    pub link_retry_interval_secs: u64,
+    #[serde(default = "default_subscription_system_retry_interval_secs")]
+    pub system_retry_interval_secs: u64,
     #[serde(default = "default_subscription_bootstrap_existing_as_skipped")]
     pub bootstrap_existing_as_skipped: bool,
 }
@@ -83,6 +91,10 @@ impl Default for SubscriptionWatcherConfig {
             poll_interval_secs: default_subscription_poll_interval_secs(),
             library_limit: default_subscription_library_limit(),
             max_retries: default_subscription_max_retries(),
+            search_interval_secs: default_subscription_search_interval_secs(),
+            progress_interval_secs: default_subscription_progress_interval_secs(),
+            link_retry_interval_secs: default_subscription_link_retry_interval_secs(),
+            system_retry_interval_secs: default_subscription_system_retry_interval_secs(),
             bootstrap_existing_as_skipped: default_subscription_bootstrap_existing_as_skipped(),
         }
     }
@@ -128,6 +140,22 @@ fn default_subscription_library_limit() -> usize {
 
 fn default_subscription_max_retries() -> u32 {
     3
+}
+
+fn default_subscription_search_interval_secs() -> u64 {
+    1_800
+}
+
+fn default_subscription_progress_interval_secs() -> u64 {
+    300
+}
+
+fn default_subscription_link_retry_interval_secs() -> u64 {
+    900
+}
+
+fn default_subscription_system_retry_interval_secs() -> u64 {
+    600
 }
 
 fn default_subscription_bootstrap_existing_as_skipped() -> bool {
@@ -194,7 +222,7 @@ impl FileConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::FileConfig;
+    use super::{FileConfig, SubscriptionWatcherConfig};
 
     #[test]
     fn default_listen_addr_binds_all_interfaces() {
@@ -203,5 +231,15 @@ mod tests {
             .expect("default listen address should parse");
 
         assert_eq!(addr.to_string(), "0.0.0.0:8787");
+    }
+
+    #[test]
+    fn subscription_watcher_defaults_include_lane_intervals() {
+        let cfg = SubscriptionWatcherConfig::default();
+
+        assert_eq!(cfg.search_interval_secs, 1_800);
+        assert_eq!(cfg.progress_interval_secs, 300);
+        assert_eq!(cfg.link_retry_interval_secs, 900);
+        assert_eq!(cfg.system_retry_interval_secs, 600);
     }
 }

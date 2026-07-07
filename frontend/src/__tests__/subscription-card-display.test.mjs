@@ -40,6 +40,7 @@ ${appSource.slice(functionStart, functionEnd)}
   subscriptionCardMeta,
   subscriptionCardNotices,
   subscriptionCardSubtitle,
+  subscriptionLifecycleNodes,
 });`,
 );
 
@@ -287,4 +288,38 @@ assert.doesNotMatch(
   appSource,
   /subscriptionNoteAlreadyShown|normalizeSubscriptionCardText/,
   "subscription card display should be state-driven instead of filtering duplicate text",
+);
+
+assert.deepEqual(
+  plain(
+    helpers.subscriptionLifecycleNodes({
+      lifecycle_state: "downloading",
+      attention_tags: ["waiting_release"],
+    }),
+  ).map(({ key, label, state, attention }) => ({ key, label, state, attention })),
+  [
+    { key: "queued", label: "入队", state: "done", attention: "" },
+    { key: "meta", label: "元数据", state: "done", attention: "" },
+    { key: "searching", label: "搜索", state: "done", attention: "" },
+    { key: "downloading", label: "下载", state: "current", attention: "waiting_release" },
+    { key: "linking", label: "硬链接", state: "todo", attention: "" },
+    { key: "completed", label: "完成", state: "todo", attention: "" },
+  ],
+  "subscription lifecycle helper should expose a fixed state graph",
+);
+
+assert.match(
+  subscriptionDetailSource,
+  /class="subscription-state-graph"/,
+  "subscription detail should render the lifecycle as a node graph",
+);
+assert.match(
+  subscriptionDetailSource,
+  /subscriptionLifecycleNodes\(selectedSubscription\)/,
+  "subscription detail should use lifecycle nodes instead of status text only",
+);
+assert.doesNotMatch(
+  appSource.slice(detailRowsStart, detailRowsEnd),
+  /row\("状态"/,
+  "subscription detail rows should not duplicate the primary lifecycle graph as text",
 );

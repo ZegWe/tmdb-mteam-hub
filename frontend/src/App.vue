@@ -814,6 +814,7 @@
             v-else-if="detailKind === 'subscription' && selectedSubscription"
             :selected-subscription="selectedSubscription"
             :subscription-display-status="subscriptionDisplayStatus"
+            :subscription-lifecycle-nodes="subscriptionLifecycleNodes"
             :subscription-detail-rows="subscriptionDetailRows"
             :subscription-action-loading="subscriptionActionLoading"
             :can-retry-subscription="canRetrySubscription"
@@ -963,6 +964,27 @@ const SUB_PROGRESS_STEPS = [
   { key: "link", label: "硬链接" },
   { key: "done", label: "完成" },
 ];
+
+const SUB_LIFECYCLE_STEPS = [
+  { key: "queued", label: "入队" },
+  { key: "meta", label: "元数据" },
+  { key: "searching", label: "搜索" },
+  { key: "downloading", label: "下载" },
+  { key: "linking", label: "硬链接" },
+  { key: "completed", label: "完成" },
+];
+
+const SUB_LEGACY_LIFECYCLE_BY_STATUS = {
+  unprocessed: "queued",
+  matching: "searching",
+  processing: "searching",
+  pushed: "downloading",
+  downloading: "downloading",
+  completed: "linking",
+  linked: "completed",
+};
+
+const SUB_ATTENTION_PRIORITY = ["skipped", "retry_blocked", "failed", "waiting_release"];
 
 const SUB_ISSUE_STAGES = new Set([
   "no_candidates",
@@ -2633,6 +2655,45 @@ function subscriptionProgressNodes(record) {
   }));
 }
 
+function subscriptionLifecycleNodes(record) {
+  const currentKey = subscriptionLifecycleKey(record);
+  const currentIndex = Math.max(
+    0,
+    SUB_LIFECYCLE_STEPS.findIndex((step) => step.key === currentKey),
+  );
+  const attention = subscriptionAttentionKey(record);
+  return SUB_LIFECYCLE_STEPS.map((step, index) => ({
+    ...step,
+    state: index < currentIndex ? "done" : index === currentIndex ? "current" : "todo",
+    attention: index === currentIndex ? attention : "",
+  }));
+}
+
+function subscriptionLifecycleKey(record) {
+  const lifecycle = normalizedStatus(record?.lifecycle_state);
+  if (SUB_LIFECYCLE_STEPS.some((step) => step.key === lifecycle)) return lifecycle;
+  const status = normalizedStatus(record?.status);
+  const stage = normalizedStatus(record?.processing_stage);
+  if (stage === "download_complete" || stage === "link_planned" || stage === "link_failed")
+    return "linking";
+  if (["pushed", "downloading"].includes(stage)) return "downloading";
+  if (["searching", "matched", "pushing", "push_failed", "no_candidates", "no_match"].includes(stage))
+    return "searching";
+  return SUB_LEGACY_LIFECYCLE_BY_STATUS[status] || "queued";
+}
+
+function subscriptionAttentionKey(record) {
+  const tags = Array.isArray(record?.attention_tags)
+    ? record.attention_tags.map((tag) => normalizedStatus(tag))
+    : [];
+  if (normalizedStatus(record?.status) === "skipped") tags.push("skipped");
+  if (normalizedStatus(record?.status) === "failed") tags.push("failed");
+  if (["no_candidates", "no_match"].includes(normalizedStatus(record?.processing_stage))) {
+    tags.push("waiting_release");
+  }
+  return SUB_ATTENTION_PRIORITY.find((tag) => tags.includes(tag)) || "";
+}
+
 function subscriptionStageTrackLabel(record) {
   return subscriptionProgressNodes(record)
     .map((node) => `${node.label}${node.state === "current" ? "（当前）" : ""}`)
@@ -2806,8 +2867,6 @@ function subscriptionDetailRows(record) {
     row("简介", record.summary),
     row("豆瓣时间", record.douban_date),
     row("上映年份", record.release_year),
-    row("状态", subscriptionDisplayStatus(record).text),
-    row("当前阶段", subscriptionStageLabel(record)),
     row("阶段说明", subscriptionStageMessage(record)),
     row("下一步", record.next_action),
     row("阶段更新时间", formatUnixSeconds(record.stage_updated_at)),

@@ -11,6 +11,32 @@
         >{{ subscriptionDisplayStatus(selectedSubscription).text }}</span
       >
     </div>
+    <div
+      class="subscription-state-graph"
+      :aria-label="`订阅状态：${subscriptionDisplayStatus(selectedSubscription).text}`"
+    >
+      <div
+        v-for="node in subscriptionLifecycleNodes(selectedSubscription)"
+        :key="node.key"
+        class="subscription-state-node"
+        :class="[
+          `subscription-state-node-${node.state}`,
+          node.attention ? `subscription-state-node-${node.attention}` : '',
+        ]"
+      >
+        <span class="subscription-state-dot" aria-hidden="true"></span>
+        <span class="subscription-state-label">{{ node.label }}</span>
+        <span v-if="node.attention" class="subscription-state-attention">{{
+          node.attention === "waiting_release"
+            ? "等待发布"
+            : node.attention === "retry_blocked"
+              ? "阻塞"
+              : node.attention === "skipped"
+                ? "跳过"
+                : "失败"
+        }}</span>
+      </div>
+    </div>
     <dl class="detail-meta">
       <div
         v-for="row in subscriptionDetailRows(selectedSubscription)"
@@ -164,6 +190,7 @@
 defineProps({
   selectedSubscription: { type: Object, required: true },
   subscriptionDisplayStatus: { type: Function, required: true },
+  subscriptionLifecycleNodes: { type: Function, required: true },
   subscriptionDetailRows: { type: Function, required: true },
   subscriptionActionLoading: { type: Boolean, default: false },
   canRetrySubscription: { type: Function, required: true },

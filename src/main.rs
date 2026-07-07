@@ -582,6 +582,10 @@ fn normalize_subscription_watcher(
     cfg.poll_interval_secs = cfg.poll_interval_secs.clamp(60, 86_400);
     cfg.library_limit = cfg.library_limit.clamp(1, 1200);
     cfg.max_retries = cfg.max_retries.clamp(1, 20);
+    cfg.search_interval_secs = cfg.search_interval_secs.max(30);
+    cfg.progress_interval_secs = cfg.progress_interval_secs.max(30);
+    cfg.link_retry_interval_secs = cfg.link_retry_interval_secs.max(30);
+    cfg.system_retry_interval_secs = cfg.system_retry_interval_secs.max(30);
     cfg
 }
 
@@ -6985,6 +6989,14 @@ mod subscription_category_tests {
             douban_sort_time: None,
             douban_return_order: None,
             status: subscription::WantedSubscriptionStatus::Pushed,
+            lifecycle_state: subscription::SubscriptionLifecycleState::Downloading,
+            execution_state: subscription::SubscriptionExecutionState::Idle,
+            attention_tags: Vec::new(),
+            failure: None,
+            next_attempt_at: Some(100),
+            force_eligible_once: false,
+            media_kind: subscription::SubscriptionMediaKind::Movie,
+            tv: None,
             retry_count: 0,
             max_retries: 3,
             last_error: None,

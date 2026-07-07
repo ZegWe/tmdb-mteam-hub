@@ -11,7 +11,7 @@ use crate::config::SubscriptionWatcherConfig;
 use crate::douban::{DoubanLibraryItem, DoubanSubjectDetail};
 
 const STATE_VERSION: u32 = 1;
-const DB_SCHEMA_VERSION: i64 = 2;
+const DB_SCHEMA_VERSION: i64 = 3;
 const DB_FILE_NAME: &str = "wanted.sqlite";
 
 fn default_state_version() -> u32 {
@@ -36,6 +36,316 @@ impl Default for WantedSubscriptionStatus {
     fn default() -> Self {
         Self::Unprocessed
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionLifecycleState {
+    Queued,
+    Meta,
+    Searching,
+    Downloading,
+    Linking,
+    Completed,
+}
+
+impl Default for SubscriptionLifecycleState {
+    fn default() -> Self {
+        Self::Queued
+    }
+}
+
+impl SubscriptionLifecycleState {
+    pub const ALL: [Self; 6] = [
+        Self::Queued,
+        Self::Meta,
+        Self::Searching,
+        Self::Downloading,
+        Self::Linking,
+        Self::Completed,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Meta => "meta",
+            Self::Searching => "searching",
+            Self::Downloading => "downloading",
+            Self::Linking => "linking",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionExecutionState {
+    Idle,
+    Running,
+}
+
+impl Default for SubscriptionExecutionState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionAttentionTag {
+    WaitingRelease,
+    Failed,
+    RetryBlocked,
+    Skipped,
+    NeedsReconciliation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionMediaKind {
+    Movie,
+    Tv,
+}
+
+impl Default for SubscriptionMediaKind {
+    fn default() -> Self {
+        Self::Movie
+    }
+}
+
+impl SubscriptionMediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Movie => "movie",
+            Self::Tv => "tv",
+        }
+    }
+
+    pub fn from_tags(tags: &[String]) -> Self {
+        if tags.iter().any(|tag| {
+            let tag = tag.trim().to_ascii_lowercase();
+            matches!(tag.as_str(), "tv" | "剧集" | "电视剧" | "番剧")
+        }) {
+            Self::Tv
+        } else {
+            Self::Movie
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureScope {
+    Parent,
+    Lane,
+    DownloadTask,
+    Episode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionFailure {
+    pub scope: FailureScope,
+    pub owner_id: String,
+    pub operation: String,
+    pub error_type: String,
+    pub message: String,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub failed_at: u64,
+    pub next_retry_at: Option<u64>,
+    pub retry_blocked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TvSubscriptionState {
+    pub schema_version: u32,
+    pub metadata_ready: bool,
+    pub episode_records_initialized: bool,
+    pub target_episode_set_known: bool,
+    pub season_number: u32,
+    pub episode_total: u32,
+    pub target_start_episode: u32,
+    pub target_end_episode: u32,
+    pub search_cursor_episode: Option<u32>,
+    pub lanes: TvLaneSet,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub episodes: Vec<TvEpisodeRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub download_tasks: Vec<DownloadTaskRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TvLaneSet {
+    pub search: OperationLaneState,
+    pub progress: OperationLaneState,
+    pub link: OperationLaneState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OperationLaneState {
+    pub next_attempt_at: Option<u64>,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub force_eligible_once: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<SubscriptionFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvTargetRange {
+    pub season_number: u32,
+    pub start_episode: u32,
+    pub end_episode: u32,
+    pub episode_total: u32,
+}
+
+impl TvTargetRange {
+    pub fn episodes(season_number: u32, start_episode: u32, end_episode: u32) -> Self {
+        Self {
+            season_number,
+            start_episode,
+            end_episode,
+            episode_total: end_episode,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageRange {
+    pub season_number: u32,
+    pub start_episode: u32,
+    pub end_episode: u32,
+}
+
+impl CoverageRange {
+    pub fn single(season_number: u32, episode_number: u32) -> Self {
+        Self {
+            season_number,
+            start_episode: episode_number,
+            end_episode: episode_number,
+        }
+    }
+
+    pub fn range(season_number: u32, start_episode: u32, end_episode: u32) -> Self {
+        Self {
+            season_number,
+            start_episode,
+            end_episode,
+        }
+    }
+
+    pub fn contains_episode(self, episode_number: u32) -> bool {
+        self.start_episode <= episode_number && episode_number <= self.end_episode
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageTrust {
+    Tentative,
+    Verified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpisodeTargetState {
+    Target,
+    Skipped,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpisodeAssignmentState {
+    None,
+    Active,
+    Blocked,
+    Released,
+    Completed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpisodeCoverageState {
+    Uncovered,
+    TentativeCovered,
+    VerifiedCovered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadTaskState {
+    Pushed,
+    Downloading,
+    Downloaded,
+    Linking,
+    Completed,
+    Missing,
+    Failed,
+    Ignored,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionDueOperation {
+    MovieMeta,
+    MovieSearch,
+    MovieProgress,
+    MovieLink,
+    TvMeta,
+    TvLane(TvLaneKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TvLaneKind {
+    Link,
+    Progress,
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovieOperationOutcome {
+    Advanced(SubscriptionLifecycleState),
+    StillDownloading,
+    Waiting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TvEpisodeRecord {
+    pub season_number: u32,
+    pub episode_number: u32,
+    pub label: String,
+    pub target_state: EpisodeTargetState,
+    pub coverage_state: EpisodeCoverageState,
+    pub assignment_state: EpisodeAssignmentState,
+    pub selected_task_id: Option<String>,
+    pub download_state: String,
+    pub link_state: String,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub failure: Option<SubscriptionFailure>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadTaskRecord {
+    pub task_id: String,
+    pub torrent_id: String,
+    pub torrent_title: String,
+    pub qb_server_id: String,
+    pub qb_category: String,
+    pub qb_save_dir_name: String,
+    pub qb_hash: Option<String>,
+    pub qb_name: Option<String>,
+    pub state: DownloadTaskState,
+    pub tentative_coverage: Vec<CoverageRange>,
+    pub verified_coverage: Vec<CoverageRange>,
+    pub progress: Option<f64>,
+    pub pushed_at: u64,
+    pub checked_at: Option<u64>,
+    pub completed_at: Option<u64>,
+    pub failure: Option<SubscriptionFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,6 +583,22 @@ pub struct WantedSubscriptionRecord {
     pub douban_return_order: Option<u32>,
     #[serde(default)]
     pub status: WantedSubscriptionStatus,
+    #[serde(default)]
+    pub lifecycle_state: SubscriptionLifecycleState,
+    #[serde(default)]
+    pub execution_state: SubscriptionExecutionState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention_tags: Vec<SubscriptionAttentionTag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<SubscriptionFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<u64>,
+    #[serde(default)]
+    pub force_eligible_once: bool,
+    #[serde(default)]
+    pub media_kind: SubscriptionMediaKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tv: Option<TvSubscriptionState>,
     #[serde(default)]
     pub retry_count: u32,
     #[serde(default)]
@@ -727,6 +1053,78 @@ fn init_schema(conn: &Connection) -> std::io::Result<()> {
         [],
     )
     .map_err(sqlite_io)?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "lifecycle_state",
+        "TEXT NOT NULL DEFAULT 'queued'",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "execution_state",
+        "TEXT NOT NULL DEFAULT 'idle'",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "attention_tags_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "media_kind",
+        "TEXT NOT NULL DEFAULT 'movie'",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "next_attempt_at",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "search_next_attempt_at",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "progress_next_attempt_at",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "link_next_attempt_at",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "wanted_subscription_records",
+        "retry_blocked_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS wanted_records_lifecycle_due_idx
+            ON wanted_subscription_records (account_key, lifecycle_state, execution_state, next_attempt_at)",
+        [],
+    )
+    .map_err(sqlite_io)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS wanted_records_account_subject_uidx
+            ON wanted_subscription_records (account_key, subject_id)",
+        [],
+    )
+    .map_err(sqlite_io)?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS wanted_records_tv_lane_due_idx
+            ON wanted_subscription_records (account_key, media_kind, search_next_attempt_at, progress_next_attempt_at, link_next_attempt_at)",
+        [],
+    )
+    .map_err(sqlite_io)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS subscription_state_blobs (
             account_key TEXT NOT NULL,
@@ -767,6 +1165,30 @@ fn init_schema(conn: &Connection) -> std::io::Result<()> {
     )
     .map_err(sqlite_io)?;
     ensure_schema_version(conn)?;
+    Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> std::io::Result<()> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sqlite_io)?;
+    let mut rows = stmt.query([]).map_err(sqlite_io)?;
+    while let Some(row) = rows.next().map_err(sqlite_io)? {
+        let name: String = row.get(1).map_err(sqlite_io)?;
+        if name == column {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .map_err(sqlite_io)?;
     Ok(())
 }
 
@@ -919,6 +1341,14 @@ fn parse_record_row(row: &Row<'_>) -> std::io::Result<WantedSubscriptionRecord> 
             douban_sort_time: None,
             douban_return_order: None,
             status: status_from_label(&status),
+            lifecycle_state: SubscriptionLifecycleState::Queued,
+            execution_state: SubscriptionExecutionState::Idle,
+            attention_tags: Vec::new(),
+            failure: None,
+            next_attempt_at: Some(updated_at),
+            force_eligible_once: false,
+            media_kind: SubscriptionMediaKind::from_tags(&[]),
+            tv: None,
             retry_count: 0,
             max_retries: 0,
             last_error: Some("原订阅记录 JSON 损坏，已按索引字段降级恢复".to_string()),
@@ -950,6 +1380,7 @@ fn parse_record_row(row: &Row<'_>) -> std::io::Result<WantedSubscriptionRecord> 
     if record.updated_at == 0 {
         record.updated_at = updated_at;
     }
+    repair_record_defaults(&mut record, updated_at, updated_at, updated_at);
     Ok(record)
 }
 
@@ -994,13 +1425,171 @@ fn save_state_to_db(
     )
     .map_err(sqlite_io)?;
 
-    tx.execute(
-        "DELETE FROM wanted_subscription_records WHERE account_key = ?1",
-        params![account_key],
-    )
-    .map_err(sqlite_io)?;
+    let state_subjects = state.records.keys().cloned().collect::<Vec<_>>();
+    if state_subjects.is_empty() {
+        tx.execute(
+            "DELETE FROM wanted_subscription_records WHERE account_key = ?1",
+            params![account_key],
+        )
+        .map_err(sqlite_io)?;
+    } else {
+        let placeholders = std::iter::repeat("?")
+            .take(state_subjects.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = vec![account_key.to_string()];
+        params.extend(state_subjects);
+        tx.execute(
+            &format!(
+                "DELETE FROM wanted_subscription_records
+                    WHERE account_key = ? AND subject_id NOT IN ({placeholders})"
+            ),
+            params_from_iter(params.iter()),
+        )
+        .map_err(sqlite_io)?;
+    }
+    for record in state.records.values() {
+        let record_json = serde_json::to_string(record)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let indexes = record_index_values(record);
+        tx.execute(
+            "INSERT INTO wanted_subscription_records
+                (account_key, subject_id, status, title, category_text, updated_at, record_json,
+                 lifecycle_state, execution_state, attention_tags_json, media_kind, next_attempt_at,
+                 search_next_attempt_at, progress_next_attempt_at, link_next_attempt_at, retry_blocked_count)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                ON CONFLICT(account_key, subject_id) DO UPDATE SET
+                    status = excluded.status,
+                    title = excluded.title,
+                    category_text = excluded.category_text,
+                    updated_at = excluded.updated_at,
+                    record_json = excluded.record_json,
+                    lifecycle_state = excluded.lifecycle_state,
+                    execution_state = excluded.execution_state,
+                    attention_tags_json = excluded.attention_tags_json,
+                    media_kind = excluded.media_kind,
+                    next_attempt_at = excluded.next_attempt_at,
+                    search_next_attempt_at = excluded.search_next_attempt_at,
+                    progress_next_attempt_at = excluded.progress_next_attempt_at,
+                    link_next_attempt_at = excluded.link_next_attempt_at,
+                    retry_blocked_count = excluded.retry_blocked_count",
+            params![
+                account_key,
+                record.subject_id,
+                status_label(record.status),
+                record.title,
+                record.category_text,
+                u64_to_i64(record.updated_at),
+                record_json,
+                indexes.lifecycle_state,
+                indexes.execution_state,
+                indexes.attention_tags_json,
+                indexes.media_kind,
+                indexes.next_attempt_at.map(u64_to_i64),
+                indexes.search_next_attempt_at.map(u64_to_i64),
+                indexes.progress_next_attempt_at.map(u64_to_i64),
+                indexes.link_next_attempt_at.map(u64_to_i64),
+                indexes.retry_blocked_count,
+            ],
+        )
+        .map_err(sqlite_io)?;
+    }
     tx.commit().map_err(sqlite_io)?;
     Ok(())
+}
+
+struct RecordIndexValues {
+    lifecycle_state: String,
+    execution_state: String,
+    attention_tags_json: String,
+    media_kind: String,
+    next_attempt_at: Option<u64>,
+    search_next_attempt_at: Option<u64>,
+    progress_next_attempt_at: Option<u64>,
+    link_next_attempt_at: Option<u64>,
+    retry_blocked_count: i64,
+}
+
+fn record_index_values(record: &WantedSubscriptionRecord) -> RecordIndexValues {
+    RecordIndexValues {
+        lifecycle_state: record.lifecycle_state.as_str().to_string(),
+        execution_state: execution_state_label(record.execution_state).to_string(),
+        attention_tags_json: serde_json::to_string(&record.attention_tags)
+            .unwrap_or_else(|_| "[]".to_string()),
+        media_kind: record.media_kind.as_str().to_string(),
+        next_attempt_at: record.next_attempt_at,
+        search_next_attempt_at: record
+            .tv
+            .as_ref()
+            .and_then(|tv| tv.lanes.search.next_attempt_at),
+        progress_next_attempt_at: record
+            .tv
+            .as_ref()
+            .and_then(|tv| tv.lanes.progress.next_attempt_at),
+        link_next_attempt_at: record
+            .tv
+            .as_ref()
+            .and_then(|tv| tv.lanes.link.next_attempt_at),
+        retry_blocked_count: retry_blocked_count(record),
+    }
+}
+
+fn execution_state_label(state: SubscriptionExecutionState) -> &'static str {
+    match state {
+        SubscriptionExecutionState::Idle => "idle",
+        SubscriptionExecutionState::Running => "running",
+    }
+}
+
+fn retry_blocked_count(record: &WantedSubscriptionRecord) -> i64 {
+    let mut count = i64::from(
+        record
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.retry_blocked),
+    );
+    if let Some(tv) = record.tv.as_ref() {
+        count += i64::from(
+            tv.lanes
+                .search
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.retry_blocked),
+        );
+        count += i64::from(
+            tv.lanes
+                .progress
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.retry_blocked),
+        );
+        count += i64::from(
+            tv.lanes
+                .link
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.retry_blocked),
+        );
+        count += tv
+            .episodes
+            .iter()
+            .filter(|ep| {
+                ep.failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.retry_blocked)
+            })
+            .count() as i64;
+        count += tv
+            .download_tasks
+            .iter()
+            .filter(|task| {
+                task.failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.retry_blocked)
+            })
+            .count() as i64;
+    }
+    count
 }
 
 fn append_operation_log_to_db(
@@ -1238,6 +1827,18 @@ fn repair_record_defaults(
     if record.last_seen_at == 0 {
         record.last_seen_at = record.updated_at;
     }
+    if record.lifecycle_state == SubscriptionLifecycleState::Queued
+        && (record.status != WantedSubscriptionStatus::Unprocessed
+            || record
+                .processing_stage
+                .as_deref()
+                .is_some_and(|stage| stage != "queued")
+            || record.last_push.is_some()
+            || record.last_completion.is_some()
+            || !record.candidate_matches.is_empty())
+    {
+        migrate_legacy_status_fields(record, now);
+    }
     normalize_existing_stage(record, now);
 }
 
@@ -1261,6 +1862,664 @@ fn normalize_existing_stage(record: &mut WantedSubscriptionRecord, now: u64) {
     if record.processing_stage.is_none() && record.stage_message.is_none() {
         hydrate_stage_from_record(record);
     }
+}
+
+pub fn migrate_legacy_status_fields(record: &mut WantedSubscriptionRecord, now: u64) {
+    let (state, tags) = infer_lifecycle_from_legacy(record);
+    record.lifecycle_state = state;
+    record.execution_state = SubscriptionExecutionState::Idle;
+    merge_attention_tags(record, tags);
+    record.next_attempt_at.get_or_insert(now);
+    if record.failure.is_none() {
+        record.failure = failure_from_legacy_error(record, now);
+    }
+    record.status = derive_legacy_status(record);
+}
+
+fn infer_lifecycle_from_legacy(
+    record: &WantedSubscriptionRecord,
+) -> (SubscriptionLifecycleState, Vec<SubscriptionAttentionTag>) {
+    if let Some(completion) = record.last_completion.as_ref() {
+        match completion.status.as_str() {
+            "completed" | "linked" => return (SubscriptionLifecycleState::Completed, vec![]),
+            "failed" => {
+                return (
+                    SubscriptionLifecycleState::Linking,
+                    vec![SubscriptionAttentionTag::Failed],
+                )
+            }
+            "pending" | "dry_run" | "planned" => {
+                return (SubscriptionLifecycleState::Downloading, vec![])
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(push) = record.last_push.as_ref() {
+        match push.status.as_str() {
+            "linked" | "completed" => {
+                let complete = record
+                    .last_completion
+                    .as_ref()
+                    .is_some_and(|completion| completion.status == "completed");
+                return (
+                    if complete {
+                        SubscriptionLifecycleState::Completed
+                    } else {
+                        SubscriptionLifecycleState::Linking
+                    },
+                    vec![],
+                );
+            }
+            "downloaded" => return (SubscriptionLifecycleState::Linking, vec![]),
+            "downloading" | "pushed" => return (SubscriptionLifecycleState::Downloading, vec![]),
+            "failed" => {
+                let waiting = legacy_text_is_waiting_release(
+                    record.processing_stage.as_deref(),
+                    push.error.as_deref(),
+                );
+                return (
+                    SubscriptionLifecycleState::Searching,
+                    vec![if waiting {
+                        SubscriptionAttentionTag::WaitingRelease
+                    } else {
+                        SubscriptionAttentionTag::Failed
+                    }],
+                );
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(stage) = record.processing_stage.as_deref() {
+        match stage {
+            "link_failed" | "download_complete" | "link_planned" => {
+                return (SubscriptionLifecycleState::Linking, vec![])
+            }
+            "downloading" | "pushed" => return (SubscriptionLifecycleState::Downloading, vec![]),
+            "no_candidates" | "no_match" => {
+                return (
+                    SubscriptionLifecycleState::Searching,
+                    vec![SubscriptionAttentionTag::WaitingRelease],
+                )
+            }
+            "searching" | "matched" | "pushing" => {
+                return (SubscriptionLifecycleState::Searching, vec![])
+            }
+            "push_failed" => {
+                return (
+                    SubscriptionLifecycleState::Searching,
+                    vec![SubscriptionAttentionTag::Failed],
+                )
+            }
+            _ => {}
+        }
+    }
+
+    if !record.candidate_matches.is_empty() {
+        return (SubscriptionLifecycleState::Searching, vec![]);
+    }
+
+    match record.status {
+        WantedSubscriptionStatus::Unprocessed => (SubscriptionLifecycleState::Queued, vec![]),
+        WantedSubscriptionStatus::Matching | WantedSubscriptionStatus::Processing => {
+            (SubscriptionLifecycleState::Searching, vec![])
+        }
+        WantedSubscriptionStatus::Pushed | WantedSubscriptionStatus::Downloading => {
+            (SubscriptionLifecycleState::Downloading, vec![])
+        }
+        WantedSubscriptionStatus::Completed => (SubscriptionLifecycleState::Linking, vec![]),
+        WantedSubscriptionStatus::Linked => (SubscriptionLifecycleState::Completed, vec![]),
+        WantedSubscriptionStatus::Skipped => (
+            SubscriptionLifecycleState::Queued,
+            vec![SubscriptionAttentionTag::Skipped],
+        ),
+        WantedSubscriptionStatus::Failed => (
+            SubscriptionLifecycleState::Queued,
+            vec![
+                SubscriptionAttentionTag::Failed,
+                SubscriptionAttentionTag::NeedsReconciliation,
+            ],
+        ),
+    }
+}
+
+fn legacy_text_is_waiting_release(stage: Option<&str>, error: Option<&str>) -> bool {
+    matches!(stage, Some("no_candidates" | "no_match"))
+        || error
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("no candidate")
+        || error.unwrap_or_default().contains("没有匹配")
+        || error.unwrap_or_default().contains("无候选")
+}
+
+fn merge_attention_tags(
+    record: &mut WantedSubscriptionRecord,
+    tags: Vec<SubscriptionAttentionTag>,
+) {
+    for tag in tags {
+        if !record.attention_tags.contains(&tag) {
+            record.attention_tags.push(tag);
+        }
+    }
+    record.attention_tags.sort();
+}
+
+fn failure_from_legacy_error(
+    record: &WantedSubscriptionRecord,
+    now: u64,
+) -> Option<SubscriptionFailure> {
+    let message = record
+        .last_error
+        .as_deref()
+        .or_else(|| {
+            record
+                .last_push
+                .as_ref()
+                .and_then(|push| push.error.as_deref())
+        })
+        .or_else(|| {
+            record
+                .last_completion
+                .as_ref()
+                .and_then(|completion| completion.error.as_deref())
+        })?;
+    Some(SubscriptionFailure {
+        scope: FailureScope::Parent,
+        owner_id: record.subject_id.clone(),
+        operation: record
+            .processing_stage
+            .clone()
+            .unwrap_or_else(|| "legacy".to_string()),
+        error_type: "legacy".to_string(),
+        message: message.to_string(),
+        retry_count: record.retry_count,
+        max_retries: record.max_retries,
+        failed_at: record.stage_updated_at.unwrap_or(now),
+        next_retry_at: record.next_attempt_at,
+        retry_blocked: record.retry_count >= record.max_retries && record.max_retries > 0,
+    })
+}
+
+pub fn derive_legacy_status(record: &WantedSubscriptionRecord) -> WantedSubscriptionStatus {
+    if record
+        .attention_tags
+        .contains(&SubscriptionAttentionTag::Skipped)
+    {
+        return WantedSubscriptionStatus::Skipped;
+    }
+    if record
+        .attention_tags
+        .contains(&SubscriptionAttentionTag::Failed)
+        || record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked)
+    {
+        return WantedSubscriptionStatus::Failed;
+    }
+    match record.lifecycle_state {
+        SubscriptionLifecycleState::Queued => WantedSubscriptionStatus::Unprocessed,
+        SubscriptionLifecycleState::Meta | SubscriptionLifecycleState::Searching => {
+            WantedSubscriptionStatus::Matching
+        }
+        SubscriptionLifecycleState::Downloading => WantedSubscriptionStatus::Downloading,
+        SubscriptionLifecycleState::Linking => WantedSubscriptionStatus::Completed,
+        SubscriptionLifecycleState::Completed => WantedSubscriptionStatus::Linked,
+    }
+}
+
+pub fn initialize_tv_targets(
+    record: &mut WantedSubscriptionRecord,
+    target: TvTargetRange,
+    now: u64,
+) -> Result<(), String> {
+    if target.start_episode == 0
+        || target.end_episode < target.start_episode
+        || target.episode_total < target.end_episode
+    {
+        return Err("invalid TV target episode range".to_string());
+    }
+
+    let episodes = (target.start_episode..=target.end_episode)
+        .map(|episode| TvEpisodeRecord {
+            season_number: target.season_number,
+            episode_number: episode,
+            label: format!("E{episode:02}"),
+            target_state: EpisodeTargetState::Target,
+            coverage_state: EpisodeCoverageState::Uncovered,
+            assignment_state: EpisodeAssignmentState::None,
+            selected_task_id: None,
+            download_state: "idle".to_string(),
+            link_state: "idle".to_string(),
+            retry_count: 0,
+            max_retries: record.max_retries,
+            failure: None,
+            updated_at: now,
+        })
+        .collect::<Vec<_>>();
+
+    record.media_kind = SubscriptionMediaKind::Tv;
+    record.tv = Some(TvSubscriptionState {
+        schema_version: 1,
+        metadata_ready: true,
+        episode_records_initialized: true,
+        target_episode_set_known: true,
+        season_number: target.season_number,
+        episode_total: target.episode_total,
+        target_start_episode: target.start_episode,
+        target_end_episode: target.end_episode,
+        search_cursor_episode: Some(target.start_episode),
+        lanes: TvLaneSet {
+            search: OperationLaneState {
+                next_attempt_at: Some(now),
+                max_retries: record.max_retries,
+                ..OperationLaneState::default()
+            },
+            progress: OperationLaneState {
+                next_attempt_at: Some(now),
+                max_retries: record.max_retries,
+                ..OperationLaneState::default()
+            },
+            link: OperationLaneState {
+                next_attempt_at: Some(now),
+                max_retries: record.max_retries,
+                ..OperationLaneState::default()
+            },
+        },
+        episodes,
+        download_tasks: Vec::new(),
+    });
+    Ok(())
+}
+
+pub fn bind_task_to_episodes(
+    tv: &mut TvSubscriptionState,
+    task_id: &str,
+    coverage: CoverageRange,
+    trust: CoverageTrust,
+    now: u64,
+) -> Result<(), String> {
+    if task_id.trim().is_empty() {
+        return Err("task id is required".to_string());
+    }
+    if coverage.start_episode == 0 || coverage.end_episode < coverage.start_episode {
+        return Err("invalid coverage range".to_string());
+    }
+
+    for ep in tv.episodes.iter_mut().filter(|ep| {
+        ep.season_number == coverage.season_number && coverage.contains_episode(ep.episode_number)
+    }) {
+        if matches!(
+            ep.assignment_state,
+            EpisodeAssignmentState::Active
+                | EpisodeAssignmentState::Blocked
+                | EpisodeAssignmentState::Completed
+                | EpisodeAssignmentState::Skipped
+        ) {
+            continue;
+        }
+        if matches!(
+            ep.target_state,
+            EpisodeTargetState::Skipped | EpisodeTargetState::Completed
+        ) {
+            continue;
+        }
+        ep.selected_task_id = Some(task_id.to_string());
+        ep.assignment_state = EpisodeAssignmentState::Active;
+        ep.coverage_state = match trust {
+            CoverageTrust::Tentative => EpisodeCoverageState::TentativeCovered,
+            CoverageTrust::Verified => EpisodeCoverageState::VerifiedCovered,
+        };
+        ep.download_state = "pushed".to_string();
+        ep.updated_at = now;
+    }
+    recalculate_search_cursor(tv);
+    Ok(())
+}
+
+pub fn apply_verified_coverage(
+    tv: &mut TvSubscriptionState,
+    task_id: &str,
+    coverage: CoverageRange,
+    now: u64,
+) -> Result<(), String> {
+    let mut found = false;
+    if let Some(task) = tv
+        .download_tasks
+        .iter_mut()
+        .find(|task| task.task_id == task_id)
+    {
+        task.verified_coverage = vec![coverage];
+        task.checked_at = Some(now);
+        found = true;
+    }
+
+    let mut first_released = None;
+    for ep in tv
+        .episodes
+        .iter_mut()
+        .filter(|ep| ep.selected_task_id.as_deref() == Some(task_id))
+    {
+        found = true;
+        if coverage.season_number == ep.season_number
+            && coverage.contains_episode(ep.episode_number)
+        {
+            ep.coverage_state = EpisodeCoverageState::VerifiedCovered;
+            ep.updated_at = now;
+        } else if !matches!(
+            ep.assignment_state,
+            EpisodeAssignmentState::Completed | EpisodeAssignmentState::Skipped
+        ) {
+            ep.assignment_state = EpisodeAssignmentState::Released;
+            ep.coverage_state = EpisodeCoverageState::Uncovered;
+            ep.selected_task_id = None;
+            ep.download_state = "idle".to_string();
+            ep.updated_at = now;
+            first_released = Some(
+                first_released
+                    .map(|current: u32| current.min(ep.episode_number))
+                    .unwrap_or(ep.episode_number),
+            );
+        }
+    }
+
+    if !found {
+        return Err(format!("task {task_id} not found"));
+    }
+    if let Some(episode) = first_released {
+        tv.search_cursor_episode = Some(episode);
+    } else {
+        recalculate_search_cursor(tv);
+    }
+    Ok(())
+}
+
+pub fn recalculate_search_cursor(tv: &mut TvSubscriptionState) {
+    tv.search_cursor_episode = tv
+        .episodes
+        .iter()
+        .filter(|ep| ep.target_state == EpisodeTargetState::Target)
+        .filter(|ep| {
+            !matches!(
+                ep.assignment_state,
+                EpisodeAssignmentState::Active
+                    | EpisodeAssignmentState::Blocked
+                    | EpisodeAssignmentState::Completed
+                    | EpisodeAssignmentState::Skipped
+            )
+        })
+        .map(|ep| ep.episode_number)
+        .min()
+        .or_else(|| Some(tv.episode_total.saturating_add(1)));
+}
+
+pub fn block_episode_assignment(
+    tv: &mut TvSubscriptionState,
+    season: u32,
+    episode: u32,
+    failure: SubscriptionFailure,
+) -> Result<(), String> {
+    let ep = tv_episode_mut(tv, season, episode)?;
+    ep.assignment_state = EpisodeAssignmentState::Blocked;
+    ep.failure = Some(failure);
+    ep.updated_at = ep.updated_at.max(1);
+    recalculate_search_cursor(tv);
+    Ok(())
+}
+
+pub fn skip_episode_range(
+    tv: &mut TvSubscriptionState,
+    season: u32,
+    start: u32,
+    end: u32,
+    reason: &str,
+    now: u64,
+) -> Result<(), String> {
+    if start == 0 || end < start {
+        return Err("invalid episode range".to_string());
+    }
+    let mut changed = false;
+    for ep in tv.episodes.iter_mut().filter(|ep| {
+        ep.season_number == season && start <= ep.episode_number && ep.episode_number <= end
+    }) {
+        changed = true;
+        ep.target_state = EpisodeTargetState::Skipped;
+        ep.assignment_state = EpisodeAssignmentState::Skipped;
+        ep.coverage_state = EpisodeCoverageState::Uncovered;
+        ep.selected_task_id = None;
+        ep.failure = None;
+        ep.link_state = reason.trim().to_string();
+        ep.updated_at = now;
+    }
+    if !changed {
+        return Err("episode range not found".to_string());
+    }
+    recalculate_search_cursor(tv);
+    Ok(())
+}
+
+pub fn unskip_episode_range(
+    tv: &mut TvSubscriptionState,
+    season: u32,
+    start: u32,
+    end: u32,
+    now: u64,
+) -> Result<(), String> {
+    if start == 0 || end < start {
+        return Err("invalid episode range".to_string());
+    }
+    let mut changed = false;
+    for ep in tv.episodes.iter_mut().filter(|ep| {
+        ep.season_number == season && start <= ep.episode_number && ep.episode_number <= end
+    }) {
+        changed = true;
+        if ep.assignment_state == EpisodeAssignmentState::Skipped {
+            ep.target_state = EpisodeTargetState::Target;
+            ep.assignment_state = EpisodeAssignmentState::Released;
+            ep.link_state = "idle".to_string();
+            ep.updated_at = now;
+        }
+    }
+    if !changed {
+        return Err("episode range not found".to_string());
+    }
+    recalculate_search_cursor(tv);
+    Ok(())
+}
+
+fn tv_episode_mut(
+    tv: &mut TvSubscriptionState,
+    season: u32,
+    episode: u32,
+) -> Result<&mut TvEpisodeRecord, String> {
+    tv.episodes
+        .iter_mut()
+        .find(|ep| ep.season_number == season && ep.episode_number == episode)
+        .ok_or_else(|| format!("episode S{season:02}E{episode:02} not found"))
+}
+
+pub fn derive_tv_parent_lifecycle(record: &mut WantedSubscriptionRecord) {
+    let Some(tv) = record.tv.as_ref() else {
+        return;
+    };
+    if !(tv.metadata_ready && tv.episode_records_initialized && tv.target_episode_set_known) {
+        record.lifecycle_state = SubscriptionLifecycleState::Meta;
+        record.status = derive_legacy_status(record);
+        return;
+    }
+    record.lifecycle_state = if tv_is_complete(tv) {
+        SubscriptionLifecycleState::Completed
+    } else if tv_has_linkable_or_linking_work(tv) {
+        SubscriptionLifecycleState::Linking
+    } else if tv_has_active_downloads(tv) {
+        SubscriptionLifecycleState::Downloading
+    } else if tv_has_uncovered_or_waiting_cursor(tv) {
+        SubscriptionLifecycleState::Searching
+    } else {
+        SubscriptionLifecycleState::Meta
+    };
+    record.status = derive_legacy_status(record);
+}
+
+pub fn tv_is_complete(tv: &TvSubscriptionState) -> bool {
+    let cursor_done = tv.search_cursor_episode.unwrap_or(1) > tv.episode_total
+        || tv.episodes.iter().all(|ep| {
+            matches!(
+                ep.assignment_state,
+                EpisodeAssignmentState::Completed | EpisodeAssignmentState::Skipped
+            )
+        });
+    cursor_done
+        && !tv_has_active_downloads(tv)
+        && !tv_has_linkable_or_linking_work(tv)
+        && tv.episodes.iter().all(|ep| {
+            matches!(
+                ep.assignment_state,
+                EpisodeAssignmentState::Completed | EpisodeAssignmentState::Skipped
+            )
+        })
+}
+
+pub fn tv_has_linkable_or_linking_work(tv: &TvSubscriptionState) -> bool {
+    tv.download_tasks.iter().any(|task| {
+        matches!(
+            task.state,
+            DownloadTaskState::Downloaded | DownloadTaskState::Linking
+        )
+    }) || tv.episodes.iter().any(|ep| {
+        !matches!(
+            ep.assignment_state,
+            EpisodeAssignmentState::Completed | EpisodeAssignmentState::Skipped
+        ) && (ep.download_state == "downloaded" || ep.link_state == "linking")
+    })
+}
+
+pub fn tv_has_active_downloads(tv: &TvSubscriptionState) -> bool {
+    tv.download_tasks.iter().any(|task| {
+        matches!(
+            task.state,
+            DownloadTaskState::Pushed | DownloadTaskState::Downloading
+        )
+    }) || tv.episodes.iter().any(|ep| {
+        ep.assignment_state == EpisodeAssignmentState::Active
+            && matches!(ep.download_state.as_str(), "pushed" | "downloading")
+    })
+}
+
+pub fn tv_has_uncovered_or_waiting_cursor(tv: &TvSubscriptionState) -> bool {
+    tv.search_cursor_episode
+        .is_some_and(|cursor| cursor <= tv.episode_total)
+        || tv.episodes.iter().any(|ep| {
+            ep.target_state == EpisodeTargetState::Target
+                && matches!(
+                    ep.assignment_state,
+                    EpisodeAssignmentState::None | EpisodeAssignmentState::Released
+                )
+        })
+}
+
+pub fn select_due_operation(
+    record: &WantedSubscriptionRecord,
+    now: u64,
+) -> Option<SubscriptionDueOperation> {
+    if record.lifecycle_state == SubscriptionLifecycleState::Completed {
+        return None;
+    }
+    if record
+        .attention_tags
+        .contains(&SubscriptionAttentionTag::Skipped)
+        && !record.force_eligible_once
+        && record.tv.as_ref().is_none_or(|tv| !tv_lane_forced(tv))
+    {
+        return None;
+    }
+
+    match record.media_kind {
+        SubscriptionMediaKind::Tv => {
+            let Some(tv) = record.tv.as_ref() else {
+                return record_due(record, now).then_some(SubscriptionDueOperation::TvMeta);
+            };
+            if !(tv.metadata_ready && tv.episode_records_initialized && tv.target_episode_set_known)
+            {
+                return record_due(record, now).then_some(SubscriptionDueOperation::TvMeta);
+            }
+            select_due_tv_lane(record, now).map(SubscriptionDueOperation::TvLane)
+        }
+        SubscriptionMediaKind::Movie => {
+            if !record_due(record, now) {
+                return None;
+            }
+            match record.lifecycle_state {
+                SubscriptionLifecycleState::Queued | SubscriptionLifecycleState::Meta => {
+                    Some(SubscriptionDueOperation::MovieMeta)
+                }
+                SubscriptionLifecycleState::Searching => {
+                    Some(SubscriptionDueOperation::MovieSearch)
+                }
+                SubscriptionLifecycleState::Downloading => {
+                    Some(SubscriptionDueOperation::MovieProgress)
+                }
+                SubscriptionLifecycleState::Linking => Some(SubscriptionDueOperation::MovieLink),
+                SubscriptionLifecycleState::Completed => None,
+            }
+        }
+    }
+}
+
+pub fn select_due_tv_lane(record: &WantedSubscriptionRecord, now: u64) -> Option<TvLaneKind> {
+    let tv = record.tv.as_ref()?;
+    if lane_due(&tv.lanes.link, now) {
+        return Some(TvLaneKind::Link);
+    }
+    if lane_due(&tv.lanes.progress, now) {
+        return Some(TvLaneKind::Progress);
+    }
+    if tv
+        .search_cursor_episode
+        .is_some_and(|cursor| cursor <= tv.episode_total)
+        && lane_due(&tv.lanes.search, now)
+    {
+        return Some(TvLaneKind::Search);
+    }
+    None
+}
+
+pub fn apply_movie_operation_outcome(
+    record: &mut WantedSubscriptionRecord,
+    outcome: MovieOperationOutcome,
+    cfg: &SubscriptionWatcherConfig,
+    now: u64,
+) {
+    match outcome {
+        MovieOperationOutcome::Advanced(state) => {
+            record.lifecycle_state = state;
+            record.next_attempt_at = Some(now);
+            record.force_eligible_once = false;
+        }
+        MovieOperationOutcome::StillDownloading => {
+            record.lifecycle_state = SubscriptionLifecycleState::Downloading;
+            record.next_attempt_at = Some(now + cfg.progress_interval_secs);
+        }
+        MovieOperationOutcome::Waiting => {
+            record.next_attempt_at = Some(now + cfg.search_interval_secs);
+        }
+    }
+    record.status = derive_legacy_status(record);
+}
+
+fn record_due(record: &WantedSubscriptionRecord, now: u64) -> bool {
+    record.force_eligible_once || record.next_attempt_at.is_some_and(|due| due <= now)
+}
+
+fn lane_due(lane: &OperationLaneState, now: u64) -> bool {
+    lane.force_eligible_once || lane.next_attempt_at.is_some_and(|due| due <= now)
+}
+
+fn tv_lane_forced(tv: &TvSubscriptionState) -> bool {
+    tv.lanes.search.force_eligible_once
+        || tv.lanes.progress.force_eligible_once
+        || tv.lanes.link.force_eligible_once
 }
 
 impl WantedSubscriptionState {
@@ -1369,6 +2628,7 @@ fn record_from_item_with_detail(
     now: u64,
 ) -> WantedSubscriptionRecord {
     let tags = normalized_tags(&item.tags);
+    let media_kind = SubscriptionMediaKind::from_tags(&tags);
     let douban_date = normalized_douban_date(&item.date);
     let mut record = WantedSubscriptionRecord {
         subject_id: item.subject_id.trim().to_string(),
@@ -1394,6 +2654,14 @@ fn record_from_item_with_detail(
         douban_date,
         douban_return_order: Some(return_order.min(u32::MAX as usize) as u32),
         status: WantedSubscriptionStatus::Unprocessed,
+        lifecycle_state: SubscriptionLifecycleState::Queued,
+        execution_state: SubscriptionExecutionState::Idle,
+        attention_tags: Vec::new(),
+        failure: None,
+        next_attempt_at: Some(now),
+        force_eligible_once: false,
+        media_kind,
+        tv: None,
         retry_count: 0,
         max_retries,
         last_error: None,
@@ -1609,6 +2877,18 @@ fn set_stage(
     record.stage_message = Some(message.to_string());
     record.stage_updated_at = Some(now.max(record.updated_at).max(record.created_at));
     record.next_action = next_action.map(str::to_string);
+    sync_lifecycle_from_legacy_stage(record, now);
+}
+
+fn sync_lifecycle_from_legacy_stage(record: &mut WantedSubscriptionRecord, now: u64) {
+    let (state, tags) = infer_lifecycle_from_legacy(record);
+    record.lifecycle_state = state;
+    record.execution_state = SubscriptionExecutionState::Idle;
+    merge_attention_tags(record, tags);
+    record.next_attempt_at.get_or_insert(now);
+    if record.failure.is_none() {
+        record.failure = failure_from_legacy_error(record, now);
+    }
 }
 
 fn apply_status_stage(record: &mut WantedSubscriptionRecord, now: u64) {
@@ -1932,6 +3212,625 @@ mod tests {
 
         assert_eq!(refreshed.poster_url, "/api/douban/image?url=poster-two");
         assert_eq!(refreshed.cover_url, "/api/douban/image?url=cover-two");
+    }
+
+    #[test]
+    fn lifecycle_statuses_exclude_execution_and_attention_states() {
+        let labels = SubscriptionLifecycleState::ALL
+            .iter()
+            .map(|state| state.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "queued",
+                "meta",
+                "searching",
+                "downloading",
+                "linking",
+                "completed"
+            ]
+        );
+        assert!(!labels.contains(&"failed"));
+        assert!(!labels.contains(&"skipped"));
+        assert!(!labels.contains(&"running"));
+        assert!(!labels.contains(&"idle"));
+    }
+
+    #[test]
+    fn record_defaults_to_new_queued_idle_model() {
+        let item = item("subject-1", "测试电影", "2026 / 中国大陆 / 电影", &["电影"]);
+        let record = record_from_item(&item, 0, 3, 1_000);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Queued);
+        assert_eq!(record.execution_state, SubscriptionExecutionState::Idle);
+        assert!(record.attention_tags.is_empty());
+        assert!(record.failure.is_none());
+        assert_eq!(record.next_attempt_at, Some(1_000));
+    }
+
+    fn bare_record_with_status(
+        status: WantedSubscriptionStatus,
+        stage: Option<&str>,
+    ) -> WantedSubscriptionRecord {
+        let mut record = record_from_item(
+            &item("legacy", "旧订阅", "2026 / 中国大陆 / 电影", &["电影"]),
+            0,
+            3,
+            1_000,
+        );
+        record.status = status;
+        record.processing_stage = stage.map(str::to_string);
+        record.lifecycle_state = SubscriptionLifecycleState::Queued;
+        record.attention_tags.clear();
+        record
+    }
+
+    fn test_push(status: &str, error: Option<&str>) -> TorrentPushRecord {
+        TorrentPushRecord {
+            subscription_id: "legacy".to_string(),
+            torrent_id: "torrent-1".to_string(),
+            torrent_title: "Legacy.Seed".to_string(),
+            qb_server: "default".to_string(),
+            qb_server_id: "default".to_string(),
+            qb_category: "cat".to_string(),
+            qb_save_dir_name: "save".to_string(),
+            qb_identifier: String::new(),
+            torrent_download_url: None,
+            mteam_torrent_url: None,
+            pushed_at: Some(1_000),
+            status: status.to_string(),
+            error: error.map(str::to_string),
+            qb_hash: None,
+            qb_name: None,
+            checked_at: None,
+            completed_at: None,
+            download_progress: None,
+            download_state: None,
+            total_size: None,
+            completed_file_count: None,
+            total_file_count: None,
+            files: Vec::new(),
+            episodes: Vec::new(),
+            source_path: None,
+            target_dir: None,
+            linked_files: Vec::new(),
+        }
+    }
+
+    fn test_completion(status: &str) -> HardlinkCompletionRecord {
+        HardlinkCompletionRecord {
+            status: status.to_string(),
+            checked_at: 1_000,
+            completed_at: None,
+            qb_hash: None,
+            qb_name: None,
+            source_path: None,
+            target_dir: None,
+            linked_files: Vec::new(),
+            episodes: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn bare_tv_record(
+        subject_id: &str,
+        season: u32,
+        episode_total: u32,
+    ) -> WantedSubscriptionRecord {
+        let mut record = record_from_item(
+            &item(
+                subject_id,
+                "测试剧集",
+                "2026 / 中国大陆 / 剧情",
+                &["电视剧"],
+            ),
+            0,
+            3,
+            1_000,
+        );
+        record.media_kind = SubscriptionMediaKind::Tv;
+        record.lifecycle_state = SubscriptionLifecycleState::Meta;
+        record.tv = Some(test_tv_state(season, episode_total));
+        record
+    }
+
+    fn test_tv_state(season: u32, episode_total: u32) -> TvSubscriptionState {
+        let mut record = record_from_item(
+            &item("tv", "测试剧集", "2026 / 中国大陆 / 剧情", &["电视剧"]),
+            0,
+            3,
+            1_000,
+        );
+        initialize_tv_targets(
+            &mut record,
+            TvTargetRange::episodes(season, 1, episode_total),
+            1_000,
+        )
+        .unwrap();
+        record.tv.unwrap()
+    }
+
+    fn episode(tv: &TvSubscriptionState, episode: u32) -> &TvEpisodeRecord {
+        tv.episodes
+            .iter()
+            .find(|ep| ep.episode_number == episode)
+            .expect("episode exists")
+    }
+
+    fn test_failure(operation: &str, retry_blocked: bool) -> SubscriptionFailure {
+        SubscriptionFailure {
+            scope: FailureScope::Episode,
+            owner_id: "owner".to_string(),
+            operation: operation.to_string(),
+            error_type: "test".to_string(),
+            message: "test failure".to_string(),
+            retry_count: if retry_blocked { 3 } else { 1 },
+            max_retries: 3,
+            failed_at: 1_000,
+            next_retry_at: None,
+            retry_blocked,
+        }
+    }
+
+    fn test_task(
+        task_id: &str,
+        state: DownloadTaskState,
+        start: u32,
+        end: u32,
+    ) -> DownloadTaskRecord {
+        DownloadTaskRecord {
+            task_id: task_id.to_string(),
+            torrent_id: task_id.to_string(),
+            torrent_title: task_id.to_string(),
+            qb_server_id: "default".to_string(),
+            qb_category: "cat".to_string(),
+            qb_save_dir_name: "save".to_string(),
+            qb_hash: None,
+            qb_name: None,
+            state,
+            tentative_coverage: vec![CoverageRange::range(1, start, end)],
+            verified_coverage: Vec::new(),
+            progress: None,
+            pushed_at: 1_000,
+            checked_at: None,
+            completed_at: None,
+            failure: None,
+        }
+    }
+
+    fn tv_record_with_linkable_e01_and_uncovered_e05() -> WantedSubscriptionRecord {
+        let mut record = bare_tv_record("subject-tv", 1, 8);
+        let tv = record.tv.as_mut().unwrap();
+        bind_task_to_episodes(
+            tv,
+            "task-e01",
+            CoverageRange::single(1, 1),
+            CoverageTrust::Verified,
+            1_000,
+        )
+        .unwrap();
+        episode_mut(tv, 1).download_state = "downloaded".to_string();
+        tv.download_tasks
+            .push(test_task("task-e01", DownloadTaskState::Downloaded, 1, 1));
+        for ep in 2..=4 {
+            let ep = episode_mut(tv, ep);
+            ep.assignment_state = EpisodeAssignmentState::Completed;
+            ep.target_state = EpisodeTargetState::Completed;
+            ep.coverage_state = EpisodeCoverageState::VerifiedCovered;
+        }
+        tv.search_cursor_episode = Some(5);
+        record
+    }
+
+    fn tv_record_with_cursor_past_end_but_active_download() -> WantedSubscriptionRecord {
+        let mut record = bare_tv_record("subject-tv", 1, 3);
+        let tv = record.tv.as_mut().unwrap();
+        bind_task_to_episodes(
+            tv,
+            "task-e01-e03",
+            CoverageRange::range(1, 1, 3),
+            CoverageTrust::Tentative,
+            1_000,
+        )
+        .unwrap();
+        tv.search_cursor_episode = Some(4);
+        tv.download_tasks.push(test_task(
+            "task-e01-e03",
+            DownloadTaskState::Downloading,
+            1,
+            3,
+        ));
+        record
+    }
+
+    fn tv_record_ready_for_search(subject_id: &str) -> WantedSubscriptionRecord {
+        let mut record = bare_tv_record(subject_id, 1, 8);
+        record.lifecycle_state = SubscriptionLifecycleState::Searching;
+        record.status = derive_legacy_status(&record);
+        record
+    }
+
+    fn test_watcher_cfg() -> SubscriptionWatcherConfig {
+        SubscriptionWatcherConfig::default()
+    }
+
+    fn movie_record_in_state(
+        lifecycle_state: SubscriptionLifecycleState,
+        next_attempt_at: u64,
+    ) -> WantedSubscriptionRecord {
+        let mut record = record_from_item(
+            &item("movie", "测试电影", "2026 / 中国大陆 / 电影", &["电影"]),
+            0,
+            3,
+            1_000,
+        );
+        record.lifecycle_state = lifecycle_state;
+        record.status = derive_legacy_status(&record);
+        record.next_attempt_at = Some(next_attempt_at);
+        record
+    }
+
+    fn tv_record_all_lanes_due(now: u64) -> WantedSubscriptionRecord {
+        let mut record = tv_record_ready_for_search("subject-tv");
+        let tv = record.tv.as_mut().unwrap();
+        tv.lanes.link.next_attempt_at = Some(now);
+        tv.lanes.progress.next_attempt_at = Some(now);
+        tv.lanes.search.next_attempt_at = Some(now);
+        record
+    }
+
+    fn complete_all_tv_episodes(tv: &mut TvSubscriptionState, now: u64) {
+        for task in &mut tv.download_tasks {
+            task.state = DownloadTaskState::Completed;
+            task.completed_at = Some(now);
+        }
+        for ep in &mut tv.episodes {
+            ep.target_state = EpisodeTargetState::Completed;
+            ep.assignment_state = EpisodeAssignmentState::Completed;
+            ep.coverage_state = EpisodeCoverageState::VerifiedCovered;
+            ep.download_state = "downloaded".to_string();
+            ep.link_state = "linked".to_string();
+            ep.updated_at = now;
+        }
+        tv.search_cursor_episode = Some(tv.episode_total + 1);
+    }
+
+    fn episode_mut(tv: &mut TvSubscriptionState, episode: u32) -> &mut TvEpisodeRecord {
+        tv.episodes
+            .iter_mut()
+            .find(|ep| ep.episode_number == episode)
+            .expect("episode exists")
+    }
+
+    fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    struct IndexedRecordRow {
+        lifecycle_state: String,
+        media_kind: String,
+        search_next_attempt_at: Option<i64>,
+        record_json: String,
+    }
+
+    fn indexed_record_row(
+        conn: &Connection,
+        account_key: &str,
+        subject_id: &str,
+    ) -> IndexedRecordRow {
+        conn.query_row(
+            "SELECT lifecycle_state, media_kind, search_next_attempt_at, record_json
+                FROM wanted_subscription_records
+                WHERE account_key = ?1 AND subject_id = ?2",
+            params![account_key, subject_id],
+            |row| {
+                Ok(IndexedRecordRow {
+                    lifecycle_state: row.get(0)?,
+                    media_kind: row.get(1)?,
+                    search_next_attempt_at: row.get(2)?,
+                    record_json: row.get(3)?,
+                })
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_statuses_map_to_new_lifecycle_and_tags() {
+        let cases = vec![
+            (
+                WantedSubscriptionStatus::Unprocessed,
+                None,
+                SubscriptionLifecycleState::Queued,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Matching,
+                None,
+                SubscriptionLifecycleState::Searching,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Processing,
+                None,
+                SubscriptionLifecycleState::Searching,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Pushed,
+                None,
+                SubscriptionLifecycleState::Downloading,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Downloading,
+                None,
+                SubscriptionLifecycleState::Downloading,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Completed,
+                None,
+                SubscriptionLifecycleState::Linking,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Linked,
+                None,
+                SubscriptionLifecycleState::Completed,
+                vec![],
+            ),
+            (
+                WantedSubscriptionStatus::Skipped,
+                None,
+                SubscriptionLifecycleState::Queued,
+                vec![SubscriptionAttentionTag::Skipped],
+            ),
+        ];
+
+        for (old_status, stage, expected_state, expected_tags) in cases {
+            let mut record = bare_record_with_status(old_status, stage);
+            migrate_legacy_status_fields(&mut record, 2_000);
+            assert_eq!(record.lifecycle_state, expected_state);
+            assert_eq!(record.attention_tags, expected_tags);
+        }
+    }
+
+    #[test]
+    fn legacy_failed_records_follow_prd_precedence() {
+        let mut completion_failed = bare_record_with_status(WantedSubscriptionStatus::Failed, None);
+        completion_failed.last_completion = Some(test_completion("failed"));
+        migrate_legacy_status_fields(&mut completion_failed, 2_000);
+        assert_eq!(
+            completion_failed.lifecycle_state,
+            SubscriptionLifecycleState::Linking
+        );
+        assert!(completion_failed
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+
+        let mut no_match =
+            bare_record_with_status(WantedSubscriptionStatus::Failed, Some("no_match"));
+        no_match.last_push = Some(test_push("failed", Some("没有匹配规则命中")));
+        migrate_legacy_status_fields(&mut no_match, 2_000);
+        assert_eq!(
+            no_match.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert!(no_match
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::WaitingRelease));
+    }
+
+    #[test]
+    fn tv_meta_initializes_target_episodes_and_cursor() {
+        let mut record = bare_tv_record("subject-tv", 1, 8);
+        initialize_tv_targets(&mut record, TvTargetRange::episodes(1, 1, 8), 1_000).unwrap();
+
+        assert_eq!(record.tv.as_ref().unwrap().episode_total, 8);
+        assert_eq!(record.tv.as_ref().unwrap().search_cursor_episode, Some(1));
+        assert_eq!(record.tv.as_ref().unwrap().episodes.len(), 8);
+        assert_eq!(
+            record.tv.as_ref().unwrap().lanes.search.next_attempt_at,
+            Some(1_000)
+        );
+        assert_eq!(
+            record.tv.as_ref().unwrap().lanes.progress.next_attempt_at,
+            Some(1_000)
+        );
+        assert_eq!(
+            record.tv.as_ref().unwrap().lanes.link.next_attempt_at,
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn cursor_advances_over_active_completed_blocked_and_skipped_assignments() {
+        let mut tv = test_tv_state(1, 8);
+        bind_task_to_episodes(
+            &mut tv,
+            "task-e01",
+            CoverageRange::single(1, 1),
+            CoverageTrust::Tentative,
+            1_000,
+        )
+        .unwrap();
+        block_episode_assignment(&mut tv, 1, 3, test_failure("link", true)).unwrap();
+        skip_episode_range(&mut tv, 1, 4, 4, "user skipped", 1_000).unwrap();
+
+        recalculate_search_cursor(&mut tv);
+
+        assert_eq!(tv.search_cursor_episode, Some(2));
+    }
+
+    #[test]
+    fn verified_coverage_loss_releases_unverified_episodes_and_rewinds_cursor() {
+        let mut tv = test_tv_state(1, 8);
+        bind_task_to_episodes(
+            &mut tv,
+            "task-e02-e04",
+            CoverageRange::range(1, 2, 4),
+            CoverageTrust::Tentative,
+            1_000,
+        )
+        .unwrap();
+        apply_verified_coverage(&mut tv, "task-e02-e04", CoverageRange::single(1, 2), 2_000)
+            .unwrap();
+
+        assert_eq!(
+            episode(&tv, 3).assignment_state,
+            EpisodeAssignmentState::Released
+        );
+        assert_eq!(
+            episode(&tv, 4).assignment_state,
+            EpisodeAssignmentState::Released
+        );
+        assert_eq!(tv.search_cursor_episode, Some(3));
+    }
+
+    #[test]
+    fn tv_parent_state_stays_meta_until_metadata_guards_are_ready() {
+        let mut record = bare_tv_record("subject-tv", 1, 8);
+        record.lifecycle_state = SubscriptionLifecycleState::Meta;
+        record.tv = Some(TvSubscriptionState {
+            metadata_ready: false,
+            episode_records_initialized: true,
+            target_episode_set_known: true,
+            ..test_tv_state(1, 8)
+        });
+
+        derive_tv_parent_lifecycle(&mut record);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Meta);
+    }
+
+    #[test]
+    fn tv_linking_state_still_allows_search_work_to_be_due() {
+        let mut record = tv_record_with_linkable_e01_and_uncovered_e05();
+        derive_tv_parent_lifecycle(&mut record);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert_eq!(record.tv.as_ref().unwrap().search_cursor_episode, Some(5));
+    }
+
+    #[test]
+    fn tv_completed_requires_all_unskipped_episodes_linked_and_no_active_work() {
+        let mut record = tv_record_with_cursor_past_end_but_active_download();
+        derive_tv_parent_lifecycle(&mut record);
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+
+        complete_all_tv_episodes(record.tv.as_mut().unwrap(), 2_000);
+        derive_tv_parent_lifecycle(&mut record);
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Completed
+        );
+    }
+
+    #[test]
+    fn schema_has_parent_index_fields_for_eligible_scans() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let columns = table_columns(&conn, "wanted_subscription_records");
+
+        for name in [
+            "lifecycle_state",
+            "execution_state",
+            "attention_tags_json",
+            "media_kind",
+            "next_attempt_at",
+            "search_next_attempt_at",
+            "progress_next_attempt_at",
+            "link_next_attempt_at",
+            "retry_blocked_count",
+        ] {
+            assert!(columns.contains(&name.to_string()), "missing column {name}");
+        }
+    }
+
+    #[test]
+    fn save_state_rebuilds_record_indexes_without_deleting_json_blob() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut state = WantedSubscriptionState::new("acct", 1_000);
+        state.records.insert(
+            "subject-tv".into(),
+            tv_record_ready_for_search("subject-tv"),
+        );
+
+        save_state_to_db(&mut conn, "acct", &state).unwrap();
+
+        let row = indexed_record_row(&conn, "acct", "subject-tv");
+        assert_eq!(row.lifecycle_state, "searching");
+        assert_eq!(row.media_kind, "tv");
+        assert!(row.search_next_attempt_at.is_some());
+        assert!(!row.record_json.is_empty());
+    }
+
+    #[test]
+    fn movie_successful_transition_is_immediately_due_for_next_state() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Queued, 1_000);
+
+        apply_movie_operation_outcome(
+            &mut record,
+            MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Meta),
+            &cfg,
+            2_000,
+        );
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Meta);
+        assert_eq!(record.next_attempt_at, Some(2_000));
+    }
+
+    #[test]
+    fn unchanged_movie_state_waits_for_state_interval() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Downloading, 1_000);
+
+        apply_movie_operation_outcome(
+            &mut record,
+            MovieOperationOutcome::StillDownloading,
+            &cfg,
+            2_000,
+        );
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(
+            record.next_attempt_at,
+            Some(2_000 + cfg.progress_interval_secs)
+        );
+    }
+
+    #[test]
+    fn tv_due_lanes_choose_link_then_progress_then_search_without_updating_others() {
+        let record = tv_record_all_lanes_due(1_000);
+
+        let selected = select_due_tv_lane(&record, 1_000).unwrap();
+
+        assert_eq!(selected, TvLaneKind::Link);
+        assert_eq!(
+            record.tv.as_ref().unwrap().lanes.progress.next_attempt_at,
+            Some(1_000)
+        );
+        assert_eq!(
+            record.tv.as_ref().unwrap().lanes.search.next_attempt_at,
+            Some(1_000)
+        );
     }
 
     #[test]
@@ -2447,7 +4346,8 @@ mod tests {
         let store = WantedSubscriptionStore::new(root.clone());
         let snapshot = store.snapshot("acct", 500).await.unwrap();
         let rec = snapshot.records.get("42").unwrap();
-        assert_eq!(rec.status, WantedSubscriptionStatus::Pushed);
+        assert_eq!(rec.status, WantedSubscriptionStatus::Downloading);
+        assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Downloading);
         assert_eq!(rec.last_push.as_ref().unwrap().torrent_title, "Old.Seed");
         assert!(rec.created_at >= 500);
         assert!(store.db_path().exists());

@@ -36,6 +36,10 @@ enabled = false
 poll_interval_secs = 3600
 library_limit = 200
 max_retries = 3
+search_interval_secs = 1800
+progress_interval_secs = 300
+link_retry_interval_secs = 900
+system_retry_interval_secs = 600
 bootstrap_existing_as_skipped = true
 
 # 种子自动选择规则。priority 数字越大越先尝试；高优先级无匹配时才尝试低优先级。
