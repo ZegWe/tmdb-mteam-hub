@@ -1724,7 +1724,6 @@ fn parse_operation_log_row(row: &Row<'_>) -> rusqlite::Result<OperationLogEntry>
     })
 }
 
-#[cfg(test)]
 fn status_label(status: WantedSubscriptionStatus) -> &'static str {
     match status {
         WantedSubscriptionStatus::Unprocessed => "unprocessed",
