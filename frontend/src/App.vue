@@ -95,11 +95,6 @@
         <header class="top">
           <h1>影视检索</h1>
           <p class="sub">TMDB / 豆瓣资料与 M-Team 种子</p>
-          <div class="actions">
-            <button type="button" class="btn btn-secondary" @click="loadDoubanLibrary(true)">
-              豆瓣列表
-            </button>
-          </div>
         </header>
 
         <section class="search-bar">
@@ -139,29 +134,8 @@
           </button>
         </section>
 
-        <section
-          v-if="currentView === 'douban-library'"
-          id="library-bar"
-          class="library-bar"
-          aria-live="polite"
-        >
-          <div>
-            <h2>豆瓣列表</h2>
-            <p class="hint">{{ libraryCacheStatus }}</p>
-          </div>
-          <button
-            type="button"
-            class="btn btn-secondary"
-            :disabled="searchLoading"
-            @click="loadDoubanLibrary(true)"
-          >
-            刷新缓存
-          </button>
-        </section>
-
         <main
-          class="layout"
-          :class="{ 'search-layout': currentView === 'search' }"
+          class="layout search-layout"
           id="main-layout"
           aria-live="polite"
           :aria-busy="searchLoading ? 'true' : 'false'"
@@ -172,21 +146,14 @@
           </div>
           <section id="movies-section">
             <h2 id="movies-title">
-              {{
-                currentView === "douban-library"
-                  ? "想看"
-                  : searchSource === "douban"
-                    ? "豆瓣影视"
-                    : "电影"
-              }}
+              {{ searchSource === "douban" ? "豆瓣影视" : "电影" }}
             </h2>
             <div class="grid">
               <p v-if="!movies.length" class="empty-hint">无结果</p>
               <article
                 v-for="item in movies"
                 :key="cardKey(item, 'movie')"
-                class="card media-card bg-base-100 border border-base-300 shadow-sm"
-                :class="{ 'media-card-search': currentView === 'search' }"
+                class="card media-card media-card-search bg-base-100 border border-base-300 shadow-sm"
                 @click="openCardDetail(item, 'movie')"
               >
                 <img :src="itemImageUrl(item) || transparentPixel" alt="" loading="lazy" />
@@ -197,18 +164,14 @@
               </article>
             </div>
           </section>
-          <section
-            v-show="searchSource !== 'douban' || currentView === 'douban-library'"
-            id="tv-section"
-          >
-            <h2 id="tv-title">{{ currentView === "douban-library" ? "看过" : "剧集" }}</h2>
+          <section v-show="searchSource !== 'douban'" id="tv-section">
+            <h2 id="tv-title">剧集</h2>
             <div class="grid">
               <p v-if="!tv.length" class="empty-hint">无结果</p>
               <article
                 v-for="item in tv"
                 :key="cardKey(item, 'tv')"
-                class="card media-card bg-base-100 border border-base-300 shadow-sm"
-                :class="{ 'media-card-search': currentView === 'search' }"
+                class="card media-card media-card-search bg-base-100 border border-base-300 shadow-sm"
                 @click="openCardDetail(item, 'tv')"
               >
                 <img :src="itemImageUrl(item) || transparentPixel" alt="" loading="lazy" />
@@ -262,59 +225,17 @@
             class="subscription-card card bg-base-100 border border-base-300 shadow-sm"
             @click="openSubscriptionDetail(record)"
           >
-            <div class="subscription-card-head">
-              <h2>{{ record.title || record.subject_id }}</h2>
+            <div class="subscription-card-cover">
+              <img :src="itemImageUrl(record) || transparentPixel" alt="" loading="lazy" />
               <span
                 class="subscription-status badge"
                 :class="`subscription-status-${subscriptionDisplayStatus(record).key}`"
                 >{{ subscriptionDisplayStatus(record).text }}</span
               >
             </div>
-            <div class="subscription-card-meta">
-              <span v-for="meta in subscriptionCardMeta(record)" :key="meta">{{ meta }}</span>
-              <span v-if="record.last_push?.episodes?.length" class="subscription-episode-count"
-                >{{ record.last_push.episodes.length }} 集</span
-              >
-            </div>
-            <div class="subscription-stage-track" :aria-label="subscriptionStageTrackLabel(record)">
-              <span
-                v-for="node in subscriptionProgressNodes(record)"
-                :key="node.key"
-                class="subscription-stage-node"
-                :class="`subscription-stage-node-${node.state}`"
-                :title="node.label"
-              >
-                <span class="subscription-stage-dot"></span>
-                <span class="subscription-stage-label">{{ node.label }}</span>
-              </span>
-            </div>
-            <div class="subscription-card-notices">
-              <p
-                v-for="notice in subscriptionCardNotices(record)"
-                :key="notice.key"
-                class="subscription-card-notice"
-                :class="`subscription-card-notice-${notice.kind}`"
-              >
-                {{ notice.text }}
-              </p>
-            </div>
-            <div class="subscription-card-actions" @click.stop>
-              <button
-                type="button"
-                class="btn btn-xs btn-secondary"
-                :disabled="subscriptionActionLoading || !canRetrySubscription(record)"
-                @click="retrySubscriptionCurrent(record.subject_id)"
-              >
-                重试当前节点
-              </button>
-              <button
-                type="button"
-                class="btn btn-xs btn-ghost"
-                :disabled="subscriptionActionLoading || !canRerunSubscription(record)"
-                @click="rerunSubscription(record.subject_id)"
-              >
-                重跑任务
-              </button>
+            <div class="meta subscription-card-meta">
+              <div class="title">{{ record.title || record.subject_id }}</div>
+              <div class="subtle">{{ subscriptionCardSubtitle(record) }}</div>
             </div>
           </article>
         </section>
@@ -1223,12 +1144,10 @@ applyThemeScheme(resolvedThemeScheme.value);
 
 const searchSource = ref("tmdb");
 const query = ref("");
-const currentView = ref("search");
 const searchLoading = ref(false);
 const searchLoadingText = ref("正在搜索 TMDB…");
 const movies = ref([]);
 const tv = ref([]);
-const libraryCacheStatus = ref("");
 
 const detailOpen = ref(false);
 const detailLoading = ref(false);
@@ -1437,13 +1356,10 @@ function cardKey(item, fallback) {
 function cardSubtitle(item) {
   if ((item.source || item.media_type) === "douban") {
     const ratingValue = item.rating?.value ?? item.vote_average;
-    const bits =
-      currentView.value === "douban-library"
-        ? [item.date || item.abstract_text || item.abstract || item.abstract_2 || ""]
-        : [
-            item.year || item.abstract_2 || item.date || "",
-            ratingValue != null ? `★ ${Number(ratingValue).toFixed(1)}` : "",
-          ];
+    const bits = [
+      item.year || item.abstract_2 || item.date || "",
+      ratingValue != null ? `★ ${Number(ratingValue).toFixed(1)}` : "",
+    ];
     return bits.filter(Boolean).join(" · ");
   }
   const date = item.release_date || item.first_air_date || "";
@@ -1464,7 +1380,6 @@ function setSearchLoading(on, text = "正在搜索…") {
 
 async function runSearch() {
   clearError();
-  currentView.value = "search";
   const q = query.value.trim();
   if (!q) {
     showError("请输入搜索词");
@@ -1483,46 +1398,6 @@ async function runSearch() {
     }
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
-  } finally {
-    setSearchLoading(false);
-  }
-}
-
-function setLibraryCacheStatus(data) {
-  const wishCount = Array.isArray(data?.wish?.items) ? data.wish.items.length : 0;
-  const collectCount = Array.isArray(data?.collect?.items) ? data.collect.items.length : 0;
-  const source = data?.cached ? "本地缓存" : "刚刚刷新";
-  const fetched = formatUnixSeconds(data?.fetched_at);
-  const ttl = Number(data?.ttl_seconds);
-  const ttlText = Number.isFinite(ttl) && ttl > 0 ? `TTL ${Math.round(ttl / 3600)} 小时` : "";
-  libraryCacheStatus.value = [
-    source,
-    fetched ? `抓取于 ${fetched}` : "",
-    `想看 ${wishCount}`,
-    `看过 ${collectCount}`,
-    ttlText,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-async function loadDoubanLibrary(forceRefresh = false) {
-  clearError();
-  currentView.value = "douban-library";
-  setSearchLoading(true, forceRefresh ? "正在刷新豆瓣列表…" : "正在加载豆瓣列表…");
-  try {
-    const params = new URLSearchParams({ limit: "200" });
-    if (forceRefresh) params.set("force_refresh", "true");
-    const data = await api(`/api/douban/library?${params}`);
-    movies.value = data?.wish?.items || [];
-    tv.value = data?.collect?.items || [];
-    setLibraryCacheStatus(data);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    showError(msg);
-    movies.value = [];
-    tv.value = [];
-    libraryCacheStatus.value = "";
   } finally {
     setSearchLoading(false);
   }
@@ -1932,7 +1807,6 @@ async function saveDoubanInterest() {
     doubanMark.status = doubanMark.interest === "wish" ? "已标记想看" : "已标记看过";
     rememberDoubanTags(tags);
     showToast(doubanMark.status, "ok");
-    if (currentView.value === "douban-library") loadDoubanLibrary(true).catch(() => {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     doubanMark.status = msg;
@@ -2788,6 +2662,16 @@ function subscriptionCardMeta(record) {
   ].filter(Boolean);
 }
 
+function subscriptionCardSubtitle(record) {
+  return (
+    String(record?.date_published || "").trim() ||
+    String(record?.release_year || "").trim() ||
+    subscriptionStageLabel(record) ||
+    record?.subject_id ||
+    ""
+  );
+}
+
 function subscriptionStageLabel(record) {
   const stage = normalizedStatus(record?.processing_stage);
   return SUB_STAGE_LABELS[stage] || stage || "";
@@ -2909,6 +2793,17 @@ function subscriptionDetailRows(record) {
   return [
     row("豆瓣 ID", record.subject_id),
     row("分类文本", record.category_text),
+    row("上映日期", record.date_published),
+    row("评分", subscriptionRatingText(record)),
+    row("原名", record.original_title),
+    row("又名", joinDetailList(record.aka)),
+    row("类型", joinDetailList(record.genres)),
+    row("国家/地区", joinDetailList(record.countries)),
+    row("语言", joinDetailList(record.languages)),
+    row("导演", joinDetailList(record.directors)),
+    row("主演", joinDetailList(record.actors)),
+    row("片长", record.duration),
+    row("简介", record.summary),
     row("豆瓣时间", record.douban_date),
     row("上映年份", record.release_year),
     row("状态", subscriptionDisplayStatus(record).text),
@@ -2921,6 +2816,19 @@ function subscriptionDetailRows(record) {
     row("首次看到", formatUnixSeconds(record.first_seen_at)),
     row("最近更新", formatUnixSeconds(record.updated_at)),
   ].filter(Boolean);
+}
+
+function joinDetailList(value) {
+  return Array.isArray(value) ? value.filter(Boolean).join(" · ") : "";
+}
+
+function subscriptionRatingText(record) {
+  const rating = Number(record?.rating_value);
+  if (!Number.isFinite(rating)) return "";
+  const count = Number(record?.rating_count);
+  return Number.isFinite(count) && count > 0
+    ? `${rating.toFixed(1)}（${count.toLocaleString()} 人）`
+    : rating.toFixed(1);
 }
 
 function pushRows(push) {

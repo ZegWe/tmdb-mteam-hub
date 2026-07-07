@@ -432,19 +432,23 @@ pub async fn search(
     }
     let cookie = normalize_cookie_header(cookie_header);
     let count = limit.to_string();
-    let mut url = Url::parse(REXXAR_SEARCH_URL)
-        .map_err(|e| DoubanError::upstream(format!("构造豆瓣 rexxar 搜索 URL 失败: {e}")))?;
-    url.query_pairs_mut()
-        .append_pair("q", query.trim())
-        .append_pair("type", "movie")
-        .append_pair("start", "0")
-        .append_pair("count", &count);
+    let url = rexxar_search_url(query.trim(), &count)?;
     let referer = format!(
         "https://m.douban.com/search/?query={}",
         percent_encode_query_component(query.trim())
     );
     let data = fetch_rexxar_json(url, &cookie, &referer).await?;
     search_results_from_rexxar_json(&data, limit)
+}
+
+fn rexxar_search_url(query: &str, count: &str) -> Result<Url, DoubanError> {
+    let mut url = Url::parse(REXXAR_SEARCH_URL)
+        .map_err(|e| DoubanError::upstream(format!("构造豆瓣 rexxar 搜索 URL 失败: {e}")))?;
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("start", "0")
+        .append_pair("count", count);
+    Ok(url)
 }
 
 pub async fn subject_detail(
@@ -465,6 +469,16 @@ pub async fn subject_detail(
         }
     }
     Ok(detail)
+}
+
+pub async fn subject_detail_rexxar(
+    cookie_header: &str,
+    subject: &str,
+) -> Result<DoubanSubjectDetail, DoubanError> {
+    let subject_id = subject_id(subject)?;
+    let cookie = normalize_cookie_header(cookie_header);
+    let data = fetch_rexxar_subject(&subject_id, &cookie).await?;
+    subject_detail_from_rexxar_json(&subject_id, &data)
 }
 
 async fn fetch_rexxar_subject(subject_id: &str, cookie_header: &str) -> Result<Value, DoubanError> {
@@ -535,13 +549,12 @@ fn search_results_from_rexxar_json(
         .get("subjects")
         .and_then(|v| v.get("items"))
         .and_then(Value::as_array)
-        .ok_or_else(|| DoubanError::upstream("豆瓣 rexxar 搜索结果结构异常: 缺少 subjects.items"))?;
+        .ok_or_else(|| {
+            DoubanError::upstream("豆瓣 rexxar 搜索结果结构异常: 缺少 subjects.items")
+        })?;
     let mut out = Vec::new();
     for item in items {
         if value_to_string(item.get("layout")).as_deref() != Some("subject") {
-            continue;
-        }
-        if value_to_string(item.get("target_type")).as_deref() != Some("movie") {
             continue;
         }
         let Some(target) = item.get("target") else {
@@ -1355,7 +1368,9 @@ fn element_block_by_id<'a>(html: &'a str, id: &str) -> Option<&'a str> {
             return Some(&html[tag_start..end]);
         }
         let close = format!("</{name}>");
-        let end = html[tag_end..].find(&close).map(|i| tag_end + i + close.len())?;
+        let end = html[tag_end..]
+            .find(&close)
+            .map(|i| tag_end + i + close.len())?;
         return Some(&html[tag_start..end]);
     }
     None
@@ -1975,6 +1990,25 @@ mod tests {
                         "layout": "review",
                         "target_type": "review",
                         "target": { "id": "skip", "title": "跳过" }
+                    },
+                    {
+                        "layout": "subject",
+                        "target_id": "35467152",
+                        "target_type": "tv",
+                        "type_name": "电视剧",
+                        "target": {
+                            "id": "35467152",
+                            "title": "测试剧集",
+                            "year": "2024",
+                            "card_subtitle": "中国大陆 / 剧情",
+                            "cover_url": "https://qnmob3.doubanio.com/view/photo/large/public/p1.jpg",
+                            "rating": {
+                                "count": 1000,
+                                "star_count": 4.0,
+                                "value": 8.1
+                            },
+                            "uri": "douban://douban.com/movie/35467152"
+                        }
                     }
                 ]
             }
@@ -1982,15 +2016,12 @@ mod tests {
 
         let items = search_results_from_rexxar_json(&data, 10).expect("rexxar search results");
 
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         let item = &items[0];
         assert_eq!(item.id, "1292052");
         assert_eq!(item.subject_id, "1292052");
         assert_eq!(item.title, "肖申克的救赎");
-        assert_eq!(
-            item.abstract_text,
-            "美国 / 剧情 犯罪 / 弗兰克·德拉邦特"
-        );
+        assert_eq!(item.abstract_text, "美国 / 剧情 犯罪 / 弗兰克·德拉邦特");
         assert_eq!(item.abstract_2, "1994");
         assert_eq!(item.url, "https://movie.douban.com/subject/1292052/");
         assert_eq!(item.rating.value, Some(9.7));
@@ -1998,5 +2029,21 @@ mod tests {
         assert_eq!(item.rating.star_count, Some(5.0));
         assert_eq!(item.vote_average, Some(9.7));
         assert!(item.poster_url.starts_with("/api/douban/image?url="));
+        let tv_item = &items[1];
+        assert_eq!(tv_item.id, "35467152");
+        assert_eq!(tv_item.title, "测试剧集");
+        assert_eq!(tv_item.abstract_text, "中国大陆 / 剧情");
+        assert_eq!(tv_item.abstract_2, "2024");
+        assert_eq!(tv_item.rating.value, Some(8.1));
+    }
+
+    #[test]
+    fn rexxar_search_url_omits_type_filter() {
+        let url = rexxar_search_url("测试剧集", "20").expect("search url");
+        let pairs = url.query_pairs().collect::<Vec<_>>();
+
+        assert!(pairs.iter().any(|(key, value)| key == "q" && value == "测试剧集"));
+        assert!(pairs.iter().any(|(key, value)| key == "count" && value == "20"));
+        assert!(!pairs.iter().any(|(key, _)| key == "type"));
     }
 }

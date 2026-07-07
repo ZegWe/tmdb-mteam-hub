@@ -169,9 +169,64 @@ pub async fn add_torrent_from_url_with_tags(
     let referer = join_url(base, "/");
     let add_url = join_url(base, "/api/v2/torrents/add");
 
-    let mut form = reqwest::multipart::Form::new()
-        .text("urls", u.to_string())
-        .text("paused", "false".to_string());
+    let form = add_torrent_options_form(
+        reqwest::multipart::Form::new()
+            .text("urls", u.to_string())
+            .text("paused", "false".to_string()),
+        category,
+        savepath,
+        tags,
+    );
+    submit_add_torrent_form(&client, &referer, &add_url, form).await
+}
+
+/// 通过 Web API 上传本地已取得的 .torrent 内容，并附加用于后续查找的 qB 标签。
+pub async fn add_torrent_bytes_with_tags(
+    server: &QbServerEntry,
+    filename: &str,
+    bytes: Vec<u8>,
+    category: Option<&str>,
+    savepath: Option<&str>,
+    tags: &[String],
+) -> Result<(), ApiError> {
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request("种子文件内容为空"));
+    }
+
+    let base = server.base_url.trim().trim_end_matches('/');
+    let client = http_client_tls(server.insecure_tls).await?;
+    qb_login_session(&client, server).await?;
+
+    let referer = join_url(base, "/");
+    let add_url = join_url(base, "/api/v2/torrents/add");
+
+    let file_name = if filename.trim().is_empty() {
+        "download.torrent"
+    } else {
+        filename.trim()
+    };
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name.to_string())
+        .mime_str("application/x-bittorrent")
+        .map_err(|e| ApiError::internal(format!("构建 qB 种子上传表单失败: {e}")))?;
+    let form = add_torrent_options_form(
+        reqwest::multipart::Form::new()
+            .part("torrents", part)
+            .text("paused", "false".to_string()),
+        category,
+        savepath,
+        tags,
+    );
+
+    submit_add_torrent_form(&client, &referer, &add_url, form).await
+}
+
+fn add_torrent_options_form(
+    mut form: reqwest::multipart::Form,
+    category: Option<&str>,
+    savepath: Option<&str>,
+    tags: &[String],
+) -> reqwest::multipart::Form {
     if let Some(c) = category {
         let t = c.trim();
         if !t.is_empty() {
@@ -192,10 +247,18 @@ pub async fn add_torrent_from_url_with_tags(
     if !tags.is_empty() {
         form = form.text("tags", tags.join(","));
     }
+    form
+}
 
+async fn submit_add_torrent_form(
+    client: &reqwest::Client,
+    referer: &str,
+    add_url: &str,
+    form: reqwest::multipart::Form,
+) -> Result<(), ApiError> {
     let add = client
-        .post(&add_url)
-        .header("Referer", &referer)
+        .post(add_url)
+        .header("Referer", referer)
         .multipart(form)
         .send()
         .await
@@ -224,13 +287,6 @@ pub async fn add_torrent_from_url_with_tags(
         ));
     }
     Ok(())
-}
-
-pub async fn list_torrents(
-    server: &QbServerEntry,
-    category: Option<&str>,
-) -> Result<Vec<QbTorrentInfo>, ApiError> {
-    list_torrents_query(server, category, None).await
 }
 
 pub async fn list_torrents_by_hashes(

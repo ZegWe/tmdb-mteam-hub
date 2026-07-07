@@ -3,6 +3,7 @@ mod douban;
 mod qbittorrent;
 mod subscription;
 mod tmdb_cache;
+mod torrent_hash;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1155,16 +1156,108 @@ async fn wanted_subscription_push(
             }
         };
 
-    let qb_tags = qb_tags_for_torrent_id(&selected.candidate.torrent_id);
-    if let Err(e) = qbittorrent::add_torrent_from_url_with_tags(
+    let mut push = torrent_push_record_with_download_url(
+        &record.subject_id,
         &qb_server,
-        &dl_url,
-        Some(&category.qb_category),
-        Some(&category.qb_save_dir_name),
-        &qb_tags,
-    )
-    .await
-    {
+        &category,
+        &selected.candidate,
+        "pushed",
+        Some(unix_now_secs()),
+        None,
+        Some(&dl_url),
+    );
+    inherit_existing_qb_lookup(&mut push, record.last_push.as_ref());
+    let download_info = match torrent_hash::torrent_download_info_from_url(&dl_url).await {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(
+                torrent_id = %selected.candidate.torrent_id,
+                error = %err,
+                "calculate torrent infohash before qB add failed"
+            );
+            torrent_hash::TorrentDownloadInfo {
+                info_hashes: Vec::new(),
+                torrent_bytes: None,
+            }
+        }
+    };
+    let precomputed_hash = download_info.info_hashes.first().cloned();
+    if let Some(hash) = precomputed_hash.as_deref() {
+        if let Ok(lookup) = find_qb_torrent_for_push(&qb_server, &push, Some(hash)).await {
+            apply_existing_qb_lookup_to_push(&mut push, &lookup.torrent);
+            let record = state
+                .wanted_store
+                .update_push_record(
+                    &account_key,
+                    &record.subject_id,
+                    push.clone(),
+                    subscription::WantedSubscriptionStatus::Pushed,
+                    None,
+                    unix_now_secs(),
+                )
+                .await
+                .map_err(|e| ApiError::internal(format!("写入 qB 推送记录失败: {e}")))?
+                .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    account_key.clone(),
+                    "qb_push",
+                    "push_torrent",
+                    "subscription",
+                    Some(record.subject_id.clone()),
+                    Some(record.title.clone()),
+                    "success",
+                    format!("订阅种子已存在于 qB，跳过添加：{}", push.torrent_title),
+                    None,
+                    json!({
+                        "torrent_id": push.torrent_id.clone(),
+                        "torrent_title": push.torrent_title.clone(),
+                        "precomputed_info_hash": hash,
+                        "qb_hash": push.qb_hash.clone(),
+                        "qb_name": push.qb_name.clone(),
+                        "qb_server": push.qb_server.clone(),
+                        "qb_category": push.qb_category.clone(),
+                        "qb_save_dir_name": push.qb_save_dir_name.clone(),
+                    }),
+                ),
+            )
+            .await;
+
+            return Ok(Json(json!({
+                "ok": true,
+                "already_in_qb": true,
+                "subscription_id": record.subject_id,
+                "selected": selected,
+                "push": push,
+                "record": record,
+            })));
+        }
+    }
+
+    let qb_tags = qb_tags_for_torrent_id(&selected.candidate.torrent_id);
+    let add_result = if let Some(bytes) = download_info.torrent_bytes {
+        qbittorrent::add_torrent_bytes_with_tags(
+            &qb_server,
+            &format!("mteam-{}.torrent", selected.candidate.torrent_id.trim()),
+            bytes,
+            Some(&category.qb_category),
+            Some(&category.qb_save_dir_name),
+            &qb_tags,
+        )
+        .await
+    } else {
+        qbittorrent::add_torrent_from_url_with_tags(
+            &qb_server,
+            &dl_url,
+            Some(&category.qb_category),
+            Some(&category.qb_save_dir_name),
+            &qb_tags,
+        )
+        .await
+    };
+    if let Err(e) = add_result {
         record_push_failure(
             &state,
             &account_key,
@@ -1197,20 +1290,10 @@ async fn wanted_subscription_push(
         return Err(e);
     }
 
-    let mut push = torrent_push_record_with_download_url(
-        &record.subject_id,
-        &qb_server,
-        &category,
-        &selected.candidate,
-        "pushed",
-        Some(unix_now_secs()),
-        None,
-        Some(&dl_url),
-    );
-    inherit_existing_qb_lookup(&mut push, record.last_push.as_ref());
-    if let Ok(lookup) = find_qb_torrent_for_push(&qb_server, &push, None).await {
-        push.qb_hash = Some(lookup.torrent.hash);
-        push.qb_name = Some(lookup.torrent.name);
+    if let Ok(lookup) =
+        find_qb_torrent_for_push(&qb_server, &push, precomputed_hash.as_deref()).await
+    {
+        apply_existing_qb_lookup_to_push(&mut push, &lookup.torrent);
     }
     let record = state
         .wanted_store
@@ -3124,68 +3207,33 @@ struct QbTorrentLookup {
     matched_by: String,
 }
 
-#[derive(Debug, Clone)]
-struct QbTorrentMatch {
-    torrent: qbittorrent::QbTorrentInfo,
-    matched_by: String,
-}
-
 async fn find_qb_torrent_for_push(
     qb_server: &QbServerEntry,
     push: &subscription::TorrentPushRecord,
     requested_hash: Option<&str>,
 ) -> Result<QbTorrentLookup, ApiError> {
     let hash_candidates = qb_hash_lookup_candidates(push, requested_hash);
-    if !hash_candidates.is_empty() {
-        if let Ok(torrents) =
-            qbittorrent::list_torrents_by_hashes(qb_server, &hash_candidates).await
-        {
-            if let Some(found) = select_qb_torrent(&torrents, push, requested_hash) {
-                return Ok(QbTorrentLookup {
-                    torrent: found.torrent,
-                    matched_by: format!("{}（qB hashes 精确查询）", found.matched_by),
-                });
-            }
-        }
+    if hash_candidates.is_empty() {
+        return Err(ApiError::bad_request(qb_lookup_error_message(
+            qb_server,
+            push,
+            requested_hash,
+            None,
+        )));
     }
-
-    let category_filter = push.qb_category.trim();
-    let category_filter = (!category_filter.is_empty()).then_some(category_filter);
-    let scoped_torrents = qbittorrent::list_torrents(qb_server, category_filter).await?;
-    if let Some(found) = select_qb_torrent(&scoped_torrents, push, requested_hash) {
+    let torrents = qbittorrent::list_torrents_by_hashes(qb_server, &hash_candidates).await?;
+    if let Some(found) = select_qb_torrent_by_hash(&torrents, &hash_candidates) {
         return Ok(QbTorrentLookup {
-            torrent: found.torrent,
-            matched_by: found.matched_by,
+            torrent: found,
+            matched_by: "qB hashes 精确查询".to_string(),
         });
-    }
-
-    let mut all_count = None;
-    let mut all_error = None;
-    if category_filter.is_some() {
-        match qbittorrent::list_torrents(qb_server, None).await {
-            Ok(all_torrents) => {
-                all_count = Some(all_torrents.len());
-                if let Some(found) = select_qb_torrent(&all_torrents, push, requested_hash) {
-                    return Ok(QbTorrentLookup {
-                        torrent: found.torrent,
-                        matched_by: format!("{}（全量 qB 列表回退）", found.matched_by),
-                    });
-                }
-            }
-            Err(err) => {
-                all_error = Some(err.message().to_string());
-            }
-        }
     }
 
     Err(ApiError::bad_request(qb_lookup_error_message(
         qb_server,
         push,
         requested_hash,
-        category_filter,
-        scoped_torrents.len(),
-        all_count,
-        all_error.as_deref(),
+        Some(torrents.len()),
     )))
 }
 
@@ -3219,77 +3267,13 @@ fn qb_hash_lookup_candidates(
     out
 }
 
-fn select_qb_torrent(
+fn select_qb_torrent_by_hash(
     torrents: &[qbittorrent::QbTorrentInfo],
-    push: &subscription::TorrentPushRecord,
-    requested_hash: Option<&str>,
-) -> Option<QbTorrentMatch> {
-    if let Some(hash) = requested_hash.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(torrent) = find_qb_torrent_by_hash(torrents, hash) {
-            return Some(QbTorrentMatch {
-                torrent,
-                matched_by: format!("requested hash {hash}"),
-            });
-        }
-    }
-
-    if let Some(hash) = push
-        .qb_hash
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if let Some(torrent) = find_qb_torrent_by_hash(torrents, hash) {
-            return Some(QbTorrentMatch {
-                torrent,
-                matched_by: format!("stored qB hash {hash}"),
-            });
-        }
-    }
-
-    for identifier in qb_identifier_candidates(push) {
-        if let Some(torrent) = torrents
-            .iter()
-            .find(|torrent| {
-                qb_torrent_tags(torrent)
-                    .iter()
-                    .any(|tag| tag == &identifier)
-            })
-            .cloned()
-        {
-            return Some(QbTorrentMatch {
-                torrent,
-                matched_by: format!("qB tag {identifier}"),
-            });
-        }
-    }
-
-    if let Some(name) = push
-        .qb_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if let Some(torrent) = find_qb_torrent_by_name(torrents, name) {
-            return Some(QbTorrentMatch {
-                torrent,
-                matched_by: format!("stored qB name {name}"),
-            });
-        }
-    }
-
-    if let Some(title) =
-        (!push.torrent_title.trim().is_empty()).then_some(push.torrent_title.as_str())
-    {
-        if let Some(torrent) = find_qb_torrent_by_name(torrents, title) {
-            return Some(QbTorrentMatch {
-                torrent,
-                matched_by: format!("pushed title {title}"),
-            });
-        }
-    }
-
-    None
+    hashes: &[String],
+) -> Option<qbittorrent::QbTorrentInfo> {
+    hashes
+        .iter()
+        .find_map(|hash| find_qb_torrent_by_hash(torrents, hash))
 }
 
 fn find_qb_torrent_by_hash(
@@ -3300,59 +3284,6 @@ fn find_qb_torrent_by_hash(
         .iter()
         .find(|torrent| torrent.hash.eq_ignore_ascii_case(hash))
         .cloned()
-}
-
-fn find_qb_torrent_by_name(
-    torrents: &[qbittorrent::QbTorrentInfo],
-    expected: &str,
-) -> Option<qbittorrent::QbTorrentInfo> {
-    let expected = normalize_match_text(expected);
-    if expected.is_empty() {
-        return None;
-    }
-    torrents
-        .iter()
-        .find(|torrent| compatible_match_text(&torrent.name, &expected))
-        .cloned()
-}
-
-fn normalize_match_text(raw: &str) -> String {
-    raw.chars()
-        .flat_map(char::to_lowercase)
-        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn compatible_match_text(raw: &str, normalized_expected: &str) -> bool {
-    let value = normalize_match_text(raw);
-    !value.is_empty()
-        && (value == normalized_expected
-            || value.contains(normalized_expected)
-            || normalized_expected.contains(&value))
-}
-
-fn qb_torrent_tags(torrent: &qbittorrent::QbTorrentInfo) -> Vec<String> {
-    torrent
-        .tags
-        .split(',')
-        .map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn qb_identifier_candidates(push: &subscription::TorrentPushRecord) -> Vec<String> {
-    let mut out = Vec::new();
-    if !push.qb_identifier.trim().is_empty() {
-        out.push(push.qb_identifier.trim().to_string());
-    }
-    out.extend(qb_tags_for_torrent_id(&push.torrent_id));
-    out.sort();
-    out.dedup();
-    out
 }
 
 fn qb_tags_for_torrent_id(torrent_id: &str) -> Vec<String> {
@@ -3368,25 +3299,16 @@ fn qb_lookup_error_message(
     qb_server: &QbServerEntry,
     push: &subscription::TorrentPushRecord,
     requested_hash: Option<&str>,
-    category_filter: Option<&str>,
-    scoped_count: usize,
-    all_count: Option<usize>,
-    all_error: Option<&str>,
+    hash_result_count: Option<usize>,
 ) -> String {
     let identifiers = qb_lookup_identifiers(push, requested_hash);
-    let all_summary = if let Some(count) = all_count {
-        count.to_string()
-    } else if let Some(error) = all_error {
-        format!("读取失败：{error}")
-    } else {
-        "未查询".to_string()
-    };
+    let hash_summary = hash_result_count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "未查询".to_string());
     format!(
-        "qB 中未找到已推送种子：server={}，category={}，分类候选={}，全量候选={}，查找标识={}。请确认任务未被删除、qB 分类未被修改，或在刷新时提供 qB hash。",
+        "qB 中未找到已推送种子：server={}，hash候选返回={}，查找标识={}。请确认任务未被删除，或在刷新时提供 qB hash。",
         qb_server_label(qb_server),
-        category_filter.unwrap_or("全部"),
-        scoped_count,
-        all_summary,
+        hash_summary,
         if identifiers.is_empty() {
             "无".to_string()
         } else {
@@ -3410,26 +3332,6 @@ fn qb_lookup_identifiers(
         .filter(|s| !s.is_empty())
     {
         out.push(format!("stored_hash={hash}"));
-    }
-    if let Some(name) = push
-        .qb_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        out.push(format!("stored_name={name}"));
-    }
-    for identifier in qb_identifier_candidates(push) {
-        out.push(format!("tag={identifier}"));
-    }
-    if !push.torrent_title.trim().is_empty() {
-        out.push(format!("title={}", push.torrent_title.trim()));
-    }
-    if !push.torrent_id.trim().is_empty() {
-        out.push(format!("mteam_id={}", push.torrent_id.trim()));
-    }
-    if !push.qb_save_dir_name.trim().is_empty() {
-        out.push(format!("save_dir={}", push.qb_save_dir_name.trim()));
     }
     out
 }
@@ -3953,6 +3855,14 @@ fn inherit_existing_qb_lookup(
     }
 }
 
+fn apply_existing_qb_lookup_to_push(
+    push: &mut subscription::TorrentPushRecord,
+    torrent: &qbittorrent::QbTorrentInfo,
+) {
+    push.qb_hash = Some(torrent.hash.clone());
+    push.qb_name = Some(torrent.name.clone());
+}
+
 const WANTED_PIPELINE_TICK_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3993,11 +3903,20 @@ async fn run_wanted_watch_poll(
     let wish = douban::library(&cfg.douban_cookie, douban::DoubanLibraryStatus::Wish, limit)
         .await
         .map_err(ApiError::douban)?;
+    let existing_state = state
+        .wanted_store
+        .snapshot(&account_key, unix_now_secs())
+        .await
+        .ok();
+    let details =
+        fetch_wanted_subject_detail_cache(&cfg.douban_cookie, &wish.items, existing_state.as_ref())
+            .await;
     let outcome = state
         .wanted_store
-        .apply_wish_items(
+        .apply_wish_items_with_details(
             &account_key,
             &wish.items,
+            &details,
             &cfg.subscription_watcher,
             unix_now_secs(),
         )
@@ -4011,6 +3930,68 @@ async fn run_wanted_watch_poll(
         );
     }
     Ok(outcome)
+}
+
+async fn fetch_wanted_subject_detail_cache(
+    douban_cookie: &str,
+    items: &[douban::DoubanLibraryItem],
+    existing_state: Option<&subscription::WantedSubscriptionState>,
+) -> BTreeMap<String, douban::DoubanSubjectDetail> {
+    let mut out = BTreeMap::new();
+    for item in items {
+        let subject_id = item.subject_id.trim();
+        if subject_id.is_empty() {
+            continue;
+        }
+        if !wanted_item_needs_rexxar_detail_cache(existing_state, item) {
+            continue;
+        }
+        match douban::subject_detail_rexxar(douban_cookie, subject_id).await {
+            Ok(detail) => {
+                out.insert(subject_id.to_string(), detail);
+            }
+            Err(err) => {
+                let message = err.to_string();
+                if douban_rexxar_detail_cache_should_back_off(&message) {
+                    tracing::info!(
+                        subject_id = %subject_id,
+                        "douban rexxar detail cache paused for this wanted poll: {}",
+                        message
+                    );
+                    break;
+                } else {
+                    tracing::debug!(
+                        subject_id = %subject_id,
+                        "douban rexxar detail cache fetch skipped during wanted poll: {}",
+                        message
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+fn wanted_item_needs_rexxar_detail_cache(
+    existing_state: Option<&subscription::WantedSubscriptionState>,
+    item: &douban::DoubanLibraryItem,
+) -> bool {
+    let subject_id = item.subject_id.trim();
+    if subject_id.is_empty() {
+        return false;
+    }
+    let Some(record) = existing_state.and_then(|state| state.records.get(subject_id)) else {
+        return true;
+    };
+    record.date_published.is_none()
+        || record.summary.is_none()
+        || record.genres.is_empty()
+        || record.directors.is_empty()
+        || record.actors.is_empty()
+}
+
+fn douban_rexxar_detail_cache_should_back_off(message: &str) -> bool {
+    message.contains("网络存在异常") || message.contains("登录后重试")
 }
 
 async fn run_wanted_pipeline_tick(state: &AppState) -> Result<String, ApiError> {
@@ -5887,6 +5868,45 @@ mod subscription_category_tests {
     }
 
     #[test]
+    fn wanted_detail_cache_skips_records_that_already_have_rexxar_fields() {
+        let mut state = subscription::WantedSubscriptionState {
+            version: 1,
+            account_key: "acct".to_string(),
+            bootstrap_completed: true,
+            created_at: 100,
+            updated_at: 100,
+            last_poll_at: Some(100),
+            records: BTreeMap::new(),
+        };
+        let mut cached = wanted_record("1", "已有缓存", Some(2024));
+        cached.date_published = Some("2024-01-01".to_string());
+        cached.summary = Some("已有简介".to_string());
+        cached.genres = vec!["剧情".to_string()];
+        cached.directors = vec!["导演".to_string()];
+        cached.actors = vec!["主演".to_string()];
+        state.records.insert("1".to_string(), cached);
+
+        assert!(!wanted_item_needs_rexxar_detail_cache(
+            Some(&state),
+            &library_item("1", "已有缓存"),
+        ));
+        assert!(wanted_item_needs_rexxar_detail_cache(
+            Some(&state),
+            &library_item("2", "新条目"),
+        ));
+    }
+
+    #[test]
+    fn douban_rexxar_detail_cache_backoff_recognizes_anti_abuse_response() {
+        assert!(douban_rexxar_detail_cache_should_back_off(
+            "豆瓣 rexxar 接口 HTTP 400 Bad Request: 您所在的网络存在异常，请登录后重试。"
+        ));
+        assert!(!douban_rexxar_detail_cache_should_back_off(
+            "豆瓣 rexxar 请求失败: dns error"
+        ));
+    }
+
+    #[test]
     fn subscription_categories_bind_to_qb_server_ids() {
         let servers = vec![qb_server("nas", "NAS", "http://127.0.0.1:8080")];
         let mut movie = category("电影", "电影");
@@ -6249,9 +6269,9 @@ mod subscription_category_tests {
         let mut second = qb_torrent("Different.Internal.Name");
         second.hash = "hash-b".to_string();
 
-        let found = select_qb_torrent(&[first, second], &push, None).unwrap();
-        assert_eq!(found.torrent.hash, "hash-b");
-        assert!(found.matched_by.contains("stored qB hash"));
+        let candidates = qb_hash_lookup_candidates(&push, None);
+        let found = select_qb_torrent_by_hash(&[first, second], &candidates).unwrap();
+        assert_eq!(found.hash, "hash-b");
     }
 
     #[test]
@@ -6279,6 +6299,68 @@ mod subscription_category_tests {
             qb_hash_lookup_candidates(&push, Some("requested-hash")),
             vec!["requested-hash".to_string(), "stored-hash".to_string()]
         );
+    }
+
+    #[test]
+    fn qb_lookup_identifiers_only_include_hashes() {
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let mut push = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category("TV", "TV"),
+            &torrent("943109", "What If S01 2025 1080p WEB-DL H.264 AAC-ADWeb"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        push.qb_hash = Some("stored-hash".to_string());
+        push.qb_name = Some("What.If.S01.2025.1080p.WEB-DL.H264.AAC-ADWeb".to_string());
+
+        assert_eq!(
+            qb_lookup_identifiers(&push, Some("requested-hash")),
+            vec![
+                "requested_hash=requested-hash".to_string(),
+                "stored_hash=stored-hash".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn existing_qb_lookup_is_applied_to_push_record() {
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let mut push = torrent_push_record(
+            "subject-1",
+            &qb,
+            &category("电影", "电影"),
+            &torrent("12345", "测试电影 2160p"),
+            "pushed",
+            Some(100),
+            None,
+        );
+        let mut torrent = qb_torrent("qB 内已有任务");
+        torrent.hash = "aaebc806fdbf63111b1f7dde3a89bc17d2988686".to_string();
+
+        apply_existing_qb_lookup_to_push(&mut push, &torrent);
+
+        assert_eq!(
+            push.qb_hash.as_deref(),
+            Some("aaebc806fdbf63111b1f7dde3a89bc17d2988686")
+        );
+        assert_eq!(push.qb_name.as_deref(), Some("qB 内已有任务"));
     }
 
     #[test]
@@ -6503,7 +6585,7 @@ mod subscription_category_tests {
     }
 
     #[test]
-    fn qb_torrent_lookup_matches_mteam_tag_when_name_differs() {
+    fn qb_torrent_lookup_ignores_mteam_tag_when_hash_is_absent() {
         let qb = QbServerEntry {
             id: "nas".to_string(),
             name: "nas".to_string(),
@@ -6525,13 +6607,14 @@ mod subscription_category_tests {
         let mut candidate = qb_torrent("qB 内部种子名完全不同");
         candidate.tags = "manual, mteam:12345".to_string();
 
-        let found = select_qb_torrent(&[candidate], &push, None).unwrap();
-        assert_eq!(found.torrent.name, "qB 内部种子名完全不同");
-        assert!(found.matched_by.contains("qB tag mteam:12345"));
+        assert!(
+            select_qb_torrent_by_hash(&[candidate], &qb_hash_lookup_candidates(&push, None))
+                .is_none()
+        );
     }
 
     #[test]
-    fn qb_lookup_error_mentions_server_counts_and_identifiers() {
+    fn qb_lookup_error_mentions_only_hash_counts_and_identifiers() {
         let qb = QbServerEntry {
             id: "nas".to_string(),
             name: "nas".to_string(),
@@ -6551,23 +6634,16 @@ mod subscription_category_tests {
         );
         push.qb_hash = Some("abcdef".to_string());
 
-        let message = qb_lookup_error_message(
-            &qb,
-            &push,
-            Some("requested"),
-            Some("qb-电影"),
-            0,
-            Some(7),
-            None,
-        );
+        let message = qb_lookup_error_message(&qb, &push, Some("requested"), Some(7));
 
         assert!(message.contains("server=nas"));
-        assert!(message.contains("category=qb-电影"));
-        assert!(message.contains("分类候选=0"));
-        assert!(message.contains("全量候选=7"));
+        assert!(message.contains("hash候选返回=7"));
         assert!(message.contains("requested_hash=requested"));
         assert!(message.contains("stored_hash=abcdef"));
-        assert!(message.contains("tag=mteam:12345"));
+        assert!(!message.contains("category="));
+        assert!(!message.contains("tag=mteam:12345"));
+        assert!(!message.contains("title="));
+        assert!(!message.contains("save_dir="));
     }
 
     fn test_app_state(root: &Path) -> AppState {
@@ -6889,6 +6965,20 @@ mod subscription_category_tests {
             subject_id: subject_id.to_string(),
             title: title.to_string(),
             release_year,
+            poster_url: String::new(),
+            cover_url: String::new(),
+            original_title: None,
+            aka: Vec::new(),
+            languages: Vec::new(),
+            countries: Vec::new(),
+            genres: Vec::new(),
+            directors: Vec::new(),
+            actors: Vec::new(),
+            date_published: None,
+            duration: None,
+            summary: None,
+            rating_value: None,
+            rating_count: None,
             category_text: Some("电影".to_string()),
             tags: vec!["电影".to_string()],
             douban_date: None,

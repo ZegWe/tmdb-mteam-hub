@@ -35,17 +35,6 @@ assert.equal(
 );
 
 assert.equal(
-  helpersForView("douban-library").cardSubtitle({
-    source: "douban",
-    date: "2026-07-06",
-    abstract_text: "2024 / 中国大陆 / 剧情",
-    rating: { value: 8.1 },
-  }),
-  "2026-07-06",
-  "douban library cards should keep their library date subtitle",
-);
-
-assert.equal(
   helpersForView("search").cardSubtitle({
     media_type: "movie",
     release_date: "1994-09-10",
@@ -55,10 +44,22 @@ assert.equal(
   "tmdb cards should keep date and rating subtitles",
 );
 
+assert.doesNotMatch(
+  appSource,
+  /douban-library|loadDoubanLibrary|豆瓣列表/,
+  "search page should not expose the separate Douban library list option",
+);
+
 assert.match(
   appSource,
-  /currentView === ['"]search['"]/,
-  "search view should opt into the full-width layout",
+  /@click="setSearchSource\('douban'\)"[\s\S]*>\s*豆瓣\s*<\/button>/,
+  "search page should keep Douban as a search source",
+);
+
+assert.match(
+  appSource,
+  /class="layout search-layout"/,
+  "search page should use the full-width search layout directly",
 );
 
 assert.match(

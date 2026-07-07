@@ -15,6 +15,8 @@ const constantsStart = appSource.indexOf("const SUB_STATUS_LABELS");
 const constantsEnd = appSource.indexOf("\nconst OPERATION_LOG_CATEGORIES", constantsStart);
 const functionStart = appSource.indexOf("function subscriptionPollToast");
 const functionEnd = appSource.indexOf("\nfunction openSubscriptionDetail", functionStart);
+const detailRowsStart = appSource.indexOf("function subscriptionDetailRows");
+const detailRowsEnd = appSource.indexOf("\n\nfunction pushRows", detailRowsStart);
 
 assert.notEqual(
   constantsStart,
@@ -28,6 +30,8 @@ assert.notEqual(
   "subscription display helpers should start at subscriptionPollToast",
 );
 assert.notEqual(functionEnd, -1, "subscription display helpers should end before route helpers");
+assert.notEqual(detailRowsStart, -1, "subscription detail rows helper should exist");
+assert.notEqual(detailRowsEnd, -1, "subscription detail rows helper should end before push rows");
 
 const helpers = vm.runInNewContext(
   `${appSource.slice(constantsStart, constantsEnd)}
@@ -35,6 +39,37 @@ ${appSource.slice(functionStart, functionEnd)}
 ({
   subscriptionCardMeta,
   subscriptionCardNotices,
+  subscriptionCardSubtitle,
+});`,
+);
+
+const detailHelpers = vm.runInNewContext(
+  `${appSource.slice(constantsStart, constantsEnd)}
+function row(label, value, href = "") {
+  if (value == null || String(value).trim() === "") return null;
+  const text = String(value);
+  const link = String(href || "").trim();
+  return link ? { label, value: text, href: link } : { label, value: text };
+}
+function formatUnixSeconds(value) {
+  return value ? "formatted-time" : "";
+}
+function subscriptionDisplayStatus() {
+  return { text: "待处理" };
+}
+function subscriptionStageLabel() {
+  return "等待自动处理";
+}
+function subscriptionStageMessage(record) {
+  return record.stage_message || "";
+}
+function formatSubscriptionSkipReason(value) {
+  return value || "";
+}
+${appSource.slice(functionStart, functionEnd)}
+${appSource.slice(detailRowsStart, detailRowsEnd)}
+({
+  subscriptionDetailRows,
 });`,
 );
 
@@ -118,73 +153,110 @@ assert.deepEqual(
   "card meta should not duplicate the current stage/status",
 );
 
+assert.equal(
+  helpers.subscriptionCardSubtitle({
+    date_published: "2026-07-01",
+    douban_date: "2026-06-01",
+    release_year: "2026",
+    category_text: "电影",
+  }),
+  "2026-07-01",
+  "subscription card subtitle should prefer release date over Douban wanted date",
+);
+
+assert.equal(
+  helpers.subscriptionCardSubtitle({
+    release_year: "2026",
+    douban_date: "2026-06-01",
+  }),
+  "2026",
+  "subscription card subtitle should fall back to release year, not Douban wanted date",
+);
+
+assert.deepEqual(
+  plain(
+    detailHelpers.subscriptionDetailRows({
+      subject_id: "1292052",
+      category_text: "电影",
+      date_published: "1994-09-10",
+      release_year: 1994,
+      rating_value: 9.7,
+      rating_count: 123456,
+      original_title: "The Shawshank Redemption",
+      aka: ["刺激1995"],
+      genres: ["剧情", "犯罪"],
+      countries: ["美国"],
+      languages: ["英语"],
+      directors: ["弗兰克·德拉邦特"],
+      actors: ["蒂姆·罗宾斯", "摩根·弗里曼"],
+      duration: "142分钟",
+      summary: "希望让人自由。",
+      retry_count: 0,
+      max_retries: 3,
+    }).slice(0, 11),
+  ),
+  [
+    { label: "豆瓣 ID", value: "1292052" },
+    { label: "分类文本", value: "电影" },
+    { label: "上映日期", value: "1994-09-10" },
+    { label: "评分", value: "9.7（123,456 人）" },
+    { label: "原名", value: "The Shawshank Redemption" },
+    { label: "又名", value: "刺激1995" },
+    { label: "类型", value: "剧情 · 犯罪" },
+    { label: "国家/地区", value: "美国" },
+    { label: "语言", value: "英语" },
+    { label: "导演", value: "弗兰克·德拉邦特" },
+    { label: "主演", value: "蒂姆·罗宾斯 · 摩根·弗里曼" },
+  ],
+  "subscription detail should show cached Douban rexxar media rows first",
+);
+
 assert.match(
   stylesSource,
-  /\.subscription-list\s*\{[\s\S]*grid-auto-rows:\s*[^;]+;/,
-  "subscription cards should render in stable grid rows",
-);
-{
-  const rowHeight = Number(
-    cssBlock(".subscription-list").match(/grid-auto-rows:\s*([\d.]+)px/)?.[1],
-  );
-  assert.ok(
-    rowHeight >= 300,
-    "subscription card rows should be tall enough for two-line titles, notices, and actions",
-  );
-}
-assert.match(
-  stylesSource,
-  /\.subscription-card\s*\{[\s\S]*height:\s*100%;[\s\S]*overflow:\s*hidden;/,
-  "subscription cards should keep a stable size and contain long text",
-);
-assert.match(
-  stylesSource,
-  /\.subscription-card\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-rows:/,
-  "subscription cards should use fixed row slots so text is not clipped by auto margins",
-);
-assert.match(
-  cssBlock(".subscription-card-meta"),
-  /flex-wrap:\s*wrap/,
-  "subscription card metadata should wrap onto two lines instead of clipping long text",
-);
-assert.doesNotMatch(
-  cssBlock(".subscription-card-meta"),
-  /flex-wrap:\s*nowrap/,
-  "subscription card metadata should not force all fields onto one clipped line",
-);
-{
-  const metaHeight = Number(
-    cssBlock(".subscription-card-meta").match(/max-height:\s*([\d.]+)rem/)?.[1],
-  );
-  assert.ok(
-    metaHeight >= 2.6,
-    "subscription card metadata should reserve enough height for two rows",
-  );
-}
-assert.match(
-  appSource,
-  /class="subscription-card-notices"/,
-  "subscription card notices should render inside a reserved notice slot",
-);
-assert.match(
-  stylesSource,
-  /\.subscription-card-notices\s*\{[\s\S]*min-height:\s*[^;]+;[\s\S]*overflow:\s*hidden;/,
-  "subscription card notices should reserve enough full-line space before clipping",
-);
-assert.doesNotMatch(
-  cssBlock(".subscription-card-actions"),
-  /margin-top:\s*auto/,
-  "subscription card actions should not push notice text into partial clipping",
-);
-assert.match(
-  stylesSource,
-  /\.subscription-card-notice\s*\{[\s\S]*-webkit-line-clamp:\s*2;/,
-  "subscription card notices should be clamped instead of resizing cards",
+  /\.subscription-list\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(140px,\s*1fr\)\);/,
+  "subscription cards should use the same compact poster grid as search cards",
 );
 {
   const cardSource = sourceBetween(
     'v-for="record in subscriptionRecords"',
-    '<div class="subscription-card-actions"',
+    "</article>",
+    "subscription card template",
+  );
+  assert.match(
+    cardSource,
+    /<img\s+:src="itemImageUrl\(record\) \|\| transparentPixel"[\s\S]*loading="lazy"/,
+    "subscription cards should render the saved Douban cover image",
+  );
+  assert.match(
+    cardSource,
+    /<div class="title">\{\{ record\.title \|\| record\.subject_id \}\}<\/div>/,
+    "subscription cards should show the subscription name as the primary label",
+  );
+  assert.match(
+    cardSource,
+    /class="subscription-status badge"/,
+    "subscription cards should keep the status badge",
+  );
+  assert.doesNotMatch(
+    cardSource,
+    /retrySubscriptionCurrent|rerunSubscription|subscription-card-actions|subscription-stage-track|subscription-card-notices/,
+    "subscription cover cards should not include workflow actions, stage tracks, or notices",
+  );
+}
+assert.match(
+  stylesSource,
+  /\.subscription-card\s*\{[\s\S]*display:\s*flex;[\s\S]*flex-direction:\s*column;/,
+  "subscription cards should use the same vertical poster-card structure as search cards",
+);
+assert.match(
+  stylesSource,
+  /\.subscription-card \.subscription-status\s*\{[\s\S]*position:\s*absolute;/,
+  "subscription status should overlay the poster instead of consuming title space",
+);
+{
+  const cardSource = sourceBetween(
+    'v-for="record in subscriptionRecords"',
+    "</article>",
     "subscription card template",
   );
   assert.doesNotMatch(

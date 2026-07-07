@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::config::SubscriptionWatcherConfig;
-use crate::douban::DoubanLibraryItem;
+use crate::douban::{DoubanLibraryItem, DoubanSubjectDetail};
 
 const STATE_VERSION: u32 = 1;
 const DB_SCHEMA_VERSION: i64 = 2;
@@ -233,6 +233,34 @@ pub struct WantedSubscriptionRecord {
     pub title: String,
     #[serde(default)]
     pub release_year: Option<u16>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub poster_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cover_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aka: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub countries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_published: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating_value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating_count: Option<u64>,
     #[serde(default)]
     pub category_text: Option<String>,
     #[serde(default)]
@@ -413,11 +441,24 @@ impl WantedSubscriptionStore {
         cfg: &SubscriptionWatcherConfig,
         now: u64,
     ) -> std::io::Result<WantedPollOutcome> {
+        self.apply_wish_items_with_details(account_key, items, &BTreeMap::new(), cfg, now)
+            .await
+    }
+
+    pub async fn apply_wish_items_with_details(
+        &self,
+        account_key: &str,
+        items: &[DoubanLibraryItem],
+        details: &BTreeMap<String, DoubanSubjectDetail>,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<WantedPollOutcome> {
         let _guard = self.lock.lock().await;
         let mut state = self.load_state_unlocked(account_key, now).await?;
-        let outcome = apply_wish_items_to_state(
+        let outcome = apply_wish_items_with_details_to_state(
             &mut state,
             items,
+            details,
             cfg.bootstrap_existing_as_skipped,
             cfg.max_retries,
             self.db_path.display().to_string(),
@@ -858,6 +899,20 @@ fn parse_record_row(row: &Row<'_>) -> std::io::Result<WantedSubscriptionRecord> 
             subject_id: subject_id.clone(),
             title: title.clone(),
             release_year: None,
+            poster_url: String::new(),
+            cover_url: String::new(),
+            original_title: None,
+            aka: Vec::new(),
+            languages: Vec::new(),
+            countries: Vec::new(),
+            genres: Vec::new(),
+            directors: Vec::new(),
+            actors: Vec::new(),
+            date_published: None,
+            duration: None,
+            summary: None,
+            rating_value: None,
+            rating_count: None,
             category_text: category_text.clone(),
             tags: Vec::new(),
             douban_date: None,
@@ -1230,6 +1285,26 @@ fn apply_wish_items_to_state(
     state_path: String,
     now: u64,
 ) -> WantedPollOutcome {
+    apply_wish_items_with_details_to_state(
+        state,
+        items,
+        &BTreeMap::new(),
+        bootstrap_existing_as_skipped,
+        max_retries,
+        state_path,
+        now,
+    )
+}
+
+fn apply_wish_items_with_details_to_state(
+    state: &mut WantedSubscriptionState,
+    items: &[DoubanLibraryItem],
+    details: &BTreeMap<String, DoubanSubjectDetail>,
+    bootstrap_existing_as_skipped: bool,
+    max_retries: u32,
+    state_path: String,
+    now: u64,
+) -> WantedPollOutcome {
     let bootstrap_mode = !state.bootstrap_completed;
     let mut created_unprocessed = 0usize;
     let mut created_skipped = 0usize;
@@ -1240,13 +1315,14 @@ fn apply_wish_items_to_state(
         if subject_id.is_empty() {
             continue;
         }
+        let detail = details.get(subject_id);
         if let Some(existing) = state.records.get_mut(subject_id) {
-            refresh_record_from_item(existing, item, idx, now);
+            refresh_record_from_item_with_detail(existing, item, detail, idx, now);
             updated_existing += 1;
             continue;
         }
 
-        let mut record = record_from_item(item, idx, max_retries, now);
+        let mut record = record_from_item_with_detail(item, detail, idx, max_retries, now);
         if bootstrap_mode && bootstrap_existing_as_skipped {
             record.status = WantedSubscriptionStatus::Skipped;
             record.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
@@ -1282,12 +1358,36 @@ fn record_from_item(
     max_retries: u32,
     now: u64,
 ) -> WantedSubscriptionRecord {
+    record_from_item_with_detail(item, None, return_order, max_retries, now)
+}
+
+fn record_from_item_with_detail(
+    item: &DoubanLibraryItem,
+    detail: Option<&DoubanSubjectDetail>,
+    return_order: usize,
+    max_retries: u32,
+    now: u64,
+) -> WantedSubscriptionRecord {
     let tags = normalized_tags(&item.tags);
     let douban_date = normalized_douban_date(&item.date);
-    WantedSubscriptionRecord {
+    let mut record = WantedSubscriptionRecord {
         subject_id: item.subject_id.trim().to_string(),
         title: item.title.trim().to_string(),
         release_year: release_year_from_item(item),
+        poster_url: item.poster_url.trim().to_string(),
+        cover_url: item.cover_url.trim().to_string(),
+        original_title: None,
+        aka: Vec::new(),
+        languages: Vec::new(),
+        countries: Vec::new(),
+        genres: Vec::new(),
+        directors: Vec::new(),
+        actors: Vec::new(),
+        date_published: None,
+        duration: None,
+        summary: None,
+        rating_value: None,
+        rating_count: None,
         category_text: tags.first().cloned(),
         tags,
         douban_sort_time: douban_date.as_deref().and_then(douban_date_sort_key),
@@ -1309,7 +1409,11 @@ fn record_from_item(
         updated_at: now,
         first_seen_at: now,
         last_seen_at: now,
+    };
+    if let Some(detail) = detail {
+        apply_subject_detail_cache(&mut record, detail);
     }
+    record
 }
 
 fn refresh_record_from_item(
@@ -1318,10 +1422,28 @@ fn refresh_record_from_item(
     return_order: usize,
     now: u64,
 ) {
+    refresh_record_from_item_with_detail(record, item, None, return_order, now)
+}
+
+fn refresh_record_from_item_with_detail(
+    record: &mut WantedSubscriptionRecord,
+    item: &DoubanLibraryItem,
+    detail: Option<&DoubanSubjectDetail>,
+    return_order: usize,
+    now: u64,
+) {
     let tags = normalized_tags(&item.tags);
     let douban_date = normalized_douban_date(&item.date);
     record.title = item.title.trim().to_string();
     record.release_year = release_year_from_item(item).or(record.release_year);
+    let poster_url = item.poster_url.trim();
+    if !poster_url.is_empty() {
+        record.poster_url = poster_url.to_string();
+    }
+    let cover_url = item.cover_url.trim();
+    if !cover_url.is_empty() {
+        record.cover_url = cover_url.to_string();
+    }
     record.category_text = tags
         .first()
         .cloned()
@@ -1335,6 +1457,55 @@ fn refresh_record_from_item(
     record.douban_return_order = Some(return_order.min(u32::MAX as usize) as u32);
     record.last_seen_at = now;
     record.updated_at = now;
+    if let Some(detail) = detail {
+        apply_subject_detail_cache(record, detail);
+    }
+}
+
+fn apply_subject_detail_cache(record: &mut WantedSubscriptionRecord, detail: &DoubanSubjectDetail) {
+    let title = detail.title.trim();
+    if !title.is_empty() {
+        record.title = title.to_string();
+    }
+    let poster_url = detail.poster_url.trim();
+    if !poster_url.is_empty() {
+        record.poster_url = poster_url.to_string();
+    }
+    let image = detail.image.trim();
+    if record.cover_url.trim().is_empty() && !image.is_empty() {
+        record.cover_url = image.to_string();
+    }
+    record.original_title =
+        non_empty_string(&detail.original_title).or(record.original_title.take());
+    replace_vec_if_not_empty(&mut record.aka, &detail.aka);
+    replace_vec_if_not_empty(&mut record.languages, &detail.languages);
+    replace_vec_if_not_empty(&mut record.countries, &detail.countries);
+    replace_vec_if_not_empty(&mut record.genres, &detail.genres);
+    replace_vec_if_not_empty(&mut record.directors, &detail.directors);
+    replace_vec_if_not_empty(&mut record.actors, &detail.actors);
+    record.date_published =
+        non_empty_string(&detail.date_published).or(record.date_published.take());
+    record.duration = non_empty_string(&detail.duration).or(record.duration.take());
+    record.summary = non_empty_string(&detail.summary).or(record.summary.take());
+    record.rating_value = detail.rating.value.or(record.rating_value);
+    record.rating_count = detail.rating.count.or(record.rating_count);
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn replace_vec_if_not_empty(target: &mut Vec<String>, source: &[String]) {
+    let values = source
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !values.is_empty() {
+        *target = values;
+    }
 }
 
 fn normalized_douban_date(raw: &str) -> Option<String> {
@@ -1707,6 +1878,113 @@ mod tests {
         let mut item = item(id, title, "2024 / 中国大陆 / 剧情", &["电影"]);
         item.date = date.to_string();
         item
+    }
+
+    fn subject_detail(id: &str, date_published: &str) -> crate::douban::DoubanSubjectDetail {
+        crate::douban::DoubanSubjectDetail {
+            source: "douban",
+            media_type: "douban",
+            id: id.to_string(),
+            subject_id: id.to_string(),
+            url: format!("https://movie.douban.com/subject/{id}/"),
+            title: "中文片名".to_string(),
+            original_title: "Original Title".to_string(),
+            aka: vec!["别名一".to_string(), "别名二".to_string()],
+            languages: vec!["汉语普通话".to_string()],
+            countries: vec!["中国大陆".to_string()],
+            image: "/api/douban/image?url=image".to_string(),
+            poster_url: "/api/douban/image?url=poster".to_string(),
+            directors: vec!["导演甲".to_string()],
+            writers: vec!["编剧甲".to_string()],
+            actors: vec!["主演甲".to_string(), "主演乙".to_string()],
+            genres: vec!["剧情".to_string(), "犯罪".to_string()],
+            date_published: date_published.to_string(),
+            duration: "120分钟".to_string(),
+            summary: "这是一段简介。".to_string(),
+            rating: crate::douban::DoubanRating {
+                value: Some(8.7),
+                count: Some(12345),
+                info: String::new(),
+                star_count: Some(4.5),
+            },
+            user_interest: None,
+            user_rating: None,
+        }
+    }
+
+    #[test]
+    fn wanted_records_preserve_douban_cover_urls() {
+        let mut first = item("1", "电影一", "2024 / 中国大陆 / 剧情", &["电影"]);
+        first.poster_url = "/api/douban/image?url=poster-one".to_string();
+        first.cover_url = "/api/douban/image?url=cover-one".to_string();
+
+        let created = record_from_item(&first, 0, 3, 100);
+
+        assert_eq!(created.poster_url, "/api/douban/image?url=poster-one");
+        assert_eq!(created.cover_url, "/api/douban/image?url=cover-one");
+
+        let mut refreshed = record_from_item(&first, 0, 3, 100);
+        let mut next = item("1", "电影一", "2024 / 中国大陆 / 剧情", &["电影"]);
+        next.poster_url = "/api/douban/image?url=poster-two".to_string();
+        next.cover_url = "/api/douban/image?url=cover-two".to_string();
+
+        refresh_record_from_item(&mut refreshed, &next, 1, 200);
+
+        assert_eq!(refreshed.poster_url, "/api/douban/image?url=poster-two");
+        assert_eq!(refreshed.cover_url, "/api/douban/image?url=cover-two");
+    }
+
+    #[test]
+    fn wanted_records_cache_douban_subject_detail() {
+        let mut state = WantedSubscriptionState::new("acct", 100);
+        let cfg = SubscriptionWatcherConfig {
+            bootstrap_existing_as_skipped: false,
+            ..SubscriptionWatcherConfig::default()
+        };
+        let mut details = BTreeMap::new();
+        details.insert("1".to_string(), subject_detail("1", "2026-07-01"));
+
+        apply_wish_items_with_details_to_state(
+            &mut state,
+            &[item("1", "中文片名", "2026 / 中国大陆 / 剧情", &["电影"])],
+            &details,
+            cfg.bootstrap_existing_as_skipped,
+            cfg.max_retries,
+            "state.json".to_string(),
+            100,
+        );
+
+        let record = state.records.get("1").expect("created record");
+        assert_eq!(record.title, "中文片名");
+        assert_eq!(record.date_published.as_deref(), Some("2026-07-01"));
+        assert_eq!(record.original_title.as_deref(), Some("Original Title"));
+        assert_eq!(record.aka, vec!["别名一".to_string(), "别名二".to_string()]);
+        assert_eq!(record.genres, vec!["剧情".to_string(), "犯罪".to_string()]);
+        assert_eq!(record.countries, vec!["中国大陆".to_string()]);
+        assert_eq!(record.languages, vec!["汉语普通话".to_string()]);
+        assert_eq!(record.directors, vec!["导演甲".to_string()]);
+        assert_eq!(
+            record.actors,
+            vec!["主演甲".to_string(), "主演乙".to_string()]
+        );
+        assert_eq!(record.duration.as_deref(), Some("120分钟"));
+        assert_eq!(record.summary.as_deref(), Some("这是一段简介。"));
+        assert_eq!(record.rating_value, Some(8.7));
+        assert_eq!(record.rating_count, Some(12345));
+
+        details.insert("1".to_string(), subject_detail("1", "2026-08-02"));
+        apply_wish_items_with_details_to_state(
+            &mut state,
+            &[item("1", "中文片名", "2026 / 中国大陆 / 剧情", &["电影"])],
+            &details,
+            cfg.bootstrap_existing_as_skipped,
+            cfg.max_retries,
+            "state.json".to_string(),
+            200,
+        );
+
+        let refreshed = state.records.get("1").expect("refreshed record");
+        assert_eq!(refreshed.date_published.as_deref(), Some("2026-08-02"));
     }
 
     #[test]
