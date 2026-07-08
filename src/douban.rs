@@ -2042,8 +2042,12 @@ mod tests {
         let url = rexxar_search_url("测试剧集", "20").expect("search url");
         let pairs = url.query_pairs().collect::<Vec<_>>();
 
-        assert!(pairs.iter().any(|(key, value)| key == "q" && value == "测试剧集"));
-        assert!(pairs.iter().any(|(key, value)| key == "count" && value == "20"));
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| key == "q" && value == "测试剧集"));
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| key == "count" && value == "20"));
         assert!(!pairs.iter().any(|(key, _)| key == "type"));
     }
 }

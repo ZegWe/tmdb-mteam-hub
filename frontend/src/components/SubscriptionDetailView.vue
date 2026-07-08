@@ -67,24 +67,6 @@
       >
         重跑任务
       </button>
-      <button
-        v-if="selectedSubscription.last_push"
-        type="button"
-        class="btn btn-secondary"
-        :disabled="subscriptionActionLoading"
-        @click="refreshSubscriptionProgress(selectedSubscription.subject_id)"
-      >
-        刷新下载进度
-      </button>
-      <button
-        v-if="selectedSubscription.last_push"
-        type="button"
-        class="btn btn-primary"
-        :disabled="subscriptionActionLoading"
-        @click="checkSubscriptionCompletion(selectedSubscription.subject_id)"
-      >
-        检查完成并硬链接
-      </button>
     </div>
     <p v-if="selectedSubscription.last_error" class="subscription-detail-error">
       {{ selectedSubscription.last_error }}
@@ -197,8 +179,6 @@ defineProps({
   retrySubscriptionCurrent: { type: Function, required: true },
   canRerunSubscription: { type: Function, required: true },
   rerunSubscription: { type: Function, required: true },
-  refreshSubscriptionProgress: { type: Function, required: true },
-  checkSubscriptionCompletion: { type: Function, required: true },
   subscriptionProgress: { type: Function, required: true },
   formatPercent: { type: Function, required: true },
   pushRows: { type: Function, required: true },

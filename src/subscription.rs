@@ -885,6 +885,27 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn update_next_attempt_at(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        next_attempt_at: Option<u64>,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        record.next_attempt_at = next_attempt_at;
+        record.force_eligible_once = false;
+        record.updated_at = now;
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
     pub async fn update_push_record(
         &self,
         account_key: &str,
@@ -2008,6 +2029,14 @@ fn merge_attention_tags(
     record: &mut WantedSubscriptionRecord,
     tags: Vec<SubscriptionAttentionTag>,
 ) {
+    record.attention_tags.retain(|tag| {
+        !matches!(
+            tag,
+            SubscriptionAttentionTag::Failed
+                | SubscriptionAttentionTag::WaitingRelease
+                | SubscriptionAttentionTag::NeedsReconciliation
+        )
+    });
     for tag in tags {
         if !record.attention_tags.contains(&tag) {
             record.attention_tags.push(tag);
@@ -3974,7 +4003,9 @@ mod tests {
         rec.status = WantedSubscriptionStatus::Skipped;
         rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
         apply_status_stage(&mut rec, 120);
-        assert!(rec.attention_tags.contains(&SubscriptionAttentionTag::Skipped));
+        assert!(rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Skipped));
 
         apply_status_update(
             &mut rec,
@@ -3989,8 +4020,64 @@ mod tests {
 
         assert_eq!(rec.status, WantedSubscriptionStatus::Matching);
         assert_eq!(rec.skip_reason, None);
-        assert!(!rec.attention_tags.contains(&SubscriptionAttentionTag::Skipped));
+        assert!(!rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Skipped));
         assert_eq!(rec.processing_stage.as_deref(), Some("searching"));
+    }
+
+    #[test]
+    fn successful_progress_clears_historical_failed_attention() {
+        let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
+        rec.status = WantedSubscriptionStatus::Failed;
+        rec.last_error = Some("qB 中未找到已推送种子".to_string());
+        rec.last_push = Some(TorrentPushRecord {
+            subscription_id: "1".to_string(),
+            torrent_id: "torrent-1".to_string(),
+            torrent_title: "旧片.2023".to_string(),
+            qb_server: "nas".to_string(),
+            qb_server_id: "nas".to_string(),
+            qb_category: "movie".to_string(),
+            qb_save_dir_name: "movies".to_string(),
+            qb_identifier: String::new(),
+            torrent_download_url: None,
+            mteam_torrent_url: None,
+            pushed_at: Some(100),
+            status: "failed".to_string(),
+            error: Some("qB 中未找到已推送种子".to_string()),
+            qb_hash: None,
+            qb_name: None,
+            checked_at: Some(120),
+            completed_at: None,
+            download_progress: Some(0.4),
+            download_state: None,
+            total_size: None,
+            completed_file_count: None,
+            total_file_count: None,
+            files: Vec::new(),
+            episodes: Vec::new(),
+            source_path: None,
+            target_dir: None,
+            linked_files: Vec::new(),
+        });
+        apply_push_stage(&mut rec, 120);
+        assert!(rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+
+        rec.status = WantedSubscriptionStatus::Downloading;
+        rec.last_error = None;
+        let push = rec.last_push.as_mut().unwrap();
+        push.status = "downloading".to_string();
+        push.error = None;
+        push.download_progress = Some(0.5);
+        apply_push_stage(&mut rec, 160);
+
+        assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Downloading);
+        assert_eq!(rec.processing_stage.as_deref(), Some("downloading"));
+        assert!(!rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
     }
 
     #[test]

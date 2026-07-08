@@ -583,7 +583,7 @@ fn normalize_subscription_watcher(
     cfg.library_limit = cfg.library_limit.clamp(1, 1200);
     cfg.max_retries = cfg.max_retries.clamp(1, 20);
     cfg.search_interval_secs = cfg.search_interval_secs.max(30);
-    cfg.progress_interval_secs = cfg.progress_interval_secs.max(30);
+    cfg.progress_interval_secs = cfg.progress_interval_secs.max(1);
     cfg.link_retry_interval_secs = cfg.link_retry_interval_secs.max(30);
     cfg.system_retry_interval_secs = cfg.system_retry_interval_secs.max(30);
     cfg
@@ -1800,22 +1800,32 @@ async fn persist_progress_sync_error(
     error: &str,
     now: u64,
 ) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    let cfg = state.config.read().await.clone();
     push.checked_at = Some(now);
     push.status = "failed".to_string();
     push.error = Some(error.to_string());
-    let record = state
+    let mut record = state
         .wanted_store
         .update_push_record(
             account_key,
             subject_id,
             push.clone(),
-            subscription::WantedSubscriptionStatus::Failed,
+            subscription::WantedSubscriptionStatus::Downloading,
             Some(error.to_string()),
             now,
         )
         .await
         .map_err(|e| ApiError::internal(format!("写入 qB 下载进度错误失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    let next_attempt_at = Some(now + cfg.subscription_watcher.progress_interval_secs);
+    if let Some(updated) = state
+        .wanted_store
+        .update_next_attempt_at(account_key, subject_id, next_attempt_at, now)
+        .await
+        .map_err(|e| ApiError::internal(format!("更新下载进度重试时间失败: {e}")))?
+    {
+        record = updated;
+    }
     write_operation_log(
         state,
         operation_log_entry(
@@ -3867,7 +3877,13 @@ fn apply_existing_qb_lookup_to_push(
     push.qb_name = Some(torrent.name.clone());
 }
 
-const WANTED_PIPELINE_TICK_SECS: u64 = 5;
+const WANTED_PIPELINE_TICK_SECS: u64 = 1;
+
+fn wanted_watch_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(Duration::from_secs(WANTED_PIPELINE_TICK_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WantedWatchTickAction {
@@ -4007,16 +4023,21 @@ async fn run_wanted_pipeline_tick(state: &AppState) -> Result<String, ApiError> 
 }
 
 async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Result<(), ApiError> {
+    let cfg = state.config.read().await.clone();
+    let watcher_cfg = cfg.subscription_watcher;
+    let now = unix_now_secs();
     let snapshot = state
         .wanted_store
-        .snapshot(account_key, unix_now_secs())
+        .snapshot(account_key, now)
         .await
         .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
     let records = snapshot.records.values().cloned().collect::<Vec<_>>();
     for record in records {
-        if !wanted_record_needs_automatic_pipeline(&record) {
+        let Some(action) = automatic_pipeline_action_for_wanted_record(&record, &watcher_cfg, now)
+        else {
             continue;
-        }
+        };
+        let subject_id = record.subject_id.clone();
         if let Err(err) = process_wanted_record_step(state, account_key, record.clone()).await {
             tracing::warn!(
                 subject_id = %record.subject_id,
@@ -4024,8 +4045,50 @@ async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Resu
                 "wanted subscription step failed: {}",
                 err.message()
             );
+        } else if let Err(err) = reschedule_automatic_pipeline_record(
+            state,
+            account_key,
+            &subject_id,
+            action,
+            &watcher_cfg,
+        )
+        .await
+        {
+            tracing::warn!(
+                subject_id = %subject_id,
+                "wanted subscription reschedule failed: {}",
+                err.message()
+            );
         }
     }
+    Ok(())
+}
+
+async fn reschedule_automatic_pipeline_record(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    action: SubscriptionRetryAction,
+    cfg: &config::SubscriptionWatcherConfig,
+) -> Result<(), ApiError> {
+    let now = unix_now_secs();
+    let snapshot = state
+        .wanted_store
+        .snapshot(account_key, now)
+        .await
+        .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
+    let Some(mut record) = snapshot.records.get(subject_id).cloned() else {
+        return Ok(());
+    };
+    if !wanted_record_needs_automatic_pipeline(&record) {
+        return Ok(());
+    }
+    schedule_next_automatic_attempt(&mut record, action, cfg, now);
+    state
+        .wanted_store
+        .update_next_attempt_at(account_key, subject_id, record.next_attempt_at, now)
+        .await
+        .map_err(|e| ApiError::internal(format!("更新订阅下次自动处理时间失败: {e}")))?;
     Ok(())
 }
 
@@ -4117,6 +4180,20 @@ fn pipeline_action_for_wanted_record(
     }
 }
 
+fn automatic_pipeline_action_for_wanted_record(
+    record: &subscription::WantedSubscriptionRecord,
+    _cfg: &config::SubscriptionWatcherConfig,
+    now: u64,
+) -> Option<SubscriptionRetryAction> {
+    if !wanted_record_needs_automatic_pipeline(record) {
+        return None;
+    }
+    if !record.force_eligible_once && record.next_attempt_at.is_some_and(|due| due > now) {
+        return None;
+    }
+    pipeline_action_for_wanted_record(record)
+}
+
 fn wanted_record_needs_automatic_pipeline(record: &subscription::WantedSubscriptionRecord) -> bool {
     !matches!(
         record.status,
@@ -4124,6 +4201,30 @@ fn wanted_record_needs_automatic_pipeline(record: &subscription::WantedSubscript
             | subscription::WantedSubscriptionStatus::Failed
             | subscription::WantedSubscriptionStatus::Linked
     )
+}
+
+fn schedule_next_automatic_attempt(
+    record: &mut subscription::WantedSubscriptionRecord,
+    action: SubscriptionRetryAction,
+    cfg: &config::SubscriptionWatcherConfig,
+    now: u64,
+) {
+    record.force_eligible_once = false;
+    record.next_attempt_at = Some(match action {
+        SubscriptionRetryAction::Push => now,
+        SubscriptionRetryAction::Progress => {
+            if matches!(
+                record.status,
+                subscription::WantedSubscriptionStatus::Pushed
+                    | subscription::WantedSubscriptionStatus::Downloading
+            ) {
+                now + cfg.progress_interval_secs
+            } else {
+                now
+            }
+        }
+        SubscriptionRetryAction::Completion => now,
+    });
 }
 
 fn pipeline_should_stop_after_action(action: SubscriptionRetryAction) -> bool {
@@ -4336,7 +4437,9 @@ async fn persist_if_status_unchanged_any(
 fn spawn_wanted_watch_loop(state: AppState) {
     tokio::spawn(async move {
         let mut last_wanted_poll_at = None;
+        let mut tick = wanted_watch_interval();
         loop {
+            tick.tick().await;
             let cfg = state.config.read().await.clone();
             let now_secs = unix_now_secs();
             let action = wanted_watch_tick_action(
@@ -4419,7 +4522,6 @@ fn spawn_wanted_watch_loop(state: AppState) {
                 }
                 None => {}
             }
-            tokio::time::sleep(Duration::from_secs(WANTED_PIPELINE_TICK_SECS)).await;
         }
     });
 }
@@ -6441,6 +6543,41 @@ mod subscription_category_tests {
     }
 
     #[test]
+    fn automatic_pipeline_waits_until_record_next_attempt() {
+        let cfg = config::SubscriptionWatcherConfig::default();
+        let mut record = wanted_record("subject-1", "测试电影", Some(2024));
+        record.status = subscription::WantedSubscriptionStatus::Downloading;
+        record.processing_stage = Some("downloading".to_string());
+        record.next_attempt_at = Some(105);
+
+        assert_eq!(cfg.progress_interval_secs, 5);
+        assert_eq!(
+            automatic_pipeline_action_for_wanted_record(&record, &cfg, 104),
+            None
+        );
+        assert_eq!(
+            automatic_pipeline_action_for_wanted_record(&record, &cfg, 105),
+            Some(SubscriptionRetryAction::Progress)
+        );
+    }
+
+    #[test]
+    fn automatic_pipeline_reschedules_downloading_progress_after_five_seconds() {
+        let cfg = config::SubscriptionWatcherConfig::default();
+        let mut record = wanted_record("subject-1", "测试电影", Some(2024));
+        record.status = subscription::WantedSubscriptionStatus::Downloading;
+
+        schedule_next_automatic_attempt(
+            &mut record,
+            SubscriptionRetryAction::Progress,
+            &cfg,
+            2_000,
+        );
+
+        assert_eq!(record.next_attempt_at, Some(2_005));
+    }
+
+    #[test]
     fn pipeline_stops_after_push_before_progress_lookup() {
         assert!(pipeline_should_stop_after_action(
             SubscriptionRetryAction::Push
@@ -6500,9 +6637,14 @@ mod subscription_category_tests {
         );
     }
 
-    #[test]
-    fn watcher_tick_runs_pipeline_between_douban_polls() {
-        assert_eq!(WANTED_PIPELINE_TICK_SECS, 5);
+    #[tokio::test]
+    async fn watcher_tick_runs_pipeline_between_douban_polls() {
+        assert_eq!(WANTED_PIPELINE_TICK_SECS, 1);
+        let interval = wanted_watch_interval();
+        assert_eq!(
+            interval.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Skip
+        );
         assert_eq!(
             wanted_watch_tick_action(true, true, 1_000, None, 3_600),
             Some(WantedWatchTickAction::PollWanted)
@@ -6843,6 +6985,19 @@ mod subscription_category_tests {
         .await
         .unwrap_or_else(|err| panic!("{}", err.message()));
         let progress_push = progress_record.last_push.as_ref().unwrap();
+        assert_eq!(
+            progress_record.status,
+            subscription::WantedSubscriptionStatus::Downloading
+        );
+        assert_eq!(progress_record.next_attempt_at, Some(225));
+        assert_eq!(
+            automatic_pipeline_action_for_wanted_record(
+                &progress_record,
+                &config::SubscriptionWatcherConfig::default(),
+                225,
+            ),
+            Some(SubscriptionRetryAction::Progress)
+        );
         assert_eq!(progress_push.status, "failed");
         assert_eq!(progress_push.checked_at, Some(220));
         assert_eq!(progress_push.download_progress, Some(0.4));

@@ -821,8 +821,6 @@
             :retry-subscription-current="retrySubscriptionCurrent"
             :can-rerun-subscription="canRerunSubscription"
             :rerun-subscription="rerunSubscription"
-            :refresh-subscription-progress="refreshSubscriptionProgress"
-            :check-subscription-completion="checkSubscriptionCompletion"
             :subscription-progress="subscriptionProgress"
             :format-percent="formatPercent"
             :push-rows="pushRows"
@@ -2677,7 +2675,9 @@ function subscriptionLifecycleKey(record) {
   if (stage === "download_complete" || stage === "link_planned" || stage === "link_failed")
     return "linking";
   if (["pushed", "downloading"].includes(stage)) return "downloading";
-  if (["searching", "matched", "pushing", "push_failed", "no_candidates", "no_match"].includes(stage))
+  if (
+    ["searching", "matched", "pushing", "push_failed", "no_candidates", "no_match"].includes(stage)
+  )
     return "searching";
   return SUB_LEGACY_LIFECYCLE_BY_STATUS[status] || "queued";
 }

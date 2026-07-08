@@ -48,3 +48,8 @@ assert.match(
   /class="subscription-detail"/,
   "SubscriptionDetailView should own the subscription detail article",
 );
+assert.doesNotMatch(
+  subscriptionSource,
+  /刷新下载进度|检查完成并硬链接|refreshSubscriptionProgress|checkSubscriptionCompletion/,
+  "SubscriptionDetailView should expose only retry-current and rerun task actions",
+);

@@ -147,7 +147,7 @@ fn default_subscription_search_interval_secs() -> u64 {
 }
 
 fn default_subscription_progress_interval_secs() -> u64 {
-    300
+    5
 }
 
 fn default_subscription_link_retry_interval_secs() -> u64 {
@@ -238,7 +238,7 @@ mod tests {
         let cfg = SubscriptionWatcherConfig::default();
 
         assert_eq!(cfg.search_interval_secs, 1_800);
-        assert_eq!(cfg.progress_interval_secs, 300);
+        assert_eq!(cfg.progress_interval_secs, 5);
         assert_eq!(cfg.link_retry_interval_secs, 900);
         assert_eq!(cfg.system_retry_interval_secs, 600);
     }
