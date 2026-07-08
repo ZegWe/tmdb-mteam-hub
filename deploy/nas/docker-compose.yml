@@ -1,0 +1,16 @@
+services:
+  tmdb-mteam-hub:
+    image: ghcr.io/zegwe/tmdb-mteam-hub:latest
+    container_name: tmdb-mteam-hub
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      CONFIG_PATH: /data/config/config.toml
+      TMDB_CACHE_DIR: /data/cache/tmdb
+      DOUBAN_CACHE_DIR: /data/cache/douban
+      SUBSCRIPTION_STATE_DIR: /data/cache/subscriptions
+      RUST_LOG: tmdb_mteam_server=info,tower_http=info
+    volumes:
+      - ./config:/data/config
+      - ./cache:/data/cache

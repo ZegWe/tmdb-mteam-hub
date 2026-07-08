@@ -1,0 +1,15 @@
+.git
+.github
+.agent-wt
+.agents
+.codex
+target
+node_modules
+frontend/node_modules
+cache
+static
+config.toml
+*.toml.tmp
+npm-debug.log*
+Dockerfile
+deploy
