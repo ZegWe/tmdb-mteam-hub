@@ -30,7 +30,9 @@ jobs:
 
       - name: Build frontend
         run: |
+          cd /tmp
           npm install -g npm@11.17.0
+          cd "$GITHUB_WORKSPACE"
           npm ci
           npm run build
 
