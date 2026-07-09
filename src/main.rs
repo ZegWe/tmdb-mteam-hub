@@ -149,10 +149,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             post(wanted_subscription_progress),
         )
         .route(
-            "/subscriptions/wanted/{id}/status",
-            post(wanted_subscription_status),
-        )
-        .route(
             "/subscriptions/wanted/{id}/retry-current",
             post(wanted_subscription_retry_current),
         )
@@ -775,66 +771,6 @@ async fn wanted_subscription_poll(State(state): State<AppState>) -> Result<Json<
     ))
 }
 
-async fn wanted_subscription_status(
-    State(state): State<AppState>,
-    PathParam(id): PathParam<String>,
-    Json(body): Json<subscription::WantedStatusUpdate>,
-) -> Result<Json<Value>, ApiError> {
-    let cfg = state.config.read().await.clone();
-    let account_key =
-        douban::auth_cache_key_fragment(&cfg.douban_cookie).map_err(ApiError::douban)?;
-    let outcome = state
-        .wanted_store
-        .update_status(
-            &account_key,
-            &id,
-            body,
-            cfg.subscription_watcher.max_retries,
-            unix_now_secs(),
-        )
-        .await
-        .map_err(|e| ApiError::internal(format!("更新想看订阅状态失败: {e}")))?;
-    let Some(outcome) = outcome else {
-        return Err(ApiError::bad_request("订阅记录不存在"));
-    };
-    write_operation_log(
-        &state,
-        operation_log_entry(
-            account_key.clone(),
-            if matches!(
-                outcome.record.status,
-                subscription::WantedSubscriptionStatus::Failed
-            ) {
-                "system_error"
-            } else {
-                "subscription_sync"
-            },
-            "update_subscription_status",
-            "subscription",
-            Some(outcome.record.subject_id.clone()),
-            Some(outcome.record.title.clone()),
-            if matches!(
-                outcome.record.status,
-                subscription::WantedSubscriptionStatus::Failed
-            ) {
-                "failed"
-            } else {
-                "success"
-            },
-            format!("订阅状态更新为 {:?}", outcome.record.status),
-            outcome.record.last_error.clone(),
-            json!({
-                "retry_count": outcome.record.retry_count,
-                "retry_exhausted": outcome.retry_exhausted,
-            }),
-        ),
-    )
-    .await;
-    Ok(Json(
-        serde_json::to_value(outcome).map_err(|e| ApiError::internal(e.to_string()))?,
-    ))
-}
-
 async fn wanted_subscription_retry_current(
     State(state): State<AppState>,
     PathParam(id): PathParam<String>,
@@ -1107,24 +1043,6 @@ async fn wanted_subscription_push(
         .await;
         return Err(ApiError::bad_request(error));
     };
-
-    let processing = subscription::WantedStatusUpdate {
-        status: subscription::WantedSubscriptionStatus::Processing,
-        error: None,
-        skip_reason: None,
-    };
-    state
-        .wanted_store
-        .update_status(
-            &account_key,
-            &record.subject_id,
-            processing,
-            cfg.subscription_watcher.max_retries,
-            unix_now_secs(),
-        )
-        .await
-        .map_err(|e| ApiError::internal(format!("更新订阅处理状态失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
 
     let dl_url =
         match mteam_fetch_gen_dl_url(&cfg.mteam_api_key, &selected.candidate.torrent_id).await {
@@ -4313,18 +4231,6 @@ async fn process_wanted_push_step(
     subject_id: &str,
     force: bool,
 ) -> Result<(), ApiError> {
-    let matching = subscription::WantedStatusUpdate {
-        status: subscription::WantedSubscriptionStatus::Matching,
-        error: None,
-        skip_reason: None,
-    };
-    let _ = wanted_subscription_status(
-        State(state.clone()),
-        PathParam(subject_id.to_string()),
-        Json(matching),
-    )
-    .await?;
-
     match wanted_subscription_push(
         State(state.clone()),
         PathParam(subject_id.to_string()),
@@ -5956,6 +5862,13 @@ fn normalize_douban_url(s: &str) -> String {
 #[cfg(test)]
 mod subscription_category_tests {
     use super::*;
+
+    #[test]
+    fn wanted_status_route_is_removed_from_router_source() {
+        let source = include_str!("main.rs");
+        assert!(!source.contains("\"/subscriptions/wanted/{id}/status\""));
+        assert!(!source.contains(concat!("wanted_subscription_", "status(")));
+    }
 
     fn category(name: &str, wanted_tag: &str) -> SubscriptionCategory {
         SubscriptionCategory {

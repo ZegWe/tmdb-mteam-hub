@@ -671,21 +671,6 @@ pub struct WantedPollOutcome {
     pub polled_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct WantedStatusUpdateOutcome {
-    pub record: WantedSubscriptionRecord,
-    pub retry_exhausted: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WantedStatusUpdate {
-    pub status: WantedSubscriptionStatus,
-    #[serde(default)]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub skip_reason: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationLogEntry {
     pub id: u64,
@@ -803,32 +788,6 @@ impl WantedSubscriptionStore {
         );
         self.save_state_unlocked(account_key, &state)?;
         Ok(outcome)
-    }
-
-    pub async fn update_status(
-        &self,
-        account_key: &str,
-        subject_id: &str,
-        update: WantedStatusUpdate,
-        max_retries: u32,
-        now: u64,
-    ) -> std::io::Result<Option<WantedStatusUpdateOutcome>> {
-        let _guard = self.lock.lock().await;
-        let mut state = self.load_state_unlocked(account_key, now).await?;
-        let Some((record, retry_exhausted)) =
-            state.records.get_mut(subject_id.trim()).map(|record| {
-                let retry_exhausted = apply_status_update(record, update, max_retries, now);
-                (record.clone(), retry_exhausted)
-            })
-        else {
-            return Ok(None);
-        };
-        state.updated_at = now;
-        self.save_state_unlocked(account_key, &state)?;
-        Ok(Some(WantedStatusUpdateOutcome {
-            record,
-            retry_exhausted,
-        }))
     }
 
     pub async fn update_candidate_matches(
@@ -3233,65 +3192,6 @@ fn douban_date_sort_key(raw: &str) -> Option<u64> {
     trimmed.parse::<u64>().ok()
 }
 
-fn apply_status_update(
-    record: &mut WantedSubscriptionRecord,
-    update: WantedStatusUpdate,
-    max_retries: u32,
-    now: u64,
-) -> bool {
-    let max_retries = max_retries.max(record.max_retries);
-    record.max_retries = max_retries;
-    record.updated_at = now;
-    match update.status {
-        WantedSubscriptionStatus::Failed => {
-            record.retry_count = record.retry_count.saturating_add(1);
-            record.last_error = update.error.filter(|s| !s.trim().is_empty());
-            let exhausted = record.retry_count >= max_retries;
-            record.status = if exhausted {
-                WantedSubscriptionStatus::Failed
-            } else {
-                WantedSubscriptionStatus::Unprocessed
-            };
-            let message = record
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "本次处理失败，等待下次自动重试".to_string());
-            if exhausted {
-                set_stage(record, "error", &message, Some("检查错误后手动重试"), now);
-            } else {
-                set_stage(record, "queued", &message, Some("等待下一轮自动重试"), now);
-            }
-            exhausted
-        }
-        WantedSubscriptionStatus::Skipped => {
-            record.status = WantedSubscriptionStatus::Skipped;
-            record.skip_reason = update.skip_reason.filter(|s| !s.trim().is_empty());
-            apply_status_stage(record, now);
-            false
-        }
-        status => {
-            record.status = status;
-            if matches!(
-                status,
-                WantedSubscriptionStatus::Matching
-                    | WantedSubscriptionStatus::Processing
-                    | WantedSubscriptionStatus::Pushed
-                    | WantedSubscriptionStatus::Downloading
-                    | WantedSubscriptionStatus::Completed
-                    | WantedSubscriptionStatus::Linked
-            ) {
-                record.last_error = None;
-                record.skip_reason = None;
-                record
-                    .attention_tags
-                    .retain(|tag| *tag != SubscriptionAttentionTag::Skipped);
-            }
-            apply_status_stage(record, now);
-            false
-        }
-    }
-}
-
 fn hydrate_stage_from_record(record: &mut WantedSubscriptionRecord) {
     let now = record.updated_at.max(record.created_at);
     if record.last_completion.is_some() {
@@ -3572,6 +3472,13 @@ fn safe_account_key(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_legacy_status_update_type_is_not_available_in_runtime_source() {
+        let source = include_str!("subscription.rs");
+        assert!(!source.contains(concat!("pub struct ", "WantedStatusUpdate")));
+        assert!(!source.contains(concat!("pub async fn ", "update_status")));
+    }
 
     fn item(id: &str, title: &str, abstract_text: &str, tags: &[&str]) -> DoubanLibraryItem {
         DoubanLibraryItem {
@@ -4841,35 +4748,6 @@ mod tests {
     }
 
     #[test]
-    fn active_status_update_clears_historical_skip_reason() {
-        let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
-        rec.status = WantedSubscriptionStatus::Skipped;
-        rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
-        apply_status_stage(&mut rec, 120);
-        assert!(rec
-            .attention_tags
-            .contains(&SubscriptionAttentionTag::Skipped));
-
-        apply_status_update(
-            &mut rec,
-            WantedStatusUpdate {
-                status: WantedSubscriptionStatus::Matching,
-                error: None,
-                skip_reason: None,
-            },
-            3,
-            160,
-        );
-
-        assert_eq!(rec.status, WantedSubscriptionStatus::Matching);
-        assert_eq!(rec.skip_reason, None);
-        assert!(!rec
-            .attention_tags
-            .contains(&SubscriptionAttentionTag::Skipped));
-        assert_eq!(rec.processing_stage.as_deref(), Some("searching"));
-    }
-
-    #[test]
     fn successful_progress_clears_historical_failed_attention() {
         let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
         rec.status = WantedSubscriptionStatus::Failed;
@@ -5021,37 +4899,25 @@ mod tests {
     }
 
     #[test]
-    fn failure_policy_caps_retries() {
+    fn semantic_failure_policy_caps_retries() {
         let mut rec = record_from_item(&item("1", "失败片", "2026 / 中国大陆", &[]), 0, 2, 100);
-        let first_exhausted = apply_status_update(
-            &mut rec,
-            WantedStatusUpdate {
-                status: WantedSubscriptionStatus::Failed,
-                error: Some("no torrent".to_string()),
-                skip_reason: None,
-            },
-            2,
-            120,
-        );
-        assert!(!first_exhausted);
-        assert_eq!(rec.status, WantedSubscriptionStatus::Unprocessed);
-        assert_eq!(rec.retry_count, 1);
+        let cfg = test_watcher_cfg();
 
-        let second_exhausted = apply_status_update(
-            &mut rec,
-            WantedStatusUpdate {
-                status: WantedSubscriptionStatus::Failed,
-                error: Some("still no torrent".to_string()),
-                skip_reason: None,
-            },
-            2,
-            180,
-        );
-        assert!(second_exhausted);
-        assert_eq!(rec.status, WantedSubscriptionStatus::Failed);
+        apply_parent_operation_failure(&mut rec, "search", "no torrent", &cfg, 120);
+        assert_eq!(rec.retry_count, 1);
+        assert_eq!(rec.last_error.as_deref(), Some("no torrent"));
+        assert!(!rec.failure.as_ref().unwrap().retry_blocked);
+        assert!(rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+
+        apply_parent_operation_failure(&mut rec, "search", "still no torrent", &cfg, 180);
         assert_eq!(rec.retry_count, 2);
         assert_eq!(rec.last_error.as_deref(), Some("still no torrent"));
-        assert_eq!(rec.processing_stage.as_deref(), Some("error"));
+        assert!(rec.failure.as_ref().unwrap().retry_blocked);
+        assert!(rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
     }
 
     #[test]
