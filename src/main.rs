@@ -7174,7 +7174,7 @@ mod subscription_category_tests {
             progress_record.failure.as_ref().unwrap().operation,
             "progress"
         );
-        assert_eq!(progress_record.next_attempt_at, Some(225));
+        assert_eq!(progress_record.next_attempt_at, Some(820));
         assert_eq!(progress_push.status, "failed");
         assert_eq!(progress_push.checked_at, Some(220));
         assert_eq!(progress_push.download_progress, Some(0.4));

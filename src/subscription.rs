@@ -3050,7 +3050,7 @@ pub fn apply_parent_operation_failure(
 
 fn retry_interval_for_operation(operation: &str, cfg: &SubscriptionWatcherConfig) -> u64 {
     match operation {
-        "progress" => cfg.progress_interval_secs,
+        "progress" => cfg.system_retry_interval_secs,
         "link" => cfg.link_retry_interval_secs,
         "search" => cfg.search_interval_secs,
         _ => 0,
@@ -5215,6 +5215,10 @@ mod tests {
             SubscriptionLifecycleState::Downloading
         );
         assert_eq!(updated.failure.as_ref().unwrap().operation, "progress");
+        assert_eq!(
+            updated.next_attempt_at,
+            Some(300 + cfg.system_retry_interval_secs)
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
