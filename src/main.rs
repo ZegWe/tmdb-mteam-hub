@@ -780,15 +780,13 @@ async fn wanted_subscription_retry_current(
         return Err(ApiError::bad_request("当前订阅状态不需要重试"));
     }
     let now = unix_now_secs();
-    let record = state
+    let (record, operation) = state
         .wanted_store
         .retry_current_node(&account_key, &record.subject_id, now)
         .await
         .map_err(|e| ApiError::internal(format!("更新订阅重试状态失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
-    let action = subscription::select_due_operation(&record, now)
-        .map(|operation| operation.as_str())
         .ok_or_else(|| ApiError::bad_request("当前订阅状态不需要重试"))?;
+    let action = operation.as_str();
     Ok(Json(json!({
         "ok": true,
         "action": action,
@@ -805,15 +803,13 @@ async fn wanted_subscription_rerun(
         return Err(ApiError::bad_request("订阅记录缺少 subject_id"));
     }
     let now = unix_now_secs();
-    let record = state
+    let (record, operation) = state
         .wanted_store
         .rerun_subscription_task(&account_key, &record.subject_id, now)
         .await
         .map_err(|e| ApiError::internal(format!("更新订阅重跑状态失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
-    let action = subscription::select_due_operation(&record, now)
-        .map(|operation| operation.as_str())
         .ok_or_else(|| ApiError::bad_request("当前订阅状态不需要重跑"))?;
+    let action = operation.as_str();
     Ok(Json(json!({
         "ok": true,
         "action": action,

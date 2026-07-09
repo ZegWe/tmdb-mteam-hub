@@ -1057,17 +1057,22 @@ impl WantedSubscriptionStore {
         account_key: &str,
         subject_id: &str,
         now: u64,
-    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+    ) -> std::io::Result<Option<(WantedSubscriptionRecord, SubscriptionDueOperation)>> {
         let _guard = self.lock.lock().await;
         let mut state = self.load_state_unlocked(account_key, now).await?;
-        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+        let key = subject_id.trim();
+        let Some(record) = state.records.get(key).cloned() else {
             return Ok(None);
         };
-        retry_current_node(record, now);
+        let mut record = record;
         state.updated_at = now;
-        let record = record.clone();
+        retry_current_node(&mut record, now);
+        let Some(operation) = select_due_operation(&record, now) else {
+            return Ok(None);
+        };
+        state.records.insert(key.to_string(), record.clone());
         self.save_state_unlocked(account_key, &state)?;
-        Ok(Some(record))
+        Ok(Some((record, operation)))
     }
 
     pub async fn rerun_subscription_task(
@@ -1075,17 +1080,22 @@ impl WantedSubscriptionStore {
         account_key: &str,
         subject_id: &str,
         now: u64,
-    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+    ) -> std::io::Result<Option<(WantedSubscriptionRecord, SubscriptionDueOperation)>> {
         let _guard = self.lock.lock().await;
         let mut state = self.load_state_unlocked(account_key, now).await?;
-        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+        let key = subject_id.trim();
+        let Some(record) = state.records.get(key).cloned() else {
             return Ok(None);
         };
-        rerun_subscription_task(record, now);
+        let mut record = record;
         state.updated_at = now;
-        let record = record.clone();
+        rerun_subscription_task(&mut record, now);
+        let Some(operation) = select_due_operation(&record, now) else {
+            return Ok(None);
+        };
+        state.records.insert(key.to_string(), record.clone());
         self.save_state_unlocked(account_key, &state)?;
-        Ok(Some(record))
+        Ok(Some((record, operation)))
     }
 
     pub async fn update_completion_record(
@@ -2761,9 +2771,7 @@ pub fn rerun_subscription_task(record: &mut WantedSubscriptionRecord, now: u64) 
     };
     record.execution_state = SubscriptionExecutionState::Idle;
     record.failure = None;
-    record
-        .attention_tags
-        .retain(|tag| *tag == SubscriptionAttentionTag::Skipped);
+    record.attention_tags.clear();
     record.last_push = None;
     record.last_completion = None;
     record.candidate_matches.clear();
@@ -4760,6 +4768,49 @@ mod tests {
     }
 
     #[test]
+    fn rerun_skipped_movie_clears_skipped_and_makes_search_due() {
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Completed, 1_000);
+        record.attention_tags = vec![SubscriptionAttentionTag::Skipped];
+
+        rerun_subscription_task(&mut record, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Skipped));
+        assert_eq!(
+            select_due_operation(&record, 2_000),
+            Some(SubscriptionDueOperation::MovieSearch)
+        );
+    }
+
+    #[test]
+    fn manual_tv_metadata_missing_commands_remain_actionable_as_meta() {
+        let mut retry = bare_tv_record("subject-tv-retry", 1, 8);
+        retry.tv.as_mut().unwrap().metadata_ready = false;
+        retry.next_attempt_at = None;
+        retry_current_node(&mut retry, 2_000);
+
+        assert_eq!(
+            select_due_operation(&retry, 2_000),
+            Some(SubscriptionDueOperation::TvMeta)
+        );
+
+        let mut rerun = bare_tv_record("subject-tv-rerun", 1, 8);
+        rerun.tv.as_mut().unwrap().metadata_ready = false;
+        rerun.next_attempt_at = None;
+        rerun_subscription_task(&mut rerun, 2_000);
+
+        assert_eq!(
+            select_due_operation(&rerun, 2_000),
+            Some(SubscriptionDueOperation::TvMeta)
+        );
+    }
+
+    #[test]
     fn tv_lane_failure_does_not_block_other_due_lanes() {
         let mut record = tv_record_all_lanes_due(1_000);
         let tv = record.tv.as_mut().unwrap();
@@ -5216,6 +5267,53 @@ mod tests {
         );
         assert_eq!(persisted.updated_at, 200);
         assert_eq!(persisted.next_attempt_at, Some(200));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn manual_commands_do_not_persist_tv_ready_record_when_no_lane_is_due() {
+        let root = temp_state_dir("manual_tv_no_due");
+        let store = WantedSubscriptionStore::new(root.clone());
+        let mut record = tv_record_ready_for_search("subject-tv");
+        record.updated_at = 1_000;
+        record.next_attempt_at = None;
+        record.force_eligible_once = false;
+        {
+            let tv = record.tv.as_mut().unwrap();
+            tv.lanes.link.next_attempt_at = None;
+            tv.lanes.link.force_eligible_once = false;
+            tv.lanes.progress.next_attempt_at = None;
+            tv.lanes.progress.force_eligible_once = false;
+            tv.lanes.search.next_attempt_at = None;
+            tv.lanes.search.force_eligible_once = false;
+        }
+        let mut state = WantedSubscriptionState::new("acct", 1_000);
+        state
+            .records
+            .insert(record.subject_id.clone(), record.clone());
+        store.save_state_unlocked("acct", &state).unwrap();
+
+        assert!(store
+            .retry_current_node("acct", "subject-tv", 2_000)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .rerun_subscription_task("acct", "subject-tv", 2_000)
+            .await
+            .unwrap()
+            .is_none());
+
+        let snapshot = store.snapshot("acct", 3_000).await.unwrap();
+        let persisted = snapshot.records.get("subject-tv").unwrap();
+        assert_eq!(persisted.updated_at, 1_000);
+        assert_eq!(persisted.next_attempt_at, None);
+        assert!(!persisted.force_eligible_once);
+        assert_eq!(
+            persisted.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
