@@ -4231,18 +4231,12 @@ async fn process_wanted_push_step(
     subject_id: &str,
     force: bool,
 ) -> Result<(), ApiError> {
-    let original_updated_at = state
+    let original_record = state
         .wanted_store
         .snapshot(account_key, unix_now_secs())
         .await
         .ok()
-        .and_then(|snapshot| {
-            snapshot
-                .records
-                .get(subject_id)
-                .map(|record| record.updated_at)
-        })
-        .unwrap_or(0);
+        .and_then(|snapshot| snapshot.records.get(subject_id).cloned());
     match wanted_subscription_push(
         State(state.clone()),
         PathParam(subject_id.to_string()),
@@ -4259,7 +4253,7 @@ async fn process_wanted_push_step(
                 state,
                 account_key,
                 subject_id,
-                original_updated_at,
+                original_record.as_ref(),
             )
             .await
             {
@@ -4293,7 +4287,7 @@ async fn should_persist_search_step_failure_fallback(
     state: &AppState,
     account_key: &str,
     subject_id: &str,
-    original_updated_at: u64,
+    original: Option<&subscription::WantedSubscriptionRecord>,
 ) -> bool {
     let Ok(snapshot) = state
         .wanted_store
@@ -4305,16 +4299,47 @@ async fn should_persist_search_step_failure_fallback(
     let Some(record) = snapshot.records.get(subject_id) else {
         return false;
     };
-    if record.updated_at < original_updated_at {
+    let Some(original) = original else {
+        return !record.failure.is_some()
+            && !record
+                .last_push
+                .as_ref()
+                .is_some_and(|push| push.status == "failed");
+    };
+    !search_step_failure_was_persisted_during_attempt(original, record)
+}
+
+fn search_step_failure_was_persisted_during_attempt(
+    original: &subscription::WantedSubscriptionRecord,
+    current: &subscription::WantedSubscriptionRecord,
+) -> bool {
+    if current.retry_count > original.retry_count {
         return true;
     }
-    if record.failure.is_some() {
+    if current.updated_at <= original.updated_at {
         return false;
     }
-    !record
-        .last_push
-        .as_ref()
-        .is_some_and(|push| push.status == "failed")
+    failed_push_marker_changed(original.last_push.as_ref(), current.last_push.as_ref())
+}
+
+fn failed_push_marker_changed(
+    original: Option<&subscription::TorrentPushRecord>,
+    current: Option<&subscription::TorrentPushRecord>,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    if current.status != "failed" {
+        return false;
+    }
+    let Some(original) = original else {
+        return true;
+    };
+    original.status != current.status
+        || original.error != current.error
+        || original.pushed_at != current.pushed_at
+        || original.checked_at != current.checked_at
+        || original.torrent_id != current.torrent_id
 }
 
 async fn process_wanted_progress_step(
@@ -6971,16 +6996,118 @@ mod subscription_category_tests {
     }
 
     #[tokio::test]
-    async fn push_step_does_not_duplicate_already_persisted_push_failure() {
-        let root = temp_test_dir("push_step_no_duplicate_failure");
+    async fn stale_search_failure_does_not_suppress_new_push_step_fallback() {
+        let root = temp_test_dir("push_step_stale_failure");
         let state = test_app_state(&root);
         let account_key = "acct";
-        let subject_id = "subject-push-duplicate";
+        let subject_id = "subject-stale-failure";
         seed_wanted_record(&state, account_key, subject_id).await;
         {
             let mut cfg = state.config.write().await;
             cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
             cfg.mteam_api_key = String::new();
+            cfg.subscription_watcher.search_interval_secs = 5;
+            cfg.subscription_categories = vec![category("电影", "电影")];
+            cfg.qb_servers = vec![QbServerEntry {
+                id: "nas".to_string(),
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                insecure_tls: false,
+            }];
+        }
+
+        let category = category("电影", "电影");
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let selected = subscription::TorrentCandidateMatchRecord {
+            candidate: torrent("12345", "测试电影 2160p"),
+            selected: true,
+            matched_rule_name: Some("default".to_string()),
+            matched_priority: Some(1),
+            matched_keywords: Vec::new(),
+            excluded_reason: None,
+            rule_evaluations: Vec::new(),
+        };
+        let watcher_cfg = state.config.read().await.subscription_watcher.clone();
+        state
+            .wanted_store
+            .update_candidate_matches(account_key, subject_id, vec![selected.clone()], 205)
+            .await
+            .unwrap()
+            .unwrap();
+        let old_push = torrent_push_record(
+            subject_id,
+            &qb,
+            &category,
+            &selected.candidate,
+            "failed",
+            None,
+            Some("qB 添加种子失败".to_string()),
+        );
+        state
+            .wanted_store
+            .apply_movie_push_result(
+                account_key,
+                subject_id,
+                old_push,
+                Some("qB 添加种子失败".to_string()),
+                &watcher_cfg,
+                210,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let before = state.wanted_store.snapshot(account_key, 215).await.unwrap();
+        let before_record = before.records.get(subject_id).unwrap();
+        let old_failed_at = before_record.failure.as_ref().unwrap().failed_at;
+        let old_updated_at = before_record.updated_at;
+        assert_eq!(before_record.retry_count, 1);
+        assert_eq!(before_record.failure.as_ref().unwrap().operation, "search");
+        assert_eq!(
+            before_record.last_push.as_ref().unwrap().status.as_str(),
+            "failed"
+        );
+
+        let err = process_wanted_push_step(&state, account_key, subject_id, true)
+            .await
+            .unwrap_err();
+
+        assert!(err.message().contains("M-Team API Key"));
+        let snapshot = state.wanted_store.snapshot(account_key, 220).await.unwrap();
+        let record = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(record.retry_count, 2);
+        assert_eq!(record.failure.as_ref().unwrap().operation, "search");
+        assert!(record.failure.as_ref().unwrap().failed_at > old_failed_at);
+        assert!(record.updated_at > old_updated_at);
+        assert!(record
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("M-Team API Key"));
+        assert_eq!(record.last_push.as_ref().unwrap().status.as_str(), "failed");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn same_attempt_push_failure_suppresses_search_step_fallback() {
+        let root = temp_test_dir("push_step_same_attempt_failure");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-push-same-attempt";
+        seed_wanted_record(&state, account_key, subject_id).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
             cfg.subscription_watcher.search_interval_secs = 5;
             cfg.subscription_categories = vec![category("电影", "电影")];
             cfg.qb_servers = vec![QbServerEntry {
@@ -7017,6 +7144,15 @@ mod subscription_category_tests {
             .await
             .unwrap()
             .unwrap();
+        let original = state
+            .wanted_store
+            .snapshot(account_key, 210)
+            .await
+            .unwrap()
+            .records
+            .get(subject_id)
+            .unwrap()
+            .clone();
         record_push_failure(
             &state,
             account_key,
@@ -7029,20 +7165,16 @@ mod subscription_category_tests {
         )
         .await
         .unwrap_or_else(|err| panic!("{}", err.message()));
-        let before = state.wanted_store.snapshot(account_key, 210).await.unwrap();
-        let before_record = before.records.get(subject_id).unwrap();
-        assert_eq!(before_record.retry_count, 1);
-        assert_eq!(before_record.failure.as_ref().unwrap().operation, "search");
-        assert_eq!(
-            before_record.last_push.as_ref().unwrap().status.as_str(),
-            "failed"
-        );
 
-        let err = process_wanted_push_step(&state, account_key, subject_id, true)
-            .await
-            .unwrap_err();
+        let should_persist = should_persist_search_step_failure_fallback(
+            &state,
+            account_key,
+            subject_id,
+            Some(&original),
+        )
+        .await;
 
-        assert!(err.message().contains("M-Team API Key"));
+        assert!(!should_persist);
         let snapshot = state.wanted_store.snapshot(account_key, 220).await.unwrap();
         let record = snapshot.records.get(subject_id).unwrap();
         assert_eq!(record.retry_count, 1);
