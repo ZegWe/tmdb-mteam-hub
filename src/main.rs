@@ -6308,6 +6308,29 @@ mod subscription_category_tests {
     }
 
     #[test]
+    fn watcher_movie_progress_dispatches_to_progress_sync() {
+        let source = include_str!("main.rs");
+        let body = function_body(source, "execute_due_subscription_operation");
+        let progress_branch = body
+            .split("subscription::SubscriptionDueOperation::MovieProgress =>")
+            .nth(1)
+            .and_then(|part| {
+                part.split("subscription::SubscriptionDueOperation::MovieLink =>")
+                    .next()
+            })
+            .unwrap_or_else(|| panic!("MovieProgress dispatch branch should exist"));
+
+        assert!(
+            progress_branch.contains("process_wanted_progress_step"),
+            "MovieProgress must sync qB download progress during watcher ticks"
+        );
+        assert!(
+            !progress_branch.contains("process_wanted_completion_step"),
+            "MovieProgress must not skip straight to completion checks"
+        );
+    }
+
+    #[test]
     fn watcher_ignores_legacy_status_for_action_selection() {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
         record.lifecycle_state = subscription::SubscriptionLifecycleState::Linking;

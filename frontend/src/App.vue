@@ -1195,9 +1195,7 @@ watch(
   ([next]) => {
     clearError();
     if (next === "settings") loadSettings();
-    const inSubscriptionArea =
-      route.name === "subscriptions" || route.name === "subscription-detail";
-    if (inSubscriptionArea) {
+    if (isSubscriptionRoute()) {
       loadSubscriptions({ silent: true });
       startSubscriptionAutoSync();
     } else {
@@ -1232,7 +1230,7 @@ watch(themeMode, (mode) => {
 
 onMounted(() => {
   loadSettings();
-  if (page.value === "subscriptions") startSubscriptionAutoSync();
+  if (isSubscriptionRoute()) startSubscriptionAutoSync();
   themePreferenceCleanup = watchSystemThemePreference((prefersDark) => {
     systemPrefersDark.value = prefersDark;
   });
@@ -2367,9 +2365,12 @@ function stopSubscriptionAutoSync() {
   }
 }
 
+function isSubscriptionRoute() {
+  return route.name === "subscriptions" || route.name === "subscription-detail";
+}
+
 async function syncSubscriptionState({ silent = true } = {}) {
-  if (subscriptionAutoSyncInFlight || page.value !== "subscriptions")
-    return subscriptionState.value;
+  if (subscriptionAutoSyncInFlight || !isSubscriptionRoute()) return subscriptionState.value;
   if (typeof document !== "undefined" && document.visibilityState === "hidden") {
     return subscriptionState.value;
   }

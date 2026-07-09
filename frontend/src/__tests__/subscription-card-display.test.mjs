@@ -133,6 +133,24 @@ for (const [name, body] of [
 
 assert.equal(appSource.includes("SUB_LEGACY_LIFECYCLE_BY_STATUS"), false);
 
+{
+  const syncBody = sourceBetween(
+    "async function syncSubscriptionState",
+    "\nfunction subscriptionPollToast",
+    "subscription auto sync helper",
+  );
+  assert.match(
+    syncBody,
+    /!isSubscriptionRoute\(\)/,
+    "subscription auto sync should keep refreshing while the subscription detail route is open",
+  );
+  assert.doesNotMatch(
+    syncBody,
+    /page\.value\s*!==\s*["']subscriptions["']/,
+    "subscription auto sync must not stop on the subscription detail page",
+  );
+}
+
 const failedRecord = {
   lifecycle_state: "searching",
   attention_tags: ["failed"],
