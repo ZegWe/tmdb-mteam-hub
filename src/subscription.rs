@@ -2560,7 +2560,66 @@ pub fn apply_movie_operation_outcome(
             record.next_attempt_at = Some(now + cfg.search_interval_secs);
         }
     }
-    record.status = derive_legacy_status(record);
+}
+
+pub fn apply_movie_waiting_release(
+    record: &mut WantedSubscriptionRecord,
+    message: &str,
+    cfg: &SubscriptionWatcherConfig,
+    now: u64,
+) {
+    record.lifecycle_state = SubscriptionLifecycleState::Searching;
+    record.execution_state = SubscriptionExecutionState::Idle;
+    record.failure = None;
+    record.last_error = Some(message.to_string());
+    merge_attention_tags(record, vec![SubscriptionAttentionTag::WaitingRelease]);
+    record.next_attempt_at = Some(now + cfg.search_interval_secs);
+    record.force_eligible_once = false;
+    record.updated_at = now;
+}
+
+pub fn apply_parent_operation_failure(
+    record: &mut WantedSubscriptionRecord,
+    operation: &str,
+    message: &str,
+    cfg: &SubscriptionWatcherConfig,
+    now: u64,
+) {
+    record.execution_state = SubscriptionExecutionState::Idle;
+    record.retry_count = record.retry_count.saturating_add(1);
+    let retry_blocked = record.max_retries > 0 && record.retry_count >= record.max_retries;
+    record.failure = Some(SubscriptionFailure {
+        scope: FailureScope::Parent,
+        owner_id: record.subject_id.clone(),
+        operation: operation.to_string(),
+        error_type: "system".to_string(),
+        message: message.to_string(),
+        retry_count: record.retry_count,
+        max_retries: record.max_retries,
+        failed_at: now,
+        next_retry_at: (!retry_blocked)
+            .then_some(now + retry_interval_for_operation(operation, cfg)),
+        retry_blocked,
+    });
+    merge_attention_tags(record, vec![SubscriptionAttentionTag::Failed]);
+    if retry_blocked {
+        merge_attention_tags(record, vec![SubscriptionAttentionTag::RetryBlocked]);
+        record.next_attempt_at = None;
+    } else {
+        record.next_attempt_at = Some(now + retry_interval_for_operation(operation, cfg));
+    }
+    record.force_eligible_once = false;
+    record.last_error = Some(message.to_string());
+    record.updated_at = now;
+}
+
+fn retry_interval_for_operation(operation: &str, cfg: &SubscriptionWatcherConfig) -> u64 {
+    match operation {
+        "progress" => cfg.progress_interval_secs,
+        "link" => cfg.link_retry_interval_secs,
+        "search" => cfg.search_interval_secs,
+        _ => 0,
+    }
 }
 
 #[allow(dead_code)]
@@ -3877,6 +3936,67 @@ mod tests {
         assert_eq!(
             record.next_attempt_at,
             Some(2_000 + cfg.progress_interval_secs)
+        );
+    }
+
+    #[test]
+    fn movie_search_waiting_release_keeps_searching_without_retry_churn() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Searching, 1_000);
+        record.retry_count = 2;
+
+        apply_movie_waiting_release(&mut record, "未搜索到候选种子", &cfg, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert!(
+            record
+                .attention_tags
+                .contains(&SubscriptionAttentionTag::WaitingRelease)
+        );
+        assert_eq!(record.retry_count, 2);
+        assert_eq!(
+            record.next_attempt_at,
+            Some(2_000 + cfg.search_interval_secs)
+        );
+        assert!(record.failure.is_none());
+    }
+
+    #[test]
+    fn movie_download_complete_moves_to_linking_not_completed() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Downloading, 1_000);
+
+        apply_movie_operation_outcome(
+            &mut record,
+            MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Linking),
+            &cfg,
+            2_000,
+        );
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert_eq!(record.next_attempt_at, Some(2_000));
+    }
+
+    #[test]
+    fn movie_link_failure_stays_linking_with_retry_due_time() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Linking, 1_000);
+
+        apply_parent_operation_failure(&mut record, "link", "hardlink failed", &cfg, 2_000);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert!(
+            record
+                .attention_tags
+                .contains(&SubscriptionAttentionTag::Failed)
+        );
+        assert_eq!(record.failure.as_ref().unwrap().operation, "link");
+        assert_eq!(
+            record.next_attempt_at,
+            Some(2_000 + cfg.link_retry_interval_secs)
         );
     }
 
