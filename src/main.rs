@@ -1352,12 +1352,7 @@ async fn wanted_subscription_completion(
 ) -> Result<Json<Value>, ApiError> {
     let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
     let now = unix_now_secs();
-    if matches!(
-        record.status,
-        subscription::WantedSubscriptionStatus::Completed
-            | subscription::WantedSubscriptionStatus::Linked
-    ) && !body.force
-    {
+    if subscription_completion_already_linked(&record) && !body.force {
         return Ok(Json(json!({
             "ok": true,
             "already_completed": true,
@@ -1622,6 +1617,20 @@ async fn wanted_subscription_completion(
         "plan_file_count": plan.files.len(),
         "record": record,
     })))
+}
+
+fn subscription_completion_already_linked(record: &subscription::WantedSubscriptionRecord) -> bool {
+    matches!(
+        record.status,
+        subscription::WantedSubscriptionStatus::Linked
+    ) || record
+        .last_completion
+        .as_ref()
+        .is_some_and(|completion| completion.status == "completed")
+        || record
+            .last_push
+            .as_ref()
+            .is_some_and(|push| push.status == "linked")
 }
 
 async fn wanted_subscription_progress(
@@ -4023,8 +4032,6 @@ async fn run_wanted_pipeline_tick(state: &AppState) -> Result<String, ApiError> 
 }
 
 async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Result<(), ApiError> {
-    let cfg = state.config.read().await.clone();
-    let watcher_cfg = cfg.subscription_watcher;
     let now = unix_now_secs();
     let snapshot = state
         .wanted_store
@@ -4033,30 +4040,17 @@ async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Resu
         .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
     let records = snapshot.records.values().cloned().collect::<Vec<_>>();
     for record in records {
-        let Some(action) = automatic_pipeline_action_for_wanted_record(&record, &watcher_cfg, now)
-        else {
+        let Some(operation) = select_watcher_due_operation(&record, now) else {
             continue;
         };
-        let subject_id = record.subject_id.clone();
-        if let Err(err) = process_wanted_record_step(state, account_key, record.clone()).await {
-            tracing::warn!(
-                subject_id = %record.subject_id,
-                status = ?record.status,
-                "wanted subscription step failed: {}",
-                err.message()
-            );
-        } else if let Err(err) = reschedule_automatic_pipeline_record(
-            state,
-            account_key,
-            &subject_id,
-            action,
-            &watcher_cfg,
-        )
-        .await
+        if let Err(err) =
+            execute_due_subscription_operation(state, account_key, record.clone(), operation).await
         {
             tracing::warn!(
-                subject_id = %subject_id,
-                "wanted subscription reschedule failed: {}",
+                subject_id = %record.subject_id,
+                lifecycle_state = %record.lifecycle_state.as_str(),
+                operation = ?operation,
+                "wanted subscription due operation failed: {}",
                 err.message()
             );
         }
@@ -4064,40 +4058,94 @@ async fn process_wanted_watch_queue(state: &AppState, account_key: &str) -> Resu
     Ok(())
 }
 
-async fn reschedule_automatic_pipeline_record(
-    state: &AppState,
-    account_key: &str,
-    subject_id: &str,
-    action: SubscriptionRetryAction,
-    cfg: &config::SubscriptionWatcherConfig,
-) -> Result<(), ApiError> {
-    let now = unix_now_secs();
-    let snapshot = state
-        .wanted_store
-        .snapshot(account_key, now)
-        .await
-        .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
-    let Some(mut record) = snapshot.records.get(subject_id).cloned() else {
-        return Ok(());
-    };
-    if !wanted_record_needs_automatic_pipeline(&record) {
-        return Ok(());
-    }
-    schedule_next_automatic_attempt(&mut record, action, cfg, now);
-    state
-        .wanted_store
-        .update_next_attempt_at(account_key, subject_id, record.next_attempt_at, now)
-        .await
-        .map_err(|e| ApiError::internal(format!("更新订阅下次自动处理时间失败: {e}")))?;
-    Ok(())
+fn select_watcher_due_operation(
+    record: &subscription::WantedSubscriptionRecord,
+    now: u64,
+) -> Option<subscription::SubscriptionDueOperation> {
+    subscription::select_due_operation(record, now)
 }
 
-async fn process_wanted_record_step(
+async fn execute_due_subscription_operation(
     state: &AppState,
     account_key: &str,
     record: subscription::WantedSubscriptionRecord,
+    operation: subscription::SubscriptionDueOperation,
 ) -> Result<(), ApiError> {
-    process_wanted_record_pipeline(state, account_key, record).await
+    match operation {
+        subscription::SubscriptionDueOperation::MovieMeta => {
+            process_movie_meta_operation(state, account_key, &record).await
+        }
+        subscription::SubscriptionDueOperation::MovieSearch => {
+            process_wanted_push_step(state, account_key, &record.subject_id, true).await
+        }
+        subscription::SubscriptionDueOperation::MovieProgress => {
+            process_wanted_progress_step(state, account_key, &record.subject_id).await
+        }
+        subscription::SubscriptionDueOperation::MovieLink => {
+            process_wanted_completion_step(state, account_key, &record.subject_id).await
+        }
+        subscription::SubscriptionDueOperation::TvMeta => {
+            process_tv_meta_operation(state, account_key, &record).await
+        }
+        subscription::SubscriptionDueOperation::TvLane(lane) => {
+            process_tv_lane_operation(state, account_key, &record, lane).await
+        }
+    }
+}
+
+async fn process_movie_meta_operation(
+    state: &AppState,
+    account_key: &str,
+    record: &subscription::WantedSubscriptionRecord,
+) -> Result<(), ApiError> {
+    let cfg = state.config.read().await.clone();
+    let outcome = match record.lifecycle_state {
+        subscription::SubscriptionLifecycleState::Queued => {
+            subscription::MovieOperationOutcome::Advanced(
+                subscription::SubscriptionLifecycleState::Meta,
+            )
+        }
+        subscription::SubscriptionLifecycleState::Meta => {
+            subscription::MovieOperationOutcome::Advanced(
+                subscription::SubscriptionLifecycleState::Searching,
+            )
+        }
+        lifecycle_state => subscription::MovieOperationOutcome::Advanced(lifecycle_state),
+    };
+    state
+        .wanted_store
+        .transition_movie_operation(
+            account_key,
+            &record.subject_id,
+            outcome,
+            &cfg.subscription_watcher,
+            unix_now_secs(),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("更新电影订阅元数据阶段失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    Ok(())
+}
+
+async fn process_tv_meta_operation(
+    _state: &AppState,
+    _account_key: &str,
+    _record: &subscription::WantedSubscriptionRecord,
+) -> Result<(), ApiError> {
+    Err(ApiError::bad_request(
+        "TV meta operation is not implemented yet",
+    ))
+}
+
+async fn process_tv_lane_operation(
+    _state: &AppState,
+    _account_key: &str,
+    _record: &subscription::WantedSubscriptionRecord,
+    lane: subscription::TvLaneKind,
+) -> Result<(), ApiError> {
+    Err(ApiError::bad_request(format!(
+        "TV lane operation is not implemented yet: {lane:?}"
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4178,53 +4226,6 @@ fn pipeline_action_for_wanted_record(
         subscription::WantedSubscriptionStatus::Linked
         | subscription::WantedSubscriptionStatus::Failed => None,
     }
-}
-
-fn automatic_pipeline_action_for_wanted_record(
-    record: &subscription::WantedSubscriptionRecord,
-    _cfg: &config::SubscriptionWatcherConfig,
-    now: u64,
-) -> Option<SubscriptionRetryAction> {
-    if !wanted_record_needs_automatic_pipeline(record) {
-        return None;
-    }
-    if !record.force_eligible_once && record.next_attempt_at.is_some_and(|due| due > now) {
-        return None;
-    }
-    pipeline_action_for_wanted_record(record)
-}
-
-fn wanted_record_needs_automatic_pipeline(record: &subscription::WantedSubscriptionRecord) -> bool {
-    !matches!(
-        record.status,
-        subscription::WantedSubscriptionStatus::Skipped
-            | subscription::WantedSubscriptionStatus::Failed
-            | subscription::WantedSubscriptionStatus::Linked
-    )
-}
-
-fn schedule_next_automatic_attempt(
-    record: &mut subscription::WantedSubscriptionRecord,
-    action: SubscriptionRetryAction,
-    cfg: &config::SubscriptionWatcherConfig,
-    now: u64,
-) {
-    record.force_eligible_once = false;
-    record.next_attempt_at = Some(match action {
-        SubscriptionRetryAction::Push => now,
-        SubscriptionRetryAction::Progress => {
-            if matches!(
-                record.status,
-                subscription::WantedSubscriptionStatus::Pushed
-                    | subscription::WantedSubscriptionStatus::Downloading
-            ) {
-                now + cfg.progress_interval_secs
-            } else {
-                now
-            }
-        }
-        SubscriptionRetryAction::Completion => now,
-    });
 }
 
 fn pipeline_should_stop_after_action(action: SubscriptionRetryAction) -> bool {
@@ -6543,38 +6544,30 @@ mod subscription_category_tests {
     }
 
     #[test]
-    fn automatic_pipeline_waits_until_record_next_attempt() {
-        let cfg = config::SubscriptionWatcherConfig::default();
+    fn watcher_uses_select_due_operation_for_movie_states() {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
-        record.status = subscription::WantedSubscriptionStatus::Downloading;
-        record.processing_stage = Some("downloading".to_string());
+        record.lifecycle_state = subscription::SubscriptionLifecycleState::Downloading;
         record.next_attempt_at = Some(105);
 
-        assert_eq!(cfg.progress_interval_secs, 5);
+        assert_eq!(select_watcher_due_operation(&record, 104), None);
         assert_eq!(
-            automatic_pipeline_action_for_wanted_record(&record, &cfg, 104),
-            None
-        );
-        assert_eq!(
-            automatic_pipeline_action_for_wanted_record(&record, &cfg, 105),
-            Some(SubscriptionRetryAction::Progress)
+            select_watcher_due_operation(&record, 105),
+            Some(subscription::SubscriptionDueOperation::MovieProgress)
         );
     }
 
     #[test]
-    fn automatic_pipeline_reschedules_downloading_progress_after_five_seconds() {
-        let cfg = config::SubscriptionWatcherConfig::default();
+    fn watcher_ignores_legacy_status_for_action_selection() {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
-        record.status = subscription::WantedSubscriptionStatus::Downloading;
+        record.lifecycle_state = subscription::SubscriptionLifecycleState::Linking;
+        record.next_attempt_at = Some(100);
+        record.status = subscription::WantedSubscriptionStatus::Unprocessed;
+        record.processing_stage = Some("queued".to_string());
 
-        schedule_next_automatic_attempt(
-            &mut record,
-            SubscriptionRetryAction::Progress,
-            &cfg,
-            2_000,
+        assert_eq!(
+            select_watcher_due_operation(&record, 100),
+            Some(subscription::SubscriptionDueOperation::MovieLink)
         );
-
-        assert_eq!(record.next_attempt_at, Some(2_005));
     }
 
     #[test]
@@ -6668,24 +6661,31 @@ mod subscription_category_tests {
     }
 
     #[test]
-    fn automatic_pipeline_does_not_rerun_historical_skipped_records() {
+    fn completion_short_circuit_distinguishes_downloaded_from_linked() {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
-
-        record.status = subscription::WantedSubscriptionStatus::Skipped;
-        record.processing_stage = Some("skipped".to_string());
-        assert_eq!(
-            retry_action_for_wanted_record(&record).ok(),
-            Some(SubscriptionRetryAction::Push)
-        );
-        assert!(!wanted_record_needs_automatic_pipeline(&record));
-
-        record.status = subscription::WantedSubscriptionStatus::Downloading;
-        record.processing_stage = Some("downloading".to_string());
-        assert!(wanted_record_needs_automatic_pipeline(&record));
-
         record.status = subscription::WantedSubscriptionStatus::Completed;
         record.processing_stage = Some("download_complete".to_string());
-        assert!(wanted_record_needs_automatic_pipeline(&record));
+        record.last_push = Some(torrent_push_record(
+            "subject-1",
+            &QbServerEntry {
+                id: "nas".to_string(),
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                insecure_tls: false,
+            },
+            &category("电影", "电影"),
+            &torrent("12345", "测试电影 2160p"),
+            "downloaded",
+            Some(100),
+            None,
+        ));
+
+        assert!(!subscription_completion_already_linked(&record));
+
+        record.status = subscription::WantedSubscriptionStatus::Linked;
+        assert!(subscription_completion_already_linked(&record));
     }
 
     #[test]
@@ -6856,8 +6856,8 @@ mod subscription_category_tests {
     }
 
     #[tokio::test]
-    async fn watcher_queue_marks_pending_record_with_actionable_stage_error() {
-        let root = temp_test_dir("watcher_stage_error");
+    async fn watcher_queue_advances_pending_record_to_movie_meta() {
+        let root = temp_test_dir("watcher_movie_meta");
         let state = test_app_state(&root);
         let account_key = "acct";
         let subject_id = "subject-stage";
@@ -6882,24 +6882,16 @@ mod subscription_category_tests {
         let snapshot = state.wanted_store.snapshot(account_key, 220).await.unwrap();
         let record = snapshot.records.get(subject_id).unwrap();
         assert_eq!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Failed
+            record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Meta
         );
-        assert!(record
-            .last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("M-Team API Key"));
-        assert_eq!(record.processing_stage.as_deref(), Some("error"));
-        assert!(record
-            .stage_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("M-Team API Key"));
         assert_eq!(
-            record.next_action.as_deref(),
-            Some("检查错误后重新轮询或手动重试")
+            record.status,
+            subscription::WantedSubscriptionStatus::Unprocessed
         );
+        assert_eq!(record.last_error, None);
+        assert!(record.failure.is_none());
+        assert!(record.next_attempt_at.is_some());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6990,14 +6982,6 @@ mod subscription_category_tests {
             subscription::WantedSubscriptionStatus::Downloading
         );
         assert_eq!(progress_record.next_attempt_at, Some(225));
-        assert_eq!(
-            automatic_pipeline_action_for_wanted_record(
-                &progress_record,
-                &config::SubscriptionWatcherConfig::default(),
-                225,
-            ),
-            Some(SubscriptionRetryAction::Progress)
-        );
         assert_eq!(progress_push.status, "failed");
         assert_eq!(progress_push.checked_at, Some(220));
         assert_eq!(progress_push.download_progress, Some(0.4));

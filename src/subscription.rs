@@ -906,6 +906,26 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn transition_movie_operation(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        outcome: MovieOperationOutcome,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        apply_movie_operation_outcome(record, outcome, cfg, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
     pub async fn update_push_record(
         &self,
         account_key: &str,
@@ -4035,11 +4055,9 @@ mod tests {
             record.lifecycle_state,
             SubscriptionLifecycleState::Searching
         );
-        assert!(
-            record
-                .attention_tags
-                .contains(&SubscriptionAttentionTag::WaitingRelease)
-        );
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::WaitingRelease));
         assert_eq!(record.retry_count, 2);
         assert_eq!(
             record.next_attempt_at,
@@ -4120,11 +4138,9 @@ mod tests {
         apply_parent_operation_failure(&mut record, "link", "hardlink failed", &cfg, 2_000);
 
         assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
-        assert!(
-            record
-                .attention_tags
-                .contains(&SubscriptionAttentionTag::Failed)
-        );
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
         assert_eq!(record.failure.as_ref().unwrap().operation, "link");
         assert_eq!(
             record.next_attempt_at,
@@ -4142,11 +4158,9 @@ mod tests {
         apply_parent_operation_failure(&mut record, "link", "hardlink failed", &cfg, 2_000);
 
         assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
-        assert!(
-            record
-                .attention_tags
-                .contains(&SubscriptionAttentionTag::Failed)
-        );
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
         assert!(record
             .attention_tags
             .contains(&SubscriptionAttentionTag::RetryBlocked));
@@ -4165,11 +4179,9 @@ mod tests {
         apply_parent_operation_failure(&mut record, "link", "hardlink failed", &cfg, 2_000);
 
         assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
-        assert!(
-            record
-                .attention_tags
-                .contains(&SubscriptionAttentionTag::Failed)
-        );
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
         assert!(!record
             .attention_tags
             .contains(&SubscriptionAttentionTag::RetryBlocked));
@@ -4207,11 +4219,9 @@ mod tests {
             record.lifecycle_state,
             SubscriptionLifecycleState::Searching
         );
-        assert!(
-            record
-                .attention_tags
-                .contains(&SubscriptionAttentionTag::WaitingRelease)
-        );
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::WaitingRelease));
         assert!(!record
             .attention_tags
             .contains(&SubscriptionAttentionTag::Failed));
