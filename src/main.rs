@@ -3316,7 +3316,7 @@ fn build_hardlink_plan(
     let release_year = record.release_year.ok_or_else(|| {
         ApiError::bad_request("订阅记录缺少上映年份，无法创建 中文名.上映年份 目录")
     })?;
-    let title = sanitize_output_component(&record.title);
+    let title = hardlink_title_component(record);
     if title.is_empty() {
         return Err(ApiError::bad_request(
             "订阅记录缺少中文名，无法创建硬链接目录",
@@ -3712,6 +3712,24 @@ fn sanitize_output_component(raw: &str) -> String {
         out.push(safe);
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn hardlink_title_component(record: &subscription::WantedSubscriptionRecord) -> String {
+    let title = record.title.trim();
+    let primary_chinese = title
+        .split(['/', '／'])
+        .map(str::trim)
+        .find(|part| !part.is_empty() && contains_cjk(part));
+    sanitize_output_component(primary_chinese.unwrap_or(title))
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'
+        )
+    })
 }
 
 fn torrent_push_record(
@@ -7425,7 +7443,7 @@ mod subscription_category_tests {
             None,
         );
         let Ok(plan) = build_hardlink_plan(
-            &wanted_record("subject-1", "测试电影", Some(2024)),
+            &wanted_record("subject-1", "测试电影 / Test Movie", Some(2024)),
             &category,
             &push,
             &qb_torrent("Movie 2160p"),
@@ -7450,6 +7468,26 @@ mod subscription_category_tests {
         assert_eq!(
             plan.files[1].target_path,
             target.join("测试电影.2024/TorrentRoot/Sample/sample.mkv")
+        );
+    }
+
+    #[test]
+    fn hardlink_title_uses_first_chinese_alias_segment() {
+        assert_eq!(
+            hardlink_title_component(&wanted_record(
+                "subject-1",
+                "The Furious / 火遮眼 / 狂怒",
+                Some(2025),
+            )),
+            "火遮眼"
+        );
+        assert_eq!(
+            hardlink_title_component(&wanted_record(
+                "subject-1",
+                "火遮眼 / 狂怒 / The Furious",
+                Some(2025),
+            )),
+            "火遮眼"
         );
     }
 
