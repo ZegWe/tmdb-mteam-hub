@@ -1896,14 +1896,22 @@ fn normalize_existing_stage(record: &mut WantedSubscriptionRecord, now: u64) {
 }
 
 pub fn migrate_legacy_status_fields(record: &mut WantedSubscriptionRecord, now: u64) {
-    let (state, tags) = infer_lifecycle_from_legacy(record);
+    let (state, mut tags) = infer_lifecycle_from_legacy(record);
     record.lifecycle_state = state;
     record.execution_state = SubscriptionExecutionState::Idle;
-    merge_attention_tags(record, tags);
     record.next_attempt_at.get_or_insert(now);
     if record.failure.is_none() {
         record.failure = failure_from_legacy_error(record, now);
     }
+    if record
+        .failure
+        .as_ref()
+        .is_some_and(|failure| failure.retry_blocked)
+        && !tags.contains(&SubscriptionAttentionTag::RetryBlocked)
+    {
+        tags.push(SubscriptionAttentionTag::RetryBlocked);
+    }
+    merge_attention_tags(record, tags);
     record.status = derive_legacy_status(record);
 }
 
@@ -2561,6 +2569,11 @@ pub fn apply_movie_operation_outcome(
             record.next_attempt_at = Some(now + cfg.search_interval_secs);
         }
     }
+    record.execution_state = SubscriptionExecutionState::Idle;
+    record.failure = None;
+    record.last_error = None;
+    merge_attention_tags(record, Vec::new());
+    record.updated_at = now;
 }
 
 pub fn apply_movie_waiting_release(
@@ -3761,6 +3774,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_migration_preserves_retry_blocked_tag_for_blocked_failure() {
+        let mut record = bare_record_with_status(WantedSubscriptionStatus::Completed, None);
+        record.attention_tags = vec![SubscriptionAttentionTag::RetryBlocked];
+        record.failure = Some(SubscriptionFailure {
+            scope: FailureScope::Parent,
+            owner_id: record.subject_id.clone(),
+            operation: "link".to_string(),
+            error_type: "system".to_string(),
+            message: "hardlink failed".to_string(),
+            retry_count: 3,
+            max_retries: 3,
+            failed_at: 1_500,
+            next_retry_at: None,
+            retry_blocked: true,
+        });
+
+        migrate_legacy_status_fields(&mut record, 2_000);
+
+        assert!(record.failure.as_ref().unwrap().retry_blocked);
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
+    }
+
+    #[test]
     fn tv_meta_initializes_target_episodes_and_cursor() {
         let mut record = bare_tv_record("subject-tv", 1, 8);
         initialize_tv_targets(&mut record, TvTargetRange::episodes(1, 1, 8), 1_000).unwrap();
@@ -3985,6 +4023,54 @@ mod tests {
 
         assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
         assert_eq!(record.next_attempt_at, Some(2_000));
+    }
+
+    #[test]
+    fn movie_advanced_outcome_clears_stale_failure_state() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Downloading, 1_000);
+        record.execution_state = SubscriptionExecutionState::Running;
+        record.attention_tags = vec![
+            SubscriptionAttentionTag::Skipped,
+            SubscriptionAttentionTag::Failed,
+            SubscriptionAttentionTag::RetryBlocked,
+        ];
+        record.failure = Some(SubscriptionFailure {
+            scope: FailureScope::Parent,
+            owner_id: record.subject_id.clone(),
+            operation: "link".to_string(),
+            error_type: "system".to_string(),
+            message: "hardlink failed".to_string(),
+            retry_count: 3,
+            max_retries: 3,
+            failed_at: 1_500,
+            next_retry_at: None,
+            retry_blocked: true,
+        });
+        record.last_error = Some("hardlink failed".to_string());
+
+        apply_movie_operation_outcome(
+            &mut record,
+            MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Linking),
+            &cfg,
+            2_000,
+        );
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert_eq!(record.next_attempt_at, Some(2_000));
+        assert_eq!(record.execution_state, SubscriptionExecutionState::Idle);
+        assert_eq!(record.updated_at, 2_000);
+        assert!(record.failure.is_none());
+        assert!(record.last_error.is_none());
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Skipped));
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
     }
 
     #[test]
