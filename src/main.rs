@@ -4243,14 +4243,26 @@ async fn process_wanted_push_step(
     {
         Ok(_) => Ok(()),
         Err(err) => {
-            persist_if_status_unchanged(
-                state,
-                account_key,
-                subject_id,
-                subscription::WantedSubscriptionStatus::Matching,
-                err.message(),
-            )
-            .await;
+            let cfg = state.config.read().await.clone();
+            let now = unix_now_secs();
+            if let Err(persist_err) = state
+                .wanted_store
+                .apply_parent_operation_failure_result(
+                    account_key,
+                    subject_id,
+                    "search",
+                    err.message(),
+                    &cfg.subscription_watcher,
+                    now,
+                )
+                .await
+            {
+                tracing::warn!(
+                    subject_id = %subject_id,
+                    error = %persist_err,
+                    "persist search step failure failed"
+                );
+            }
             Err(err)
         }
     }
@@ -6860,6 +6872,81 @@ mod subscription_category_tests {
         let persisted = snapshot.records.get(subject_id).unwrap();
         assert_eq!(persisted.retry_count, 0);
         assert_eq!(persisted.last_error.as_deref(), Some("qB 服务器不存在"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn movie_search_step_failure_persists_semantic_retry_state() {
+        let root = temp_test_dir("movie_search_step_failure");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-search-failure";
+        seed_wanted_record(&state, account_key, subject_id).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
+            cfg.mteam_api_key = String::new();
+            cfg.subscription_watcher.search_interval_secs = 5;
+            cfg.subscription_categories = vec![category("电影", "电影")];
+            cfg.qb_servers = vec![QbServerEntry {
+                id: "nas".to_string(),
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                insecure_tls: false,
+            }];
+        }
+        state
+            .wanted_store
+            .transition_movie_operation(
+                account_key,
+                subject_id,
+                subscription::MovieOperationOutcome::Advanced(
+                    subscription::SubscriptionLifecycleState::Searching,
+                ),
+                &state.config.read().await.subscription_watcher,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let before = state.wanted_store.snapshot(account_key, 210).await.unwrap();
+        let before_record = before.records.get(subject_id).unwrap();
+        assert_eq!(
+            before_record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Searching
+        );
+        assert_eq!(
+            before_record.status,
+            subscription::WantedSubscriptionStatus::Unprocessed
+        );
+
+        let err = process_wanted_push_step(&state, account_key, subject_id, true)
+            .await
+            .unwrap_err();
+
+        assert!(err.message().contains("M-Team API Key"));
+        let snapshot = state.wanted_store.snapshot(account_key, 220).await.unwrap();
+        let record = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(
+            record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Searching
+        );
+        assert_eq!(
+            record.status,
+            subscription::WantedSubscriptionStatus::Unprocessed
+        );
+        let failure = record.failure.as_ref().unwrap();
+        assert_eq!(failure.operation, "search");
+        assert_eq!(failure.retry_count, 1);
+        assert!(!failure.retry_blocked);
+        assert_eq!(record.retry_count, 1);
+        assert!(record.next_attempt_at.is_some());
+        assert!(record
+            .attention_tags
+            .contains(&subscription::SubscriptionAttentionTag::Failed));
 
         let _ = std::fs::remove_dir_all(root);
     }
