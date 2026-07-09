@@ -35,8 +35,6 @@ pub struct SubscriptionCategory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionWatcherConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_subscription_poll_interval_secs")]
     pub poll_interval_secs: u64,
     #[serde(default = "default_subscription_library_limit")]
@@ -87,7 +85,6 @@ pub struct TorrentMatchRule {
 impl Default for SubscriptionWatcherConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             poll_interval_secs: default_subscription_poll_interval_secs(),
             library_limit: default_subscription_library_limit(),
             max_retries: default_subscription_max_retries(),

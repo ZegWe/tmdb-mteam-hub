@@ -32,7 +32,6 @@ douban_cookie = ""
 
 # 想看订阅监听。首次启用默认只建档并跳过已有想看，之后新出现的想看条目进入未处理队列。
 [subscription_watcher]
-enabled = false
 poll_interval_secs = 3600
 library_limit = 200
 max_retries = 3

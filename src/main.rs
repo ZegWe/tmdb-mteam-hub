@@ -3837,7 +3837,6 @@ enum WantedWatchTickAction {
 }
 
 fn wanted_watch_tick_action(
-    poll_enabled: bool,
     has_account_key: bool,
     now_secs: u64,
     last_wanted_poll_at: Option<u64>,
@@ -3847,10 +3846,9 @@ fn wanted_watch_tick_action(
         return None;
     }
     let poll_interval_secs = poll_interval_secs.clamp(60, 86_400);
-    let should_poll = poll_enabled
-        && last_wanted_poll_at
-            .map(|last| now_secs.saturating_sub(last) >= poll_interval_secs)
-            .unwrap_or(true);
+    let should_poll = last_wanted_poll_at
+        .map(|last| now_secs.saturating_sub(last) >= poll_interval_secs)
+        .unwrap_or(true);
     Some(if should_poll {
         WantedWatchTickAction::PollWanted
     } else {
@@ -4235,7 +4233,6 @@ fn spawn_wanted_watch_loop(state: AppState) {
             let cfg = state.config.read().await.clone();
             let now_secs = unix_now_secs();
             let action = wanted_watch_tick_action(
-                cfg.subscription_watcher.enabled,
                 douban::auth_cache_key_fragment(&cfg.douban_cookie).is_ok(),
                 now_secs,
                 last_wanted_poll_at,
@@ -6415,23 +6412,19 @@ mod subscription_category_tests {
             tokio::time::MissedTickBehavior::Skip
         );
         assert_eq!(
-            wanted_watch_tick_action(true, true, 1_000, None, 3_600),
+            wanted_watch_tick_action(true, 1_000, None, 3_600),
             Some(WantedWatchTickAction::PollWanted)
         );
         assert_eq!(
-            wanted_watch_tick_action(true, true, 1_060, Some(1_000), 3_600),
+            wanted_watch_tick_action(true, 1_060, Some(1_000), 3_600),
             Some(WantedWatchTickAction::ProcessPipeline)
         );
         assert_eq!(
-            wanted_watch_tick_action(true, true, 4_600, Some(1_000), 3_600),
+            wanted_watch_tick_action(true, 4_600, Some(1_000), 3_600),
             Some(WantedWatchTickAction::PollWanted)
         );
         assert_eq!(
-            wanted_watch_tick_action(false, true, 4_600, Some(1_000), 3_600),
-            Some(WantedWatchTickAction::ProcessPipeline)
-        );
-        assert_eq!(
-            wanted_watch_tick_action(false, false, 4_600, Some(1_000), 3_600),
+            wanted_watch_tick_action(false, 4_600, Some(1_000), 3_600),
             None
         );
     }
