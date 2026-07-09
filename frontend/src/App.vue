@@ -904,16 +904,20 @@ const MOVIE_STATUS_ZH = {
   Canceled: "已取消",
 };
 
-const SUB_STATUS_LABELS = {
-  unprocessed: "待处理",
-  matching: "匹配中",
-  processing: "处理中",
-  pushed: "下载中",
+const SUB_LIFECYCLE_LABELS = {
+  queued: "待处理",
+  meta: "准备元数据",
+  searching: "搜索中",
   downloading: "下载中",
+  linking: "硬链接中",
   completed: "已完成",
-  linked: "已链接",
+};
+
+const SUB_ATTENTION_LABELS = {
   failed: "失败",
   skipped: "已跳过",
+  waiting_release: "等待发布",
+  retry_blocked: "重试阻塞",
 };
 
 const PUSH_STATUS_LABELS = {
@@ -936,61 +940,16 @@ const SUB_SKIP_REASON_LABELS = {
   initial_bootstrap_existing_wish: "历史想看，首次同步跳过",
 };
 
-const SUB_STAGE_LABELS = {
-  queued: "等待自动处理",
-  searching: "搜索种子",
-  matched: "已匹配种子",
-  no_candidates: "未搜索到种子",
-  no_match: "未匹配规则",
-  pushing: "推送 qB",
-  pushed: "等待进度同步",
-  downloading: "等待下载完成",
-  download_complete: "等待硬链接",
-  link_planned: "等待执行硬链接",
-  linked: "硬链接完成",
-  push_failed: "推送失败",
-  link_failed: "硬链接失败",
-  error: "处理失败",
-  skipped: "已跳过",
-};
-
-const SUB_PROGRESS_STEPS = [
-  { key: "match", label: "匹配" },
-  { key: "push", label: "推送" },
-  { key: "download", label: "下载中" },
-  { key: "downloaded", label: "下载完成" },
-  { key: "link", label: "硬链接" },
-  { key: "done", label: "完成" },
-];
-
 const SUB_LIFECYCLE_STEPS = [
   { key: "queued", label: "入队" },
   { key: "meta", label: "元数据" },
   { key: "searching", label: "搜索" },
   { key: "downloading", label: "下载" },
-  { key: "linking", label: "硬链接" },
+  { key: "linking", label: "硬链接中" },
   { key: "completed", label: "完成" },
 ];
 
-const SUB_LEGACY_LIFECYCLE_BY_STATUS = {
-  unprocessed: "queued",
-  matching: "searching",
-  processing: "searching",
-  pushed: "downloading",
-  downloading: "downloading",
-  completed: "linking",
-  linked: "completed",
-};
-
 const SUB_ATTENTION_PRIORITY = ["skipped", "retry_blocked", "failed", "waiting_release"];
-
-const SUB_ISSUE_STAGES = new Set([
-  "no_candidates",
-  "no_match",
-  "push_failed",
-  "link_failed",
-  "error",
-]);
 
 const SUBSCRIPTION_AUTO_SYNC_MS = 5000;
 
@@ -2606,51 +2565,26 @@ function formatSubscriptionSkipReason(value) {
 }
 
 function subscriptionDisplayStatus(record) {
-  const base = normalizedStatus(record?.status);
-  const push = normalizedStatus(record?.last_push?.status);
-  const completion = normalizedStatus(record?.last_completion?.status);
-  if (base === "skipped") return { key: "skipped", text: SUB_STATUS_LABELS.skipped };
-  if (base === "linked" || push === "linked" || completion === "completed")
-    return { key: "linked", text: SUB_STATUS_LABELS.linked };
-  if (base === "completed") return { key: "completed", text: SUB_STATUS_LABELS.completed };
-  if (base === "failed" || push === "failed" || completion === "failed")
-    return { key: "failed", text: SUB_STATUS_LABELS.failed };
-  if (push === "downloaded") return { key: "downloaded", text: "已下载待链接" };
-  if (push === "downloading" || base === "downloading" || base === "pushed")
-    return { key: "pushed", text: SUB_STATUS_LABELS.pushed };
-  if (base === "processing") return { key: "processing", text: SUB_STATUS_LABELS.processing };
-  return { key: base || "unprocessed", text: SUB_STATUS_LABELS[base] || "待处理" };
+  const lifecycle = subscriptionLifecycleKey(record);
+  const attention = subscriptionAttentionKey(record);
+  if (attention) {
+    return { key: attention, text: SUB_ATTENTION_LABELS[attention] || attention };
+  }
+  return { key: lifecycle, text: SUB_LIFECYCLE_LABELS[lifecycle] || "待处理" };
 }
 
 function subscriptionProgress(record) {
   const progress = Number(record?.last_push?.download_progress);
   if (Number.isFinite(progress)) return Math.max(0, Math.min(1, progress));
-  if (normalizedStatus(record?.status) === "completed") return 1;
+  if (subscriptionLifecycleKey(record) === "completed") return 1;
   return null;
 }
 
 function subscriptionProgressIndex(record) {
-  const stage = normalizedStatus(record?.processing_stage);
-  const status = normalizedStatus(record?.status);
-  const pushStatus = normalizedStatus(record?.last_push?.status);
-  const completionStatus = normalizedStatus(record?.last_completion?.status);
-  if (stage === "linked" || status === "linked" || completionStatus === "completed") return 5;
-  if (["download_complete", "link_planned", "link_failed"].includes(stage)) return 4;
-  if (status === "completed" || pushStatus === "downloaded") return 4;
-  if (["pushed", "downloading"].includes(stage) || ["pushed", "downloading"].includes(status))
-    return 2;
-  if (["pushing", "push_failed"].includes(stage) || status === "processing") return 1;
-  if (status === "failed" && completionStatus === "failed") return 4;
-  if (status === "failed" && pushStatus === "failed") return 1;
-  return 0;
-}
-
-function subscriptionProgressNodes(record) {
-  const current = subscriptionProgressIndex(record);
-  return SUB_PROGRESS_STEPS.map((step, index) => ({
-    ...step,
-    state: index < current ? "done" : index === current ? "current" : "todo",
-  }));
+  return Math.max(
+    0,
+    SUB_LIFECYCLE_STEPS.findIndex((step) => step.key === subscriptionLifecycleKey(record)),
+  );
 }
 
 function subscriptionLifecycleNodes(record) {
@@ -2670,45 +2604,26 @@ function subscriptionLifecycleNodes(record) {
 function subscriptionLifecycleKey(record) {
   const lifecycle = normalizedStatus(record?.lifecycle_state);
   if (SUB_LIFECYCLE_STEPS.some((step) => step.key === lifecycle)) return lifecycle;
-  const status = normalizedStatus(record?.status);
-  const stage = normalizedStatus(record?.processing_stage);
-  if (stage === "download_complete" || stage === "link_planned" || stage === "link_failed")
-    return "linking";
-  if (["pushed", "downloading"].includes(stage)) return "downloading";
-  if (
-    ["searching", "matched", "pushing", "push_failed", "no_candidates", "no_match"].includes(stage)
-  )
-    return "searching";
-  return SUB_LEGACY_LIFECYCLE_BY_STATUS[status] || "queued";
+  return "queued";
 }
 
 function subscriptionAttentionKey(record) {
-  const status = normalizedStatus(record?.status);
-  const stage = normalizedStatus(record?.processing_stage);
   const tags = Array.isArray(record?.attention_tags)
     ? record.attention_tags.map((tag) => normalizedStatus(tag))
     : [];
-  const activeTags = tags.filter(
-    (tag) => tag !== "skipped" || status === "skipped" || stage === "skipped",
-  );
-  if (status === "skipped" || stage === "skipped") activeTags.push("skipped");
-  if (status === "failed") activeTags.push("failed");
-  if (["no_candidates", "no_match"].includes(stage)) {
-    activeTags.push("waiting_release");
-  }
+  const activeTags = [...tags];
+  if (record?.failure && !activeTags.includes("failed")) activeTags.push("failed");
   return SUB_ATTENTION_PRIORITY.find((tag) => activeTags.includes(tag)) || "";
 }
 
 function subscriptionStageTrackLabel(record) {
-  return subscriptionProgressNodes(record)
+  return subscriptionLifecycleNodes(record)
     .map((node) => `${node.label}${node.state === "current" ? "（当前）" : ""}`)
     .join("，");
 }
 
 function canRetrySubscription(record) {
-  const status = normalizedStatus(record?.status);
-  const stage = normalizedStatus(record?.processing_stage);
-  return !!record?.subject_id && status !== "linked" && stage !== "linked";
+  return !!record?.subject_id && subscriptionLifecycleKey(record) !== "completed";
 }
 
 function canRerunSubscription(record) {
@@ -2723,7 +2638,6 @@ function subscriptionCardMeta(record) {
     record.category_text || "",
     push.qb_category ? `qB ${push.qb_category}` : "",
     push.download_state || "",
-    record.stage_updated_at ? `阶段更新 ${formatUnixSeconds(record.stage_updated_at)}` : "",
     record.updated_at ? `更新 ${formatUnixSeconds(record.updated_at)}` : "",
   ].filter(Boolean);
 }
@@ -2732,85 +2646,30 @@ function subscriptionCardSubtitle(record) {
   return (
     String(record?.date_published || "").trim() ||
     String(record?.release_year || "").trim() ||
-    subscriptionStageLabel(record) ||
     record?.subject_id ||
     ""
   );
 }
 
-function subscriptionStageLabel(record) {
-  const stage = normalizedStatus(record?.processing_stage);
-  return SUB_STAGE_LABELS[stage] || stage || "";
-}
-
-function subscriptionStageMessage(record) {
-  const message = String(record?.stage_message || "").trim();
-  const skipReason = String(record?.skip_reason || "").trim();
-  const skipped =
-    normalizedStatus(record?.status) === "skipped" ||
-    normalizedStatus(record?.processing_stage) === "skipped";
-  if (skipped) {
-    const formatted = formatSubscriptionSkipReason(skipReason);
-    if (formatted && (!message || message === skipReason)) return formatted;
-  }
-  return message;
-}
-
-function subscriptionStageNote(record) {
-  const message = subscriptionStageMessage(record);
-  const next = String(record?.next_action || "").trim();
-  if (message && next) return `${message}；下一步：${next}`;
-  return message || (next ? `下一步：${next}` : "");
-}
-
 function subscriptionCardNotices(record) {
-  return [subscriptionCardStageNotice(record), subscriptionCardErrorNotice(record)].filter(Boolean);
-}
-
-function subscriptionCardStageNotice(record) {
-  const stage = normalizedStatus(record?.processing_stage);
-  if (SUB_ISSUE_STAGES.has(stage)) return null;
-  const text = subscriptionStageNote(record);
-  return subscriptionCardNotice("stage", "stage", text);
-}
-
-function subscriptionCardErrorNotice(record) {
-  const stage = normalizedStatus(record?.processing_stage);
-  const status = normalizedStatus(record?.status);
-  if (stage === "skipped" || status === "skipped") return null;
-
-  const push = record.last_push || {};
-  const completion = record.last_completion || {};
-  const pushStatus = normalizedStatus(push.status);
-  const completionStatus = normalizedStatus(completion.status);
-
-  if (SUB_ISSUE_STAGES.has(stage)) {
-    return subscriptionCardNotice(
-      subscriptionIssueNoticeKey(stage),
-      "error",
-      subscriptionStageNote(record),
+  const notices = [];
+  const attention = subscriptionAttentionKey(record);
+  if (attention === "skipped") {
+    notices.push(
+      subscriptionCardNotice("skipped", "stage", formatSubscriptionSkipReason(record?.skip_reason)),
     );
   }
-  if (completionStatus === "failed") {
-    return subscriptionCardNotice(
-      "completion-error",
-      "error",
-      completion.error || record.last_error,
-    );
+  if (attention === "waiting_release") {
+    notices.push(subscriptionCardNotice("waiting-release", "stage", "等待资源发布"));
   }
-  if (pushStatus === "failed") {
-    return subscriptionCardNotice("push-error", "error", push.error || record.last_error);
+  if (attention === "retry_blocked") {
+    notices.push(subscriptionCardNotice("retry-blocked", "error", "已达到重试上限"));
   }
-  if (status === "failed") {
-    return subscriptionCardNotice("error", "error", record.last_error);
+  const failureMessage = String(record?.failure?.message || record?.last_error || "").trim();
+  if (attention === "failed") {
+    notices.push(subscriptionCardNotice("failure", "error", failureMessage));
   }
-  return null;
-}
-
-function subscriptionIssueNoticeKey(stage) {
-  if (stage === "push_failed") return "push-error";
-  if (stage === "link_failed") return "completion-error";
-  return "error";
+  return notices.filter(Boolean);
 }
 
 function subscriptionCardNotice(key, kind, text) {
@@ -2872,9 +2731,8 @@ function subscriptionDetailRows(record) {
     row("简介", record.summary),
     row("豆瓣时间", record.douban_date),
     row("上映年份", record.release_year),
-    row("阶段说明", subscriptionStageMessage(record)),
-    row("下一步", record.next_action),
-    row("阶段更新时间", formatUnixSeconds(record.stage_updated_at)),
+    row("失败", record.failure?.message),
+    row("说明", record.failure ? "" : record.last_error),
     row("跳过原因", formatSubscriptionSkipReason(record.skip_reason)),
     row("重试", `${record.retry_count || 0}/${record.max_retries || 0}`),
     row("首次看到", formatUnixSeconds(record.first_seen_at)),

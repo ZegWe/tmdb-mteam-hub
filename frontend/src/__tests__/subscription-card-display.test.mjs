@@ -11,7 +11,7 @@ const subscriptionDetailSource = readFileSync(
   "utf8",
 );
 const stylesSource = readFileSync(resolve(__dirname, "../styles.css"), "utf8");
-const constantsStart = appSource.indexOf("const SUB_STATUS_LABELS");
+const constantsStart = appSource.indexOf("const SUB_LIFECYCLE_LABELS");
 const constantsEnd = appSource.indexOf("\nconst OPERATION_LOG_CATEGORIES", constantsStart);
 const functionStart = appSource.indexOf("function subscriptionPollToast");
 const functionEnd = appSource.indexOf("\nfunction openSubscriptionDetail", functionStart);
@@ -21,7 +21,7 @@ const detailRowsEnd = appSource.indexOf("\n\nfunction pushRows", detailRowsStart
 assert.notEqual(
   constantsStart,
   -1,
-  "subscription display constants should start at SUB_STATUS_LABELS",
+  "subscription display constants should start at SUB_LIFECYCLE_LABELS",
 );
 assert.notEqual(constantsEnd, -1, "subscription display constants should end before log constants");
 assert.notEqual(
@@ -37,10 +37,15 @@ const helpers = vm.runInNewContext(
   `${appSource.slice(constantsStart, constantsEnd)}
 ${appSource.slice(functionStart, functionEnd)}
 ({
+  subscriptionDisplayStatus,
   subscriptionCardMeta,
   subscriptionCardNotices,
   subscriptionCardSubtitle,
+  subscriptionLifecycleKey,
+  subscriptionAttentionKey,
   subscriptionLifecycleNodes,
+  canRetrySubscription,
+  canRerunSubscription,
 });`,
 );
 
@@ -57,12 +62,6 @@ function formatUnixSeconds(value) {
 }
 function subscriptionDisplayStatus() {
   return { text: "待处理" };
-}
-function subscriptionStageLabel() {
-  return "等待自动处理";
-}
-function subscriptionStageMessage(record) {
-  return record.stage_message || "";
 }
 function formatSubscriptionSkipReason(value) {
   return value || "";
@@ -91,11 +90,53 @@ function sourceBetween(start, end, description, source = appSource) {
   return source.slice(startIndex, endIndex);
 }
 
+for (const [name, body] of [
+  [
+    "subscriptionDisplayStatus",
+    sourceBetween(
+      "function subscriptionDisplayStatus",
+      "\nfunction subscriptionProgress",
+      "display status helper",
+    ),
+  ],
+  [
+    "subscriptionLifecycleKey",
+    sourceBetween(
+      "function subscriptionLifecycleKey",
+      "\nfunction subscriptionAttentionKey",
+      "lifecycle key helper",
+    ),
+  ],
+  [
+    "subscriptionAttentionKey",
+    sourceBetween(
+      "function subscriptionAttentionKey",
+      "\nfunction subscriptionStageTrackLabel",
+      "attention helper",
+    ),
+  ],
+  [
+    "canRetrySubscription",
+    sourceBetween(
+      "function canRetrySubscription",
+      "\nfunction canRerunSubscription",
+      "retry helper",
+    ),
+  ],
+]) {
+  assert.doesNotMatch(
+    body,
+    /record\?*\.status|record\?*\.processing_stage/,
+    `${name} must not read legacy subscription state`,
+  );
+}
+
+assert.equal(appSource.includes("SUB_LEGACY_LIFECYCLE_BY_STATUS"), false);
+
 const failedRecord = {
-  status: "failed",
-  processing_stage: "error",
-  stage_message: "M-Team API Key 未配置",
-  next_action: "检查错误后重新轮询或手动重试",
+  lifecycle_state: "searching",
+  attention_tags: ["failed"],
+  failure: { message: "M-Team API Key 未配置" },
   last_error: "M-Team API Key 未配置",
 };
 
@@ -103,42 +144,36 @@ assert.deepEqual(
   plain(helpers.subscriptionCardNotices(failedRecord)),
   [
     {
-      key: "error",
+      key: "failure",
       kind: "error",
-      text: "M-Team API Key 未配置；下一步：检查错误后重新轮询或手动重试",
+      text: "M-Team API Key 未配置",
     },
   ],
-  "failed processing stages should render one state-driven error notice",
+  "failed semantic state should render one state-driven error notice",
 );
 
 assert.deepEqual(
   plain(
     helpers.subscriptionCardNotices({
-      status: "skipped",
-      processing_stage: "skipped",
-      stage_message: "initial_bootstrap_existing_wish",
+      lifecycle_state: "queued",
+      attention_tags: ["skipped"],
       skip_reason: "initial_bootstrap_existing_wish",
     }),
   ),
-  [{ key: "stage", kind: "stage", text: "历史想看，首次同步跳过" }],
+  [{ key: "skipped", kind: "stage", text: "历史想看，首次同步跳过" }],
   "skipped subscriptions should render the skip reason as a status notice, not an error",
 );
 
 assert.deepEqual(
   plain(
     helpers.subscriptionCardNotices({
-      status: "failed",
-      processing_stage: "pushing",
-      stage_message: "正在推送到 qB",
-      next_action: "等待 qB 接收任务",
-      last_push: { status: "failed", error: "qB 添加失败" },
+      lifecycle_state: "searching",
+      attention_tags: ["failed"],
+      failure: { message: "qB 添加失败" },
     }),
   ),
-  [
-    { key: "stage", kind: "stage", text: "正在推送到 qB；下一步：等待 qB 接收任务" },
-    { key: "push-error", kind: "error", text: "qB 添加失败" },
-  ],
-  "distinct push failure state should render a separate error notice",
+  [{ key: "failure", kind: "error", text: "qB 添加失败" }],
+  "semantic push failure should render from failure state, not artifact status",
 );
 
 assert.deepEqual(
@@ -147,7 +182,7 @@ assert.deepEqual(
       douban_date: "2026-07-04",
       release_year: "2026",
       category_text: "电影",
-      processing_stage: "skipped",
+      lifecycle_state: "queued",
     }),
   ),
   ["豆瓣 2026-07-04", "2026", "电影"],
@@ -176,25 +211,27 @@ assert.equal(
 
 assert.deepEqual(
   plain(
-    detailHelpers.subscriptionDetailRows({
-      subject_id: "1292052",
-      category_text: "电影",
-      date_published: "1994-09-10",
-      release_year: 1994,
-      rating_value: 9.7,
-      rating_count: 123456,
-      original_title: "The Shawshank Redemption",
-      aka: ["刺激1995"],
-      genres: ["剧情", "犯罪"],
-      countries: ["美国"],
-      languages: ["英语"],
-      directors: ["弗兰克·德拉邦特"],
-      actors: ["蒂姆·罗宾斯", "摩根·弗里曼"],
-      duration: "142分钟",
-      summary: "希望让人自由。",
-      retry_count: 0,
-      max_retries: 3,
-    }).slice(0, 11),
+    detailHelpers
+      .subscriptionDetailRows({
+        subject_id: "1292052",
+        category_text: "电影",
+        date_published: "1994-09-10",
+        release_year: 1994,
+        rating_value: 9.7,
+        rating_count: 123456,
+        original_title: "The Shawshank Redemption",
+        aka: ["刺激1995"],
+        genres: ["剧情", "犯罪"],
+        countries: ["美国"],
+        languages: ["英语"],
+        directors: ["弗兰克·德拉邦特"],
+        actors: ["蒂姆·罗宾斯", "摩根·弗里曼"],
+        duration: "142分钟",
+        summary: "希望让人自由。",
+        retry_count: 0,
+        max_retries: 3,
+      })
+      .slice(0, 11),
   ),
   [
     { label: "豆瓣 ID", value: "1292052" },
@@ -211,6 +248,30 @@ assert.deepEqual(
   ],
   "subscription detail should show cached Douban rexxar media rows first",
 );
+
+{
+  const rows = plain(
+    detailHelpers.subscriptionDetailRows({
+      subject_id: "waiting-release",
+      lifecycle_state: "searching",
+      attention_tags: ["waiting_release"],
+      failure: null,
+      last_error: "未搜索到候选种子",
+    }),
+  );
+  assert.equal(
+    rows.some((row) => row.label === "失败"),
+    false,
+    "waiting-release details should not label explanatory last_error as failure",
+  );
+  assert.deepEqual(
+    rows.find((row) => row.label === "说明"),
+    {
+      label: "说明",
+      value: "未搜索到候选种子",
+    },
+  );
+}
 
 assert.match(
   stylesSource,
@@ -302,22 +363,46 @@ assert.deepEqual(
     { key: "meta", label: "元数据", state: "done", attention: "" },
     { key: "searching", label: "搜索", state: "done", attention: "" },
     { key: "downloading", label: "下载", state: "current", attention: "waiting_release" },
-    { key: "linking", label: "硬链接", state: "todo", attention: "" },
+    { key: "linking", label: "硬链接中", state: "todo", attention: "" },
     { key: "completed", label: "完成", state: "todo", attention: "" },
   ],
   "subscription lifecycle helper should expose a fixed state graph",
 );
 
+assert.deepEqual(
+  plain(
+    helpers
+      .subscriptionLifecycleNodes({
+        lifecycle_state: "linking",
+        attention_tags: ["failed"],
+        failure: { message: "硬链接失败" },
+      })
+      .find((node) => node.key === "linking"),
+  ),
+  { key: "linking", label: "硬链接中", state: "current", attention: "failed" },
+);
+
+assert.deepEqual(
+  plain(
+    helpers.subscriptionDisplayStatus({
+      lifecycle_state: "linking",
+      attention_tags: ["failed"],
+      failure: { message: "硬链接失败" },
+    }),
+  ),
+  { key: "failed", text: "失败" },
+  "status badge should prefer attention over lifecycle",
+);
+
 assert.equal(
   helpers
     .subscriptionLifecycleNodes({
-      status: "matching",
       lifecycle_state: "searching",
       attention_tags: ["skipped"],
     })
     .find((node) => node.state === "current").attention,
-  "",
-  "active subscriptions should not keep displaying stale skipped attention",
+  "skipped",
+  "subscription lifecycle nodes should trust explicit attention tags",
 );
 
 assert.match(
