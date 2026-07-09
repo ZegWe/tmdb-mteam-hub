@@ -11,7 +11,7 @@ use crate::config::SubscriptionWatcherConfig;
 use crate::douban::{DoubanLibraryItem, DoubanSubjectDetail};
 
 const STATE_VERSION: u32 = 1;
-const DB_SCHEMA_VERSION: i64 = 3;
+const DB_SCHEMA_VERSION: i64 = 4;
 const DB_FILE_NAME: &str = "wanted.sqlite";
 
 fn default_state_version() -> u32 {
@@ -1179,7 +1179,7 @@ impl WantedSubscriptionStore {
             }
         }
 
-        if let Some(mut state) = self.load_legacy_json_state(account_key).await? {
+        if let Some(mut state) = self.load_legacy_json_state(account_key, now).await? {
             repair_state_defaults(&mut state, account_key, now);
             self.save_state_unlocked(account_key, &state)?;
             return Ok(state);
@@ -1200,16 +1200,18 @@ impl WantedSubscriptionStore {
     async fn load_legacy_json_state(
         &self,
         account_key: &str,
+        now: u64,
     ) -> std::io::Result<Option<WantedSubscriptionState>> {
         let path = self.path_for(account_key);
         match tokio::fs::read_to_string(&path).await {
             Ok(raw) => {
-                let state = serde_json::from_str(&raw).map_err(|e| {
+                let mut state: WantedSubscriptionState = serde_json::from_str(&raw).map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("解析订阅状态文件失败 {}: {e}", path.display()),
                     )
                 })?;
+                migrate_legacy_state_records_to_lifecycle_once(&mut state, now);
                 Ok(Some(state))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1402,6 +1404,7 @@ fn ensure_schema_version(conn: &Connection) -> std::io::Result<()> {
     if current == DB_SCHEMA_VERSION {
         return Ok(());
     }
+    migrate_subscription_schema(conn, current, current_unix_secs())?;
     conn.execute(
         "DELETE FROM subscription_schema_meta WHERE key = 'schema_version'",
         [],
@@ -1412,6 +1415,145 @@ fn ensure_schema_version(conn: &Connection) -> std::io::Result<()> {
         params![DB_SCHEMA_VERSION],
     )
     .map_err(sqlite_io)?;
+    Ok(())
+}
+
+fn migrate_subscription_schema(
+    conn: &Connection,
+    from_version: i64,
+    now: u64,
+) -> std::io::Result<()> {
+    if from_version < 4 {
+        migrate_legacy_status_columns_to_lifecycle(conn, now)?;
+    }
+    Ok(())
+}
+
+fn migrate_legacy_status_columns_to_lifecycle(conn: &Connection, now: u64) -> std::io::Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT rowid, subject_id, status, title, category_text, updated_at, record_json
+                FROM wanted_subscription_records",
+        )
+        .map_err(sqlite_io)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(sqlite_io)?;
+    let rows = rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)?;
+
+    for (rowid, subject_id, status, title, category_text, updated_at, raw) in rows {
+        let updated_at = updated_at.map(i64_to_u64).unwrap_or(now);
+        let mut record: WantedSubscriptionRecord =
+            serde_json::from_str(&raw).unwrap_or_else(|_| WantedSubscriptionRecord {
+                subject_id: subject_id.clone(),
+                title: title.clone(),
+                release_year: None,
+                poster_url: String::new(),
+                cover_url: String::new(),
+                original_title: None,
+                aka: Vec::new(),
+                languages: Vec::new(),
+                countries: Vec::new(),
+                genres: Vec::new(),
+                directors: Vec::new(),
+                actors: Vec::new(),
+                date_published: None,
+                duration: None,
+                summary: None,
+                rating_value: None,
+                rating_count: None,
+                category_text: category_text.clone(),
+                tags: Vec::new(),
+                douban_date: None,
+                douban_sort_time: None,
+                douban_return_order: None,
+                status: status_from_label(&status),
+                lifecycle_state: SubscriptionLifecycleState::Queued,
+                execution_state: SubscriptionExecutionState::Idle,
+                attention_tags: Vec::new(),
+                failure: None,
+                next_attempt_at: Some(updated_at),
+                force_eligible_once: false,
+                media_kind: SubscriptionMediaKind::from_tags(&[]),
+                tv: None,
+                retry_count: 0,
+                max_retries: 0,
+                last_error: Some("原订阅记录 JSON 损坏，已按索引字段降级恢复".to_string()),
+                skip_reason: None,
+                processing_stage: None,
+                stage_message: None,
+                stage_updated_at: None,
+                next_action: None,
+                candidate_matches: Vec::new(),
+                last_push: None,
+                last_completion: None,
+                created_at: updated_at,
+                updated_at,
+                first_seen_at: updated_at,
+                last_seen_at: updated_at,
+            });
+        if record.subject_id.trim().is_empty() {
+            record.subject_id = subject_id;
+        }
+        if record.title.trim().is_empty() {
+            record.title = title;
+        }
+        if record.category_text.is_none() {
+            record.category_text = category_text;
+        }
+        if matches!(record.status, WantedSubscriptionStatus::Unprocessed) && status != "unprocessed"
+        {
+            record.status = status_from_label(&status);
+        }
+        if record.updated_at == 0 {
+            record.updated_at = updated_at;
+        }
+        migrate_legacy_record_to_lifecycle_once(&mut record, now.max(updated_at));
+        let record_json = serde_json::to_string(&record)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let indexes = record_index_values(&record);
+        conn.execute(
+            "UPDATE wanted_subscription_records
+                SET status = ?1,
+                    record_json = ?2,
+                    lifecycle_state = ?3,
+                    execution_state = ?4,
+                    attention_tags_json = ?5,
+                    media_kind = ?6,
+                    next_attempt_at = ?7,
+                    search_next_attempt_at = ?8,
+                    progress_next_attempt_at = ?9,
+                    link_next_attempt_at = ?10,
+                    retry_blocked_count = ?11
+                WHERE rowid = ?12",
+            params![
+                status_label(record.status),
+                record_json,
+                indexes.lifecycle_state,
+                indexes.execution_state,
+                indexes.attention_tags_json,
+                indexes.media_kind,
+                indexes.next_attempt_at.map(u64_to_i64),
+                indexes.search_next_attempt_at.map(u64_to_i64),
+                indexes.progress_next_attempt_at.map(u64_to_i64),
+                indexes.link_next_attempt_at.map(u64_to_i64),
+                indexes.retry_blocked_count,
+                rowid,
+            ],
+        )
+        .map_err(sqlite_io)?;
+    }
+
     Ok(())
 }
 
@@ -1959,6 +2101,13 @@ fn i64_to_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
 }
 
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 fn sqlite_io(error: rusqlite::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
 }
@@ -2025,44 +2174,10 @@ fn repair_record_defaults(
     if record.last_seen_at == 0 {
         record.last_seen_at = record.updated_at;
     }
-    if record.lifecycle_state == SubscriptionLifecycleState::Queued
-        && (record.status != WantedSubscriptionStatus::Unprocessed
-            || record
-                .processing_stage
-                .as_deref()
-                .is_some_and(|stage| stage != "queued")
-            || record.last_push.is_some()
-            || record.last_completion.is_some()
-            || !record.candidate_matches.is_empty())
-    {
-        migrate_legacy_status_fields(record, now);
-    }
-    normalize_existing_stage(record, now);
 }
 
-fn normalize_existing_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    if matches!(record.status, WantedSubscriptionStatus::Skipped) {
-        let stage = record.processing_stage.as_deref().unwrap_or_default();
-        let message = record.stage_message.as_deref().unwrap_or_default().trim();
-        let skip_reason = record.skip_reason.as_deref().unwrap_or_default().trim();
-        if stage != "skipped"
-            || message.is_empty()
-            || (!skip_reason.is_empty() && message == skip_reason)
-        {
-            let stage_time = record
-                .stage_updated_at
-                .unwrap_or_else(|| record.updated_at.max(record.created_at).max(now));
-            apply_status_stage(record, stage_time);
-        }
-        return;
-    }
-
-    if record.processing_stage.is_none() && record.stage_message.is_none() {
-        hydrate_stage_from_record(record);
-    }
-}
-
-pub fn migrate_legacy_status_fields(record: &mut WantedSubscriptionRecord, now: u64) {
+pub fn migrate_legacy_record_to_lifecycle_once(record: &mut WantedSubscriptionRecord, now: u64) {
+    let infer_lifecycle_from_legacy = legacy_lifecycle_from_record;
     let (state, mut tags) = infer_lifecycle_from_legacy(record);
     record.lifecycle_state = state;
     record.execution_state = SubscriptionExecutionState::Idle;
@@ -2072,7 +2187,23 @@ pub fn migrate_legacy_status_fields(record: &mut WantedSubscriptionRecord, now: 
     }
     preserve_retry_blocked_attention_tag(record, &mut tags);
     merge_attention_tags(record, tags);
-    record.status = derive_legacy_status(record);
+}
+
+fn migrate_legacy_state_records_to_lifecycle_once(state: &mut WantedSubscriptionState, now: u64) {
+    for record in state.records.values_mut() {
+        if record.lifecycle_state == SubscriptionLifecycleState::Queued
+            && (record.status != WantedSubscriptionStatus::Unprocessed
+                || record
+                    .processing_stage
+                    .as_deref()
+                    .is_some_and(|stage| stage != "queued")
+                || record.last_push.is_some()
+                || record.last_completion.is_some()
+                || !record.candidate_matches.is_empty())
+        {
+            migrate_legacy_record_to_lifecycle_once(record, now);
+        }
+    }
 }
 
 fn preserve_retry_blocked_attention_tag(
@@ -2089,7 +2220,7 @@ fn preserve_retry_blocked_attention_tag(
     }
 }
 
-fn infer_lifecycle_from_legacy(
+fn legacy_lifecycle_from_record(
     record: &WantedSubscriptionRecord,
 ) -> (SubscriptionLifecycleState, Vec<SubscriptionAttentionTag>) {
     if let Some(completion) = record.last_completion.as_ref() {
@@ -2262,33 +2393,6 @@ fn failure_from_legacy_error(
         next_retry_at: record.next_attempt_at,
         retry_blocked: record.retry_count >= record.max_retries && record.max_retries > 0,
     })
-}
-
-pub fn derive_legacy_status(record: &WantedSubscriptionRecord) -> WantedSubscriptionStatus {
-    if record
-        .attention_tags
-        .contains(&SubscriptionAttentionTag::Skipped)
-    {
-        return WantedSubscriptionStatus::Skipped;
-    }
-    if record
-        .attention_tags
-        .contains(&SubscriptionAttentionTag::Failed)
-        || record
-            .attention_tags
-            .contains(&SubscriptionAttentionTag::RetryBlocked)
-    {
-        return WantedSubscriptionStatus::Failed;
-    }
-    match record.lifecycle_state {
-        SubscriptionLifecycleState::Queued => WantedSubscriptionStatus::Unprocessed,
-        SubscriptionLifecycleState::Meta | SubscriptionLifecycleState::Searching => {
-            WantedSubscriptionStatus::Matching
-        }
-        SubscriptionLifecycleState::Downloading => WantedSubscriptionStatus::Downloading,
-        SubscriptionLifecycleState::Linking => WantedSubscriptionStatus::Completed,
-        SubscriptionLifecycleState::Completed => WantedSubscriptionStatus::Linked,
-    }
 }
 
 #[allow(dead_code)]
@@ -2576,7 +2680,6 @@ pub fn derive_tv_parent_lifecycle(record: &mut WantedSubscriptionRecord) {
     };
     if !(tv.metadata_ready && tv.episode_records_initialized && tv.target_episode_set_known) {
         record.lifecycle_state = SubscriptionLifecycleState::Meta;
-        record.status = derive_legacy_status(record);
         return;
     }
     record.lifecycle_state = if tv_is_complete(tv) {
@@ -2590,7 +2693,6 @@ pub fn derive_tv_parent_lifecycle(record: &mut WantedSubscriptionRecord) {
     } else {
         SubscriptionLifecycleState::Meta
     };
-    record.status = derive_legacy_status(record);
 }
 
 #[allow(dead_code)]
@@ -3284,19 +3386,6 @@ fn douban_date_sort_key(raw: &str) -> Option<u64> {
     trimmed.parse::<u64>().ok()
 }
 
-fn hydrate_stage_from_record(record: &mut WantedSubscriptionRecord) {
-    let now = record.updated_at.max(record.created_at);
-    if record.last_completion.is_some() {
-        apply_completion_stage(record, now);
-    } else if record.last_push.is_some() {
-        apply_push_stage(record, now);
-    } else if !record.candidate_matches.is_empty() {
-        apply_candidate_stage(record, now);
-    } else {
-        apply_status_stage(record, now);
-    }
-}
-
 fn set_stage(
     record: &mut WantedSubscriptionRecord,
     stage: &str,
@@ -3308,15 +3397,28 @@ fn set_stage(
     record.stage_message = Some(message.to_string());
     record.stage_updated_at = Some(now.max(record.updated_at).max(record.created_at));
     record.next_action = next_action.map(str::to_string);
-    sync_lifecycle_from_legacy_stage(record, now);
+    apply_stage_lifecycle(record, stage, now);
 }
 
-fn sync_lifecycle_from_legacy_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    let (state, mut tags) = infer_lifecycle_from_legacy(record);
-    record.lifecycle_state = state;
+fn apply_stage_lifecycle(record: &mut WantedSubscriptionRecord, stage: &str, now: u64) {
+    let mut tags = match stage {
+        "skipped" => vec![SubscriptionAttentionTag::Skipped],
+        "no_candidates" | "no_match" => vec![SubscriptionAttentionTag::WaitingRelease],
+        "push_failed" | "link_failed" | "error" => vec![SubscriptionAttentionTag::Failed],
+        _ => Vec::new(),
+    };
+    record.lifecycle_state = match stage {
+        "linked" => SubscriptionLifecycleState::Completed,
+        "download_complete" | "link_planned" | "link_failed" => SubscriptionLifecycleState::Linking,
+        "downloading" | "pushed" => SubscriptionLifecycleState::Downloading,
+        "searching" | "matched" | "pushing" | "no_candidates" | "no_match" | "push_failed" => {
+            SubscriptionLifecycleState::Searching
+        }
+        _ => SubscriptionLifecycleState::Queued,
+    };
     record.execution_state = SubscriptionExecutionState::Idle;
     record.next_attempt_at.get_or_insert(now);
-    if record.failure.is_none() {
+    if !tags.is_empty() && record.failure.is_none() {
         record.failure = failure_from_legacy_error(record, now);
     }
     preserve_retry_blocked_attention_tag(record, &mut tags);
@@ -3909,7 +4011,7 @@ mod tests {
     fn tv_record_ready_for_search(subject_id: &str) -> WantedSubscriptionRecord {
         let mut record = bare_tv_record(subject_id, 1, 8);
         record.lifecycle_state = SubscriptionLifecycleState::Searching;
-        record.status = derive_legacy_status(&record);
+        record.status = legacy_status_for_lifecycle(record.lifecycle_state, &record.attention_tags);
         record
     }
 
@@ -3928,9 +4030,32 @@ mod tests {
             1_000,
         );
         record.lifecycle_state = lifecycle_state;
-        record.status = derive_legacy_status(&record);
+        record.status = legacy_status_for_lifecycle(record.lifecycle_state, &record.attention_tags);
         record.next_attempt_at = Some(next_attempt_at);
         record
+    }
+
+    fn legacy_status_for_lifecycle(
+        lifecycle_state: SubscriptionLifecycleState,
+        attention_tags: &[SubscriptionAttentionTag],
+    ) -> WantedSubscriptionStatus {
+        if attention_tags.contains(&SubscriptionAttentionTag::Skipped) {
+            return WantedSubscriptionStatus::Skipped;
+        }
+        if attention_tags.contains(&SubscriptionAttentionTag::Failed)
+            || attention_tags.contains(&SubscriptionAttentionTag::RetryBlocked)
+        {
+            return WantedSubscriptionStatus::Failed;
+        }
+        match lifecycle_state {
+            SubscriptionLifecycleState::Queued => WantedSubscriptionStatus::Unprocessed,
+            SubscriptionLifecycleState::Meta | SubscriptionLifecycleState::Searching => {
+                WantedSubscriptionStatus::Matching
+            }
+            SubscriptionLifecycleState::Downloading => WantedSubscriptionStatus::Downloading,
+            SubscriptionLifecycleState::Linking => WantedSubscriptionStatus::Completed,
+            SubscriptionLifecycleState::Completed => WantedSubscriptionStatus::Linked,
+        }
     }
 
     fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
@@ -3956,6 +4081,36 @@ mod tests {
             }
         }
         panic!("function body closes");
+    }
+
+    #[test]
+    fn migration_is_the_only_code_allowed_to_infer_from_legacy_status() {
+        let source = include_str!("subscription.rs");
+        let infer_refs = source
+            .matches(concat!("infer_lifecycle_from_", "legacy("))
+            .count();
+        assert_eq!(
+            infer_refs, 1,
+            "only the migration function may call legacy inference"
+        );
+        assert!(!source.contains(concat!(
+            "sync_lifecycle_from_",
+            "legacy_stage"
+        )));
+        assert!(!source.contains(concat!("derive_legacy_", "status(record)")));
+    }
+
+    #[test]
+    fn repair_defaults_does_not_migrate_legacy_on_every_load() {
+        let source = include_str!("subscription.rs");
+        let start = source.find("fn repair_record_defaults").unwrap();
+        let end = source[start..]
+            .find("\nfn ")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        assert!(!body.contains(concat!("migrate_legacy_", "status_fields")));
+        assert!(!body.contains(concat!("normalize_existing_", "stage")));
     }
 
     fn tv_record_all_lanes_due(now: u64) -> WantedSubscriptionRecord {
@@ -4084,7 +4239,7 @@ mod tests {
 
         for (old_status, stage, expected_state, expected_tags) in cases {
             let mut record = bare_record_with_status(old_status, stage);
-            migrate_legacy_status_fields(&mut record, 2_000);
+            migrate_legacy_record_to_lifecycle_once(&mut record, 2_000);
             assert_eq!(record.lifecycle_state, expected_state);
             assert_eq!(record.attention_tags, expected_tags);
         }
@@ -4094,7 +4249,7 @@ mod tests {
     fn legacy_failed_records_follow_prd_precedence() {
         let mut completion_failed = bare_record_with_status(WantedSubscriptionStatus::Failed, None);
         completion_failed.last_completion = Some(test_completion("failed"));
-        migrate_legacy_status_fields(&mut completion_failed, 2_000);
+        migrate_legacy_record_to_lifecycle_once(&mut completion_failed, 2_000);
         assert_eq!(
             completion_failed.lifecycle_state,
             SubscriptionLifecycleState::Linking
@@ -4106,7 +4261,7 @@ mod tests {
         let mut no_match =
             bare_record_with_status(WantedSubscriptionStatus::Failed, Some("no_match"));
         no_match.last_push = Some(test_push("failed", Some("没有匹配规则命中")));
-        migrate_legacy_status_fields(&mut no_match, 2_000);
+        migrate_legacy_record_to_lifecycle_once(&mut no_match, 2_000);
         assert_eq!(
             no_match.lifecycle_state,
             SubscriptionLifecycleState::Searching
@@ -4133,7 +4288,7 @@ mod tests {
             retry_blocked: true,
         });
 
-        migrate_legacy_status_fields(&mut record, 2_000);
+        migrate_legacy_record_to_lifecycle_once(&mut record, 2_000);
 
         assert!(record.failure.as_ref().unwrap().retry_blocked);
         assert!(record
@@ -4908,7 +5063,7 @@ mod tests {
     }
 
     #[test]
-    fn skipped_stage_hydration_does_not_leak_raw_skip_reason() {
+    fn repair_defaults_preserves_existing_legacy_stage_fields() {
         let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
         rec.status = WantedSubscriptionStatus::Skipped;
         rec.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
@@ -4920,9 +5075,12 @@ mod tests {
         repair_record_defaults(&mut rec, 100, 120, 300);
 
         assert_eq!(rec.processing_stage.as_deref(), Some("skipped"));
-        assert_eq!(rec.stage_message.as_deref(), Some("历史想看，首次同步跳过"));
+        assert_eq!(
+            rec.stage_message.as_deref(),
+            Some("initial_bootstrap_existing_wish")
+        );
         assert_eq!(rec.stage_updated_at, Some(150));
-        assert_eq!(rec.next_action.as_deref(), None);
+        assert_eq!(rec.next_action.as_deref(), Some("raw"));
     }
 
     #[test]
@@ -5563,7 +5721,7 @@ mod tests {
         let store = WantedSubscriptionStore::new(root.clone());
         let snapshot = store.snapshot("acct", 500).await.unwrap();
         let rec = snapshot.records.get("42").unwrap();
-        assert_eq!(rec.status, WantedSubscriptionStatus::Downloading);
+        assert_eq!(rec.status, WantedSubscriptionStatus::Pushed);
         assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Downloading);
         assert_eq!(rec.last_push.as_ref().unwrap().torrent_title, "Old.Seed");
         assert!(rec.created_at >= 500);
