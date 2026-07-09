@@ -2752,7 +2752,6 @@ pub fn apply_movie_push_result(
         record.force_eligible_once = false;
         record.updated_at = now;
     }
-    record.status = derive_legacy_status(record);
 }
 
 pub fn apply_movie_progress_result(
@@ -2789,7 +2788,6 @@ pub fn apply_movie_progress_result(
         record.force_eligible_once = false;
         record.updated_at = now;
     }
-    record.status = derive_legacy_status(record);
 }
 
 pub fn apply_movie_completion_result(
@@ -2840,7 +2838,6 @@ pub fn apply_movie_completion_result(
             record.updated_at = now;
         }
     }
-    record.status = derive_legacy_status(record);
 }
 
 fn clear_movie_transient_failure(record: &mut WantedSubscriptionRecord) {
@@ -2859,7 +2856,7 @@ fn movie_push_failure_is_waiting_release(
     record: &WantedSubscriptionRecord,
     message: Option<&str>,
 ) -> bool {
-    legacy_text_is_waiting_release(record.processing_stage.as_deref(), message)
+    legacy_text_is_waiting_release(None, message)
         || record.candidate_matches.is_empty()
         || !record.candidate_matches.iter().any(|item| item.selected)
 }
@@ -3715,6 +3712,28 @@ mod tests {
         }
     }
 
+    fn test_candidate_match(selected: bool) -> TorrentCandidateMatchRecord {
+        TorrentCandidateMatchRecord {
+            candidate: TorrentCandidateRecord {
+                torrent_id: "torrent-1".to_string(),
+                title: "Legacy.Seed".to_string(),
+                subtitle: String::new(),
+                source: "mteam".to_string(),
+                search_query: "Legacy".to_string(),
+                size: None,
+                seeders: None,
+                leechers: None,
+                uploaded_at: None,
+            },
+            selected,
+            matched_rule_name: selected.then(|| "default".to_string()),
+            matched_priority: selected.then_some(1),
+            matched_keywords: Vec::new(),
+            excluded_reason: None,
+            rule_evaluations: Vec::new(),
+        }
+    }
+
     fn test_completion(status: &str) -> HardlinkCompletionRecord {
         HardlinkCompletionRecord {
             status: status.to_string(),
@@ -3886,6 +3905,31 @@ mod tests {
         record.status = derive_legacy_status(&record);
         record.next_attempt_at = Some(next_attempt_at);
         record
+    }
+
+    fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let public_signature = format!("pub fn {name}");
+        let private_signature = format!("fn {name}");
+        let start = source
+            .find(&public_signature)
+            .or_else(|| source.find(&private_signature))
+            .expect("function exists");
+        let open_offset = source[start..].find('{').expect("function has body");
+        let open = start + open_offset;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("function body closes");
     }
 
     fn tv_record_all_lanes_due(now: u64) -> WantedSubscriptionRecord {
@@ -4363,6 +4407,66 @@ mod tests {
         );
         assert_eq!(record.next_attempt_at, None);
         assert!(record.failure.is_none());
+    }
+
+    #[test]
+    fn semantic_movie_helpers_do_not_write_legacy_status() {
+        let source = include_str!("subscription.rs");
+        for name in [
+            "apply_movie_push_result",
+            "apply_movie_progress_result",
+            "apply_movie_completion_result",
+        ] {
+            let body = function_body(source, name);
+            assert!(
+                !body.contains("derive_legacy_status"),
+                "{name} must not derive legacy status"
+            );
+            assert!(
+                !body.contains("record.status"),
+                "{name} must not assign legacy status"
+            );
+        }
+    }
+
+    #[test]
+    fn push_waiting_release_decision_does_not_read_legacy_stage() {
+        let source = include_str!("subscription.rs");
+        for name in [
+            "apply_movie_push_result",
+            "movie_push_failure_is_waiting_release",
+        ] {
+            let body = function_body(source, name);
+            assert!(
+                !body.contains("processing_stage"),
+                "{name} must not read legacy processing_stage"
+            );
+        }
+    }
+
+    #[test]
+    fn push_failure_ignores_stale_legacy_no_match_stage_when_candidate_selected() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Searching, 1_000);
+        record.processing_stage = Some("no_match".to_string());
+        record.candidate_matches = vec![test_candidate_match(true)];
+        let push = test_push("failed", Some("qB 添加种子失败"));
+
+        apply_movie_push_result(
+            &mut record,
+            push,
+            Some("qB 添加种子失败".to_string()),
+            &cfg,
+            2_000,
+        );
+
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::WaitingRelease));
+        assert_eq!(record.failure.as_ref().unwrap().operation, "search");
     }
 
     #[test]
