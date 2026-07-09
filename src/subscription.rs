@@ -960,6 +960,33 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn apply_parent_operation_failure_result(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        operation: &str,
+        message: &str,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        match operation {
+            "progress" => record.lifecycle_state = SubscriptionLifecycleState::Downloading,
+            "link" => record.lifecycle_state = SubscriptionLifecycleState::Linking,
+            "search" => record.lifecycle_state = SubscriptionLifecycleState::Searching,
+            _ => {}
+        }
+        apply_parent_operation_failure(record, operation, message, cfg, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
     #[allow(dead_code)]
     pub async fn update_push_record(
         &self,
@@ -5196,6 +5223,109 @@ mod tests {
         );
         assert_eq!(persisted.updated_at, 200);
         assert_eq!(persisted.next_attempt_at, Some(200));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn semantic_parent_progress_failure_keeps_downloading_without_legacy_failed_status() {
+        let root = temp_state_dir("movie_progress_parent_failure");
+        let cfg = SubscriptionWatcherConfig {
+            bootstrap_existing_as_skipped: false,
+            ..SubscriptionWatcherConfig::default()
+        };
+        let store = WantedSubscriptionStore::new(root.clone());
+        store
+            .apply_wish_items(
+                "acct",
+                &[item("2", "测试电影", "2026 / 中国大陆 / 电影", &["电影"])],
+                &cfg,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .transition_movie_operation(
+                "acct",
+                "2",
+                MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Downloading),
+                &cfg,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let updated = store
+            .apply_parent_operation_failure_result(
+                "acct",
+                "2",
+                "progress",
+                "订阅记录缺少 qB pushed record",
+                &cfg,
+                300,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            updated.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+        assert_ne!(updated.status, WantedSubscriptionStatus::Failed);
+        assert_ne!(updated.processing_stage.as_deref(), Some("error"));
+        assert_eq!(updated.failure.as_ref().unwrap().operation, "progress");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn semantic_parent_link_failure_keeps_linking_without_legacy_failed_status() {
+        let root = temp_state_dir("movie_link_parent_failure");
+        let cfg = SubscriptionWatcherConfig {
+            bootstrap_existing_as_skipped: false,
+            ..SubscriptionWatcherConfig::default()
+        };
+        let store = WantedSubscriptionStore::new(root.clone());
+        store
+            .apply_wish_items(
+                "acct",
+                &[item("2", "测试电影", "2026 / 中国大陆 / 电影", &["电影"])],
+                &cfg,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .transition_movie_operation(
+                "acct",
+                "2",
+                MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Linking),
+                &cfg,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let updated = store
+            .apply_parent_operation_failure_result(
+                "acct",
+                "2",
+                "link",
+                "订阅记录缺少 qB pushed record",
+                &cfg,
+                300,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert_ne!(updated.status, WantedSubscriptionStatus::Failed);
+        assert_ne!(updated.processing_stage.as_deref(), Some("error"));
+        assert_eq!(updated.failure.as_ref().unwrap().operation, "link");
 
         let _ = std::fs::remove_dir_all(root);
     }

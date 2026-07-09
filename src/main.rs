@@ -1370,15 +1370,19 @@ async fn wanted_subscription_completion(
         Some(push) => push,
         None => {
             let error = "订阅记录缺少 qB pushed record".to_string();
-            persist_subscription_sync_error(
-                &state,
-                &account_key,
-                &record.subject_id,
-                subscription::WantedSubscriptionStatus::Failed,
-                error.clone(),
-                now,
-            )
-            .await?;
+            state
+                .wanted_store
+                .apply_parent_operation_failure_result(
+                    &account_key,
+                    &record.subject_id,
+                    "link",
+                    &error,
+                    &cfg.subscription_watcher,
+                    now,
+                )
+                .await
+                .map_err(|e| ApiError::internal(format!("写入硬链接前置错误失败: {e}")))?
+                .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
             return Err(ApiError::bad_request(error));
         }
     };
@@ -1642,15 +1646,19 @@ async fn wanted_subscription_progress(
         Some(push) => push,
         None => {
             let error = "订阅记录缺少 qB pushed record".to_string();
-            persist_subscription_sync_error(
-                &state,
-                &account_key,
-                &record.subject_id,
-                subscription::WantedSubscriptionStatus::Failed,
-                error.clone(),
-                now,
-            )
-            .await?;
+            state
+                .wanted_store
+                .apply_parent_operation_failure_result(
+                    &account_key,
+                    &record.subject_id,
+                    "progress",
+                    &error,
+                    &cfg.subscription_watcher,
+                    now,
+                )
+                .await
+                .map_err(|e| ApiError::internal(format!("写入下载进度前置错误失败: {e}")))?
+                .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
             return Err(ApiError::bad_request(error));
         }
     };
