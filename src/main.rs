@@ -6312,8 +6312,6 @@ mod subscription_category_tests {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
         record.lifecycle_state = subscription::SubscriptionLifecycleState::Linking;
         record.next_attempt_at = Some(100);
-        record.status = subscription::WantedSubscriptionStatus::Unprocessed;
-        record.processing_stage = Some("queued".to_string());
 
         assert_eq!(
             select_watcher_due_operation(&record, 100),
@@ -6418,8 +6416,6 @@ mod subscription_category_tests {
     #[test]
     fn completion_short_circuit_distinguishes_downloaded_from_linked() {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
-        record.status = subscription::WantedSubscriptionStatus::Completed;
-        record.processing_stage = Some("download_complete".to_string());
         record.last_push = Some(torrent_push_record(
             "subject-1",
             &QbServerEntry {
@@ -6674,10 +6670,6 @@ mod subscription_category_tests {
             record.lifecycle_state,
             subscription::SubscriptionLifecycleState::Meta
         );
-        assert_eq!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Unprocessed
-        );
         assert_eq!(record.last_error, None);
         assert!(record.failure.is_none());
         assert_eq!(record.next_attempt_at, Some(record.updated_at));
@@ -6761,10 +6753,6 @@ mod subscription_category_tests {
             before_record.lifecycle_state,
             subscription::SubscriptionLifecycleState::Searching
         );
-        assert_eq!(
-            before_record.status,
-            subscription::WantedSubscriptionStatus::Unprocessed
-        );
 
         let err = process_wanted_push_step(&state, account_key, subject_id, true)
             .await
@@ -6776,10 +6764,6 @@ mod subscription_category_tests {
         assert_eq!(
             record.lifecycle_state,
             subscription::SubscriptionLifecycleState::Searching
-        );
-        assert_eq!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Unprocessed
         );
         let failure = record.failure.as_ref().unwrap();
         assert_eq!(failure.operation, "search");
@@ -7027,10 +7011,6 @@ mod subscription_category_tests {
             subscription::SubscriptionLifecycleState::Downloading
         );
         assert_eq!(record.failure.as_ref().unwrap().operation, "progress");
-        assert_ne!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Failed
-        );
 
         let logs = state
             .wanted_store
@@ -7098,10 +7078,6 @@ mod subscription_category_tests {
             subscription::SubscriptionLifecycleState::Linking
         );
         assert_eq!(record.failure.as_ref().unwrap().operation, "link");
-        assert_ne!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Failed
-        );
 
         let logs = state
             .wanted_store
@@ -7337,7 +7313,6 @@ mod subscription_category_tests {
             douban_date: None,
             douban_sort_time: None,
             douban_return_order: None,
-            status: subscription::WantedSubscriptionStatus::Pushed,
             lifecycle_state: subscription::SubscriptionLifecycleState::Downloading,
             execution_state: subscription::SubscriptionExecutionState::Idle,
             attention_tags: Vec::new(),
@@ -7350,10 +7325,6 @@ mod subscription_category_tests {
             max_retries: 3,
             last_error: None,
             skip_reason: None,
-            processing_stage: None,
-            stage_message: None,
-            stage_updated_at: None,
-            next_action: None,
             candidate_matches: Vec::new(),
             last_push: None,
             last_completion: None,
