@@ -937,19 +937,11 @@ async fn wanted_subscription_push(
     Json(body): Json<WantedPushBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
-    if !body.force
-        && matches!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Pushed
-                | subscription::WantedSubscriptionStatus::Completed
-                | subscription::WantedSubscriptionStatus::Linked
-                | subscription::WantedSubscriptionStatus::Downloading
-                | subscription::WantedSubscriptionStatus::Processing
-        )
+    if !body.force && record.lifecycle_state != subscription::SubscriptionLifecycleState::Searching
     {
         return Err(ApiError::bad_request(format!(
-            "订阅 {} 当前状态为 {:?}，不会重复推送；需要重试请传 force=true",
-            record.subject_id, record.status
+            "订阅 {} 当前生命周期为 {:?}，不会重复推送；需要重试请传 force=true",
+            record.subject_id, record.lifecycle_state
         )));
     }
     let category = category_for_wanted_record(&record, &cfg.subscription_categories)?.clone();
@@ -1132,6 +1124,7 @@ async fn wanted_subscription_push(
                     &account_key,
                     &record.subject_id,
                     push.clone(),
+                    false,
                     None,
                     &cfg.subscription_watcher,
                     unix_now_secs(),
@@ -1243,6 +1236,7 @@ async fn wanted_subscription_push(
             &account_key,
             &record.subject_id,
             push.clone(),
+            false,
             None,
             &cfg.subscription_watcher,
             unix_now_secs(),
@@ -1338,7 +1332,12 @@ async fn wanted_subscription_completion(
             return Err(ApiError::bad_request(error));
         }
     };
-    if push.status == "failed" && !body.force {
+    if record
+        .failure
+        .as_ref()
+        .is_some_and(|failure| failure.operation == "search")
+        && !body.force
+    {
         let error = "最后一次 qB push 已失败；需要重新检查请传 force=true".to_string();
         persist_completion_sync_error(&state, &account_key, &record.subject_id, push, &error, now)
             .await?;
@@ -1412,6 +1411,7 @@ async fn wanted_subscription_completion(
                 &record.subject_id,
                 push.clone(),
                 completion.clone(),
+                subscription::MovieCompletionOutcome::PendingDownload,
                 None,
                 &cfg.subscription_watcher,
                 now,
@@ -1495,7 +1495,7 @@ async fn wanted_subscription_completion(
     } else {
         execute_hardlink_plan(&plan, now)
     };
-    let completed = completion.status == "completed";
+    let completed = completion.error.is_none() && completion.completed_at.is_some();
     push.status = if completed {
         "linked".to_string()
     } else {
@@ -1514,6 +1514,13 @@ async fn wanted_subscription_completion(
             &record.subject_id,
             push.clone(),
             completion.clone(),
+            if body.dry_run {
+                subscription::MovieCompletionOutcome::LinkPlanned
+            } else if completed {
+                subscription::MovieCompletionOutcome::Completed
+            } else {
+                subscription::MovieCompletionOutcome::LinkFailed
+            },
             if body.dry_run {
                 None
             } else {
@@ -1574,17 +1581,7 @@ async fn wanted_subscription_completion(
 }
 
 fn subscription_completion_already_linked(record: &subscription::WantedSubscriptionRecord) -> bool {
-    matches!(
-        record.status,
-        subscription::WantedSubscriptionStatus::Linked
-    ) || record
-        .last_completion
-        .as_ref()
-        .is_some_and(|completion| completion.status == "completed")
-        || record
-            .last_push
-            .as_ref()
-            .is_some_and(|push| push.status == "linked")
+    record.lifecycle_state == subscription::SubscriptionLifecycleState::Completed
 }
 
 async fn wanted_subscription_progress(
@@ -1742,39 +1739,6 @@ async fn wanted_subscription_progress(
     })))
 }
 
-async fn persist_subscription_sync_error(
-    state: &AppState,
-    account_key: &str,
-    subject_id: &str,
-    status: subscription::WantedSubscriptionStatus,
-    error: String,
-    now: u64,
-) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
-    let record = state
-        .wanted_store
-        .update_sync_error(account_key, subject_id, status, error, now)
-        .await
-        .map_err(|e| ApiError::internal(format!("写入订阅同步错误失败: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
-    write_operation_log(
-        state,
-        operation_log_entry(
-            account_key.to_string(),
-            "system_error",
-            "subscription_sync_error",
-            "subscription",
-            Some(record.subject_id.clone()),
-            Some(record.title.clone()),
-            "failed",
-            "订阅同步状态写入失败",
-            record.last_error.clone(),
-            json!({ "status": format!("{:?}", status) }),
-        ),
-    )
-    .await;
-    Ok(record)
-}
-
 async fn persist_progress_sync_error(
     state: &AppState,
     account_key: &str,
@@ -1855,6 +1819,7 @@ async fn persist_completion_sync_error(
             subject_id,
             push.clone(),
             completion.clone(),
+            subscription::MovieCompletionOutcome::LinkFailed,
             Some(error.to_string()),
             &cfg.subscription_watcher,
             now,
@@ -1916,6 +1881,7 @@ async fn persist_hardlink_sync_error(
             subject_id,
             push.clone(),
             completion.clone(),
+            subscription::MovieCompletionOutcome::LinkFailed,
             Some(error.to_string()),
             &cfg.subscription_watcher,
             now,
@@ -2473,6 +2439,7 @@ async fn record_push_failure(
             account_key,
             subscription_id,
             push,
+            true,
             Some(error),
             watcher_cfg,
             unix_now_secs(),
@@ -4178,11 +4145,7 @@ async fn should_persist_search_step_failure_fallback(
         return false;
     };
     let Some(original) = original else {
-        return !record.failure.is_some()
-            && !record
-                .last_push
-                .as_ref()
-                .is_some_and(|push| push.status == "failed");
+        return record.failure.is_none();
     };
     !search_step_failure_was_persisted_during_attempt(original, record)
 }
@@ -6476,7 +6439,7 @@ mod subscription_category_tests {
 
         assert!(!subscription_completion_already_linked(&record));
 
-        record.status = subscription::WantedSubscriptionStatus::Linked;
+        record.lifecycle_state = subscription::SubscriptionLifecycleState::Completed;
         assert!(subscription_completion_already_linked(&record));
     }
 
@@ -6723,33 +6686,34 @@ mod subscription_category_tests {
     }
 
     #[tokio::test]
-    async fn manual_sync_error_persists_without_retry_churn() {
+    async fn manual_sync_error_persists_as_semantic_failure() {
         let root = temp_test_dir("manual_sync_error");
         let state = test_app_state(&root);
         let account_key = "acct";
         let subject_id = "subject-sync";
         seed_wanted_record(&state, account_key, subject_id).await;
 
-        let record = persist_subscription_sync_error(
-            &state,
-            account_key,
-            subject_id,
-            subscription::WantedSubscriptionStatus::Failed,
-            "qB 服务器不存在".to_string(),
-            200,
-        )
-        .await
-        .unwrap_or_else(|err| panic!("{}", err.message()));
+        let watcher_cfg = state.config.read().await.subscription_watcher.clone();
+        let record = state
+            .wanted_store
+            .apply_parent_operation_failure_result(
+                account_key,
+                subject_id,
+                "progress",
+                "qB 服务器不存在",
+                &watcher_cfg,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(
-            record.status,
-            subscription::WantedSubscriptionStatus::Failed
-        );
-        assert_eq!(record.retry_count, 0);
+        assert_eq!(record.retry_count, 1);
         assert_eq!(record.last_error.as_deref(), Some("qB 服务器不存在"));
+        assert_eq!(record.failure.as_ref().unwrap().operation, "progress");
         let snapshot = state.wanted_store.snapshot(account_key, 210).await.unwrap();
         let persisted = snapshot.records.get(subject_id).unwrap();
-        assert_eq!(persisted.retry_count, 0);
+        assert_eq!(persisted.retry_count, 1);
         assert_eq!(persisted.last_error.as_deref(), Some("qB 服务器不存在"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -6893,6 +6857,7 @@ mod subscription_category_tests {
                 account_key,
                 subject_id,
                 old_push,
+                true,
                 Some("qB 添加种子失败".to_string()),
                 &watcher_cfg,
                 210,
@@ -7302,13 +7267,14 @@ mod subscription_category_tests {
         let completion = dry_run_hardlink_plan(&plan, 260);
         let record = state
             .wanted_store
-            .update_completion_record(
+            .apply_movie_completion_result(
                 account_key,
                 subject_id,
                 push,
                 completion,
-                subscription::WantedSubscriptionStatus::Completed,
+                subscription::MovieCompletionOutcome::LinkPlanned,
                 None,
+                &state.config.read().await.subscription_watcher,
                 260,
             )
             .await

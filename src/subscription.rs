@@ -336,6 +336,14 @@ pub enum MovieOperationOutcome {
     Waiting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovieCompletionOutcome {
+    PendingDownload,
+    LinkPlanned,
+    LinkFailed,
+    Completed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TvEpisodeRecord {
     pub season_number: u32,
@@ -819,40 +827,6 @@ impl WantedSubscriptionStore {
         };
         record.candidate_matches = matches;
         record.updated_at = now;
-        apply_candidate_stage(record, now);
-        state.updated_at = now;
-        let record = record.clone();
-        self.save_state_unlocked(account_key, &state)?;
-        Ok(Some(record))
-    }
-
-    pub async fn update_sync_error(
-        &self,
-        account_key: &str,
-        subject_id: &str,
-        status: WantedSubscriptionStatus,
-        error: String,
-        now: u64,
-    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
-        let _guard = self.lock.lock().await;
-        let mut state = self.load_state_unlocked(account_key, now).await?;
-        let Some(record) = state.records.get_mut(subject_id.trim()) else {
-            return Ok(None);
-        };
-        record.status = status;
-        record.last_error = (!error.trim().is_empty()).then_some(error);
-        record.updated_at = now;
-        let message = record
-            .last_error
-            .clone()
-            .unwrap_or_else(|| "订阅处理失败，等待检查配置或手动重试".to_string());
-        set_stage(
-            record,
-            "error",
-            &message,
-            Some("检查错误后重新轮询或手动重试"),
-            now,
-        );
         state.updated_at = now;
         let record = record.clone();
         self.save_state_unlocked(account_key, &state)?;
@@ -961,37 +935,12 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
-    #[allow(dead_code)]
-    pub async fn update_push_record(
-        &self,
-        account_key: &str,
-        subject_id: &str,
-        push: TorrentPushRecord,
-        status: WantedSubscriptionStatus,
-        error: Option<String>,
-        now: u64,
-    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
-        let _guard = self.lock.lock().await;
-        let mut state = self.load_state_unlocked(account_key, now).await?;
-        let Some(record) = state.records.get_mut(subject_id.trim()) else {
-            return Ok(None);
-        };
-        record.status = status;
-        record.last_push = Some(push);
-        record.last_error = error.filter(|s| !s.trim().is_empty());
-        record.updated_at = now;
-        apply_push_stage(record, now);
-        state.updated_at = now;
-        let record = record.clone();
-        self.save_state_unlocked(account_key, &state)?;
-        Ok(Some(record))
-    }
-
     pub async fn apply_movie_push_result(
         &self,
         account_key: &str,
         subject_id: &str,
         push: TorrentPushRecord,
+        failed: bool,
         error: Option<String>,
         cfg: &SubscriptionWatcherConfig,
         now: u64,
@@ -1001,7 +950,7 @@ impl WantedSubscriptionStore {
         let Some(record) = state.records.get_mut(subject_id.trim()) else {
             return Ok(None);
         };
-        apply_movie_push_result(record, push, error, cfg, now);
+        apply_movie_push_result(record, push, failed, error, cfg, now);
         state.updated_at = now;
         let record = record.clone();
         self.save_state_unlocked(account_key, &state)?;
@@ -1036,6 +985,7 @@ impl WantedSubscriptionStore {
         subject_id: &str,
         push: TorrentPushRecord,
         completion: HardlinkCompletionRecord,
+        outcome: MovieCompletionOutcome,
         error: Option<String>,
         cfg: &SubscriptionWatcherConfig,
         now: u64,
@@ -1045,7 +995,7 @@ impl WantedSubscriptionStore {
         let Some(record) = state.records.get_mut(subject_id.trim()) else {
             return Ok(None);
         };
-        apply_movie_completion_result(record, push, completion, error, cfg, now);
+        apply_movie_completion_result(record, push, completion, outcome, error, cfg, now);
         state.updated_at = now;
         let record = record.clone();
         self.save_state_unlocked(account_key, &state)?;
@@ -1096,33 +1046,6 @@ impl WantedSubscriptionStore {
         state.records.insert(key.to_string(), record.clone());
         self.save_state_unlocked(account_key, &state)?;
         Ok(Some((record, operation)))
-    }
-
-    pub async fn update_completion_record(
-        &self,
-        account_key: &str,
-        subject_id: &str,
-        push: TorrentPushRecord,
-        completion: HardlinkCompletionRecord,
-        status: WantedSubscriptionStatus,
-        error: Option<String>,
-        now: u64,
-    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
-        let _guard = self.lock.lock().await;
-        let mut state = self.load_state_unlocked(account_key, now).await?;
-        let Some(record) = state.records.get_mut(subject_id.trim()) else {
-            return Ok(None);
-        };
-        record.status = status;
-        record.last_push = Some(push);
-        record.last_completion = Some(completion);
-        record.last_error = error.filter(|s| !s.trim().is_empty());
-        record.updated_at = now;
-        apply_completion_stage(record, now);
-        state.updated_at = now;
-        let record = record.clone();
-        self.save_state_unlocked(account_key, &state)?;
-        Ok(Some(record))
     }
 
     pub async fn append_operation_log(
@@ -2177,8 +2100,7 @@ fn repair_record_defaults(
 }
 
 pub fn migrate_legacy_record_to_lifecycle_once(record: &mut WantedSubscriptionRecord, now: u64) {
-    let infer_lifecycle_from_legacy = legacy_lifecycle_from_record;
-    let (state, mut tags) = infer_lifecycle_from_legacy(record);
+    let (state, mut tags) = legacy_lifecycle_from_record(record);
     record.lifecycle_state = state;
     record.execution_state = SubscriptionExecutionState::Idle;
     record.next_attempt_at.get_or_insert(now);
@@ -2902,12 +2824,12 @@ pub fn apply_movie_waiting_release(
 pub fn apply_movie_push_result(
     record: &mut WantedSubscriptionRecord,
     push: TorrentPushRecord,
+    failed: bool,
     error: Option<String>,
     cfg: &SubscriptionWatcherConfig,
     now: u64,
 ) {
     let message = semantic_error_message(error, push.error.as_deref());
-    let failed = push.status == "failed";
     record.last_push = Some(push);
     if failed && movie_push_failure_is_waiting_release(record, message.as_deref()) {
         apply_movie_waiting_release(
@@ -2943,7 +2865,7 @@ pub fn apply_movie_progress_result(
     now: u64,
 ) {
     let message = semantic_error_message(error, push.error.as_deref());
-    let failed = push.status == "failed" || message.is_some();
+    let failed = message.is_some();
     record.last_push = Some(push);
     record.lifecycle_state = SubscriptionLifecycleState::Downloading;
     if failed {
@@ -2974,16 +2896,16 @@ pub fn apply_movie_completion_result(
     record: &mut WantedSubscriptionRecord,
     push: TorrentPushRecord,
     completion: HardlinkCompletionRecord,
+    outcome: MovieCompletionOutcome,
     error: Option<String>,
     cfg: &SubscriptionWatcherConfig,
     now: u64,
 ) {
     let message = semantic_error_message(error, completion.error.as_deref());
     record.last_push = Some(push);
-    let status = completion.status.clone();
     record.last_completion = Some(completion);
-    match status.as_str() {
-        "pending" => {
+    match outcome {
+        MovieCompletionOutcome::PendingDownload => {
             clear_movie_transient_failure(record);
             record.lifecycle_state = SubscriptionLifecycleState::Downloading;
             record.execution_state = SubscriptionExecutionState::Idle;
@@ -2991,7 +2913,7 @@ pub fn apply_movie_completion_result(
             record.force_eligible_once = false;
             record.updated_at = now;
         }
-        "failed" => {
+        MovieCompletionOutcome::LinkFailed => {
             record.lifecycle_state = SubscriptionLifecycleState::Linking;
             apply_parent_operation_failure(
                 record,
@@ -3001,7 +2923,7 @@ pub fn apply_movie_completion_result(
                 now,
             );
         }
-        "completed" | "linked" => {
+        MovieCompletionOutcome::Completed => {
             clear_movie_transient_failure(record);
             record.lifecycle_state = SubscriptionLifecycleState::Completed;
             record.execution_state = SubscriptionExecutionState::Idle;
@@ -3009,7 +2931,7 @@ pub fn apply_movie_completion_result(
             record.force_eligible_once = false;
             record.updated_at = now;
         }
-        _ => {
+        MovieCompletionOutcome::LinkPlanned => {
             clear_movie_transient_failure(record);
             record.lifecycle_state = SubscriptionLifecycleState::Linking;
             record.execution_state = SubscriptionExecutionState::Idle;
@@ -3172,7 +3094,7 @@ fn apply_wish_items_with_details_to_state(
         if bootstrap_mode && bootstrap_existing_as_skipped {
             record.status = WantedSubscriptionStatus::Skipped;
             record.skip_reason = Some("initial_bootstrap_existing_wish".to_string());
-            apply_status_stage(&mut record, now);
+            record.attention_tags = vec![SubscriptionAttentionTag::Skipped];
             created_skipped += 1;
         } else {
             record.status = WantedSubscriptionStatus::Unprocessed;
@@ -3384,238 +3306,6 @@ fn douban_date_sort_key(raw: &str) -> Option<u64> {
         digits.as_str()
     };
     trimmed.parse::<u64>().ok()
-}
-
-fn set_stage(
-    record: &mut WantedSubscriptionRecord,
-    stage: &str,
-    message: &str,
-    next_action: Option<&str>,
-    now: u64,
-) {
-    record.processing_stage = Some(stage.to_string());
-    record.stage_message = Some(message.to_string());
-    record.stage_updated_at = Some(now.max(record.updated_at).max(record.created_at));
-    record.next_action = next_action.map(str::to_string);
-    apply_stage_lifecycle(record, stage, now);
-}
-
-fn apply_stage_lifecycle(record: &mut WantedSubscriptionRecord, stage: &str, now: u64) {
-    let mut tags = match stage {
-        "skipped" => vec![SubscriptionAttentionTag::Skipped],
-        "no_candidates" | "no_match" => vec![SubscriptionAttentionTag::WaitingRelease],
-        "push_failed" | "link_failed" | "error" => vec![SubscriptionAttentionTag::Failed],
-        _ => Vec::new(),
-    };
-    record.lifecycle_state = match stage {
-        "linked" => SubscriptionLifecycleState::Completed,
-        "download_complete" | "link_planned" | "link_failed" => SubscriptionLifecycleState::Linking,
-        "downloading" | "pushed" => SubscriptionLifecycleState::Downloading,
-        "searching" | "matched" | "pushing" | "no_candidates" | "no_match" | "push_failed" => {
-            SubscriptionLifecycleState::Searching
-        }
-        _ => SubscriptionLifecycleState::Queued,
-    };
-    record.execution_state = SubscriptionExecutionState::Idle;
-    record.next_attempt_at.get_or_insert(now);
-    if !tags.is_empty() && record.failure.is_none() {
-        record.failure = failure_from_legacy_error(record, now);
-    }
-    preserve_retry_blocked_attention_tag(record, &mut tags);
-    merge_attention_tags(record, tags);
-}
-
-fn apply_status_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    match record.status {
-        WantedSubscriptionStatus::Unprocessed => set_stage(
-            record,
-            "queued",
-            "已进入订阅队列，等待下一轮自动处理",
-            Some("自动搜索候选种子并推送 qB"),
-            now,
-        ),
-        WantedSubscriptionStatus::Matching => set_stage(
-            record,
-            "searching",
-            "正在搜索 M-Team 候选种子",
-            Some("等待搜索结果并应用匹配规则"),
-            now,
-        ),
-        WantedSubscriptionStatus::Processing => set_stage(
-            record,
-            "pushing",
-            "正在获取下载链接并推送 qB",
-            Some("等待 qB 接收任务"),
-            now,
-        ),
-        WantedSubscriptionStatus::Pushed => set_stage(
-            record,
-            "pushed",
-            "已推送到 qB，等待下载进度同步",
-            Some("同步 qB 下载进度"),
-            now,
-        ),
-        WantedSubscriptionStatus::Downloading => set_stage(
-            record,
-            "downloading",
-            "等待 qB 下载完成",
-            Some("下载完成后检查并硬链接"),
-            now,
-        ),
-        WantedSubscriptionStatus::Completed => set_stage(
-            record,
-            "download_complete",
-            "qB 下载已完成，等待硬链接",
-            Some("执行完成检查并创建硬链接"),
-            now,
-        ),
-        WantedSubscriptionStatus::Linked => set_stage(record, "linked", "硬链接已完成", None, now),
-        WantedSubscriptionStatus::Failed => set_stage(
-            record,
-            "error",
-            &record
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "订阅处理失败，等待检查配置或手动重试".to_string()),
-            Some("检查错误后重新轮询或手动重试"),
-            now,
-        ),
-        WantedSubscriptionStatus::Skipped => set_stage(
-            record,
-            "skipped",
-            &subscription_skip_reason_message(record.skip_reason.as_deref()),
-            None,
-            now,
-        ),
-    }
-}
-
-fn subscription_skip_reason_message(reason: Option<&str>) -> String {
-    match reason.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("initial_bootstrap_existing_wish") => "历史想看，首次同步跳过".to_string(),
-        Some(value) => value.to_string(),
-        None => "已跳过该订阅".to_string(),
-    }
-}
-
-fn apply_candidate_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    if record.candidate_matches.is_empty() {
-        set_stage(
-            record,
-            "no_candidates",
-            "未搜索到候选种子",
-            Some("等待新种子或调整标题/配置后重试"),
-            now,
-        );
-    } else if record.candidate_matches.iter().any(|item| item.selected) {
-        set_stage(
-            record,
-            "matched",
-            "已匹配到候选种子，等待推送 qB",
-            Some("获取下载链接并推送 qB"),
-            now,
-        );
-    } else {
-        set_stage(
-            record,
-            "no_match",
-            "候选种子未命中当前匹配规则",
-            Some("调整匹配规则或等待新种子后重试"),
-            now,
-        );
-    }
-}
-
-fn apply_push_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    let Some(push) = record.last_push.as_ref() else {
-        apply_status_stage(record, now);
-        return;
-    };
-    match push.status.as_str() {
-        "failed" => {
-            let message = record
-                .last_error
-                .clone()
-                .or_else(|| push.error.clone())
-                .unwrap_or_else(|| "推送 qB 失败".to_string());
-            let stage = if message.contains("未搜索到候选种子") {
-                "no_candidates"
-            } else if message.contains("没有候选种子匹配当前规则") {
-                "no_match"
-            } else {
-                "push_failed"
-            };
-            let next_action = if stage == "no_candidates" {
-                "等待新种子或调整标题/配置后重试"
-            } else if stage == "no_match" {
-                "调整匹配规则或等待新种子后重试"
-            } else {
-                "检查 qB/M-Team 配置后重试"
-            };
-            set_stage(record, stage, &message, Some(next_action), now);
-        }
-        "downloading" => set_stage(
-            record,
-            "downloading",
-            "等待 qB 下载完成",
-            Some("下载完成后检查并硬链接"),
-            now,
-        ),
-        "downloaded" => set_stage(
-            record,
-            "download_complete",
-            "qB 下载已完成，等待硬链接",
-            Some("执行完成检查并创建硬链接"),
-            now,
-        ),
-        "linked" | "completed" => set_stage(record, "linked", "硬链接已完成", None, now),
-        _ => set_stage(
-            record,
-            "pushed",
-            "已推送到 qB，等待下载进度同步",
-            Some("同步 qB 下载进度"),
-            now,
-        ),
-    }
-}
-
-fn apply_completion_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    let Some(completion) = record.last_completion.as_ref() else {
-        apply_push_stage(record, now);
-        return;
-    };
-    match completion.status.as_str() {
-        "pending" => set_stage(
-            record,
-            "downloading",
-            "等待 qB 下载完成",
-            Some("下载完成后检查并硬链接"),
-            now,
-        ),
-        "failed" => {
-            let message = record
-                .last_error
-                .clone()
-                .or_else(|| completion.error.clone())
-                .unwrap_or_else(|| "硬链接失败".to_string());
-            set_stage(
-                record,
-                "link_failed",
-                &message,
-                Some("检查源目录/目标目录后重试"),
-                now,
-            );
-        }
-        "dry_run" => set_stage(
-            record,
-            "link_planned",
-            "硬链接预演完成，等待执行",
-            Some("执行完成检查并创建硬链接"),
-            now,
-        ),
-        "completed" => set_stage(record, "linked", "硬链接已完成", None, now),
-        _ => apply_push_stage(record, now),
-    }
 }
 
 fn normalized_tags(tags: &[String]) -> Vec<String> {
@@ -4087,10 +3777,10 @@ mod tests {
     fn migration_is_the_only_code_allowed_to_infer_from_legacy_status() {
         let source = include_str!("subscription.rs");
         let infer_refs = source
-            .matches(concat!("infer_lifecycle_from_", "legacy("))
+            .matches(concat!("legacy_lifecycle_from_", "record("))
             .count();
         assert_eq!(
-            infer_refs, 1,
+            infer_refs, 2,
             "only the migration function may call legacy inference"
         );
         assert!(!source.contains(concat!(
@@ -4297,8 +3987,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stage_sync_preserves_retry_blocked_tag_for_blocked_failure() {
+    fn legacy_migration_preserves_retry_blocked_tag_for_stage_failure() {
         let mut record = bare_record_with_status(WantedSubscriptionStatus::Completed, None);
+        record.processing_stage = Some("download_complete".to_string());
         record.attention_tags = vec![SubscriptionAttentionTag::RetryBlocked];
         record.failure = Some(SubscriptionFailure {
             scope: FailureScope::Parent,
@@ -4313,13 +4004,7 @@ mod tests {
             retry_blocked: true,
         });
 
-        set_stage(
-            &mut record,
-            "download_complete",
-            "下载完成，等待硬链接",
-            Some("执行硬链接"),
-            2_000,
-        );
+        migrate_legacy_record_to_lifecycle_once(&mut record, 2_000);
 
         assert!(record.failure.as_ref().unwrap().retry_blocked);
         assert!(record
@@ -4542,7 +4227,7 @@ mod tests {
         let mut record = movie_record_in_state(SubscriptionLifecycleState::Searching, 1_000);
         let push = test_push("pushed", None);
 
-        apply_movie_push_result(&mut record, push, None, &cfg, 2_000);
+        apply_movie_push_result(&mut record, push, false, None, &cfg, 2_000);
 
         assert_eq!(
             record.lifecycle_state,
@@ -4580,7 +4265,15 @@ mod tests {
         let push = test_push("downloaded", None);
         let completion = test_completion("completed");
 
-        apply_movie_completion_result(&mut record, push, completion, None, &cfg, 2_000);
+        apply_movie_completion_result(
+            &mut record,
+            push,
+            completion,
+            MovieCompletionOutcome::Completed,
+            None,
+            &cfg,
+            2_000,
+        );
 
         assert_eq!(
             record.lifecycle_state,
@@ -4606,6 +4299,14 @@ mod tests {
             assert!(
                 !body.contains("record.status"),
                 "{name} must not assign legacy status"
+            );
+            assert!(
+                !body.contains("push.status"),
+                "{name} must not use push artifact status as a transition input"
+            );
+            assert!(
+                !body.contains("completion.status"),
+                "{name} must not use completion artifact status as a transition input"
             );
         }
     }
@@ -4636,6 +4337,7 @@ mod tests {
         apply_movie_push_result(
             &mut record,
             push,
+            true,
             Some("qB 添加种子失败".to_string()),
             &cfg,
             2_000,
@@ -5053,13 +4755,11 @@ mod tests {
         assert_eq!(rec.status, WantedSubscriptionStatus::Skipped);
         assert_eq!(rec.release_year, Some(2024));
         assert_eq!(rec.category_text.as_deref(), Some("家庭"));
-        assert_eq!(rec.processing_stage.as_deref(), Some("skipped"));
-        assert_eq!(rec.stage_message.as_deref(), Some("历史想看，首次同步跳过"));
-        assert_ne!(
-            rec.stage_message.as_deref(),
-            Some("initial_bootstrap_existing_wish")
-        );
-        assert_eq!(rec.next_action.as_deref(), None);
+        assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Queued);
+        assert!(rec
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Skipped));
+        assert_eq!(rec.skip_reason.as_deref(), Some("initial_bootstrap_existing_wish"));
     }
 
     #[test]
@@ -5086,52 +4786,25 @@ mod tests {
     #[test]
     fn successful_progress_clears_historical_failed_attention() {
         let mut rec = record_from_item(&item("1", "旧片", "2023 / 日本", &["日影"]), 0, 3, 100);
-        rec.status = WantedSubscriptionStatus::Failed;
-        rec.last_error = Some("qB 中未找到已推送种子".to_string());
-        rec.last_push = Some(TorrentPushRecord {
-            subscription_id: "1".to_string(),
-            torrent_id: "torrent-1".to_string(),
-            torrent_title: "旧片.2023".to_string(),
-            qb_server: "nas".to_string(),
-            qb_server_id: "nas".to_string(),
-            qb_category: "movie".to_string(),
-            qb_save_dir_name: "movies".to_string(),
-            qb_identifier: String::new(),
-            torrent_download_url: None,
-            mteam_torrent_url: None,
-            pushed_at: Some(100),
-            status: "failed".to_string(),
-            error: Some("qB 中未找到已推送种子".to_string()),
-            qb_hash: None,
-            qb_name: None,
-            checked_at: Some(120),
-            completed_at: None,
-            download_progress: Some(0.4),
-            download_state: None,
-            total_size: None,
-            completed_file_count: None,
-            total_file_count: None,
-            files: Vec::new(),
-            episodes: Vec::new(),
-            source_path: None,
-            target_dir: None,
-            linked_files: Vec::new(),
-        });
-        apply_push_stage(&mut rec, 120);
+        let cfg = test_watcher_cfg();
+        let failed_push = test_push("failed", Some("qB 中未找到已推送种子"));
+        apply_movie_progress_result(
+            &mut rec,
+            failed_push,
+            false,
+            Some("qB 中未找到已推送种子".to_string()),
+            &cfg,
+            120,
+        );
         assert!(rec
             .attention_tags
             .contains(&SubscriptionAttentionTag::Failed));
 
-        rec.status = WantedSubscriptionStatus::Downloading;
-        rec.last_error = None;
-        let push = rec.last_push.as_mut().unwrap();
-        push.status = "downloading".to_string();
-        push.error = None;
+        let mut push = test_push("downloading", None);
         push.download_progress = Some(0.5);
-        apply_push_stage(&mut rec, 160);
+        apply_movie_progress_result(&mut rec, push, false, None, &cfg, 160);
 
         assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Downloading);
-        assert_eq!(rec.processing_stage.as_deref(), Some("downloading"));
         assert!(!rec
             .attention_tags
             .contains(&SubscriptionAttentionTag::Failed));
@@ -5170,7 +4843,7 @@ mod tests {
     }
 
     #[test]
-    fn new_unprocessed_items_record_queue_stage() {
+    fn new_unprocessed_items_start_queued_without_legacy_stage_repair() {
         let mut state = WantedSubscriptionState::new("acct", 100);
         state.bootstrap_completed = true;
         let cfg = SubscriptionWatcherConfig::default();
@@ -5184,16 +4857,9 @@ mod tests {
         );
 
         let rec = state.records.get("2").unwrap();
-        assert_eq!(rec.processing_stage.as_deref(), Some("queued"));
-        assert_eq!(
-            rec.stage_message.as_deref(),
-            Some("已进入订阅队列，等待下一轮自动处理")
-        );
-        assert_eq!(rec.stage_updated_at, Some(200));
-        assert_eq!(
-            rec.next_action.as_deref(),
-            Some("自动搜索候选种子并推送 qB")
-        );
+        assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Queued);
+        assert_eq!(rec.next_attempt_at, Some(200));
+        assert!(rec.attention_tags.is_empty());
     }
 
     #[test]
@@ -5257,7 +4923,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_and_push_updates_record_actionable_stages() {
+    fn candidate_update_does_not_drive_legacy_stage_or_lifecycle() {
         let mut rec = record_from_item(
             &item("1", "电影一", "2024 / 中国大陆 / 剧情", &["电影"]),
             0,
@@ -5283,48 +4949,12 @@ mod tests {
             excluded_reason: Some("missing source:bluray".to_string()),
             rule_evaluations: Vec::new(),
         }];
-        apply_candidate_stage(&mut rec, 120);
-        assert_eq!(rec.processing_stage.as_deref(), Some("no_match"));
-        assert_eq!(
+
+        assert_eq!(rec.lifecycle_state, SubscriptionLifecycleState::Queued);
+        assert_ne!(rec.processing_stage.as_deref(), Some("no_match"));
+        assert_ne!(
             rec.stage_message.as_deref(),
             Some("候选种子未命中当前匹配规则")
-        );
-
-        rec.last_error = Some("没有候选种子匹配当前规则".to_string());
-        rec.last_push = Some(TorrentPushRecord {
-            subscription_id: "1".to_string(),
-            torrent_id: String::new(),
-            torrent_title: String::new(),
-            qb_server: "nas".to_string(),
-            qb_server_id: "nas".to_string(),
-            qb_category: "movie".to_string(),
-            qb_save_dir_name: "movies".to_string(),
-            qb_identifier: String::new(),
-            torrent_download_url: None,
-            mteam_torrent_url: None,
-            pushed_at: None,
-            status: "failed".to_string(),
-            error: rec.last_error.clone(),
-            qb_hash: None,
-            qb_name: None,
-            checked_at: None,
-            completed_at: None,
-            download_progress: None,
-            download_state: None,
-            total_size: None,
-            completed_file_count: None,
-            total_file_count: None,
-            files: Vec::new(),
-            episodes: Vec::new(),
-            source_path: None,
-            target_dir: None,
-            linked_files: Vec::new(),
-        });
-        apply_push_stage(&mut rec, 130);
-        assert_eq!(rec.processing_stage.as_deref(), Some("no_match"));
-        assert_eq!(
-            rec.next_action.as_deref(),
-            Some("调整匹配规则或等待新种子后重试")
         );
     }
 
