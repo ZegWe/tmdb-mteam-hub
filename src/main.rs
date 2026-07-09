@@ -4231,6 +4231,18 @@ async fn process_wanted_push_step(
     subject_id: &str,
     force: bool,
 ) -> Result<(), ApiError> {
+    let original_updated_at = state
+        .wanted_store
+        .snapshot(account_key, unix_now_secs())
+        .await
+        .ok()
+        .and_then(|snapshot| {
+            snapshot
+                .records
+                .get(subject_id)
+                .map(|record| record.updated_at)
+        })
+        .unwrap_or(0);
     match wanted_subscription_push(
         State(state.clone()),
         PathParam(subject_id.to_string()),
@@ -4243,29 +4255,66 @@ async fn process_wanted_push_step(
     {
         Ok(_) => Ok(()),
         Err(err) => {
-            let cfg = state.config.read().await.clone();
-            let now = unix_now_secs();
-            if let Err(persist_err) = state
-                .wanted_store
-                .apply_parent_operation_failure_result(
-                    account_key,
-                    subject_id,
-                    "search",
-                    err.message(),
-                    &cfg.subscription_watcher,
-                    now,
-                )
-                .await
+            if should_persist_search_step_failure_fallback(
+                state,
+                account_key,
+                subject_id,
+                original_updated_at,
+            )
+            .await
             {
-                tracing::warn!(
-                    subject_id = %subject_id,
-                    error = %persist_err,
-                    "persist search step failure failed"
-                );
+                let cfg = state.config.read().await.clone();
+                let now = unix_now_secs();
+                if let Err(persist_err) = state
+                    .wanted_store
+                    .apply_parent_operation_failure_result(
+                        account_key,
+                        subject_id,
+                        "search",
+                        err.message(),
+                        &cfg.subscription_watcher,
+                        now,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        subject_id = %subject_id,
+                        error = %persist_err,
+                        "persist search step failure failed"
+                    );
+                }
             }
             Err(err)
         }
     }
+}
+
+async fn should_persist_search_step_failure_fallback(
+    state: &AppState,
+    account_key: &str,
+    subject_id: &str,
+    original_updated_at: u64,
+) -> bool {
+    let Ok(snapshot) = state
+        .wanted_store
+        .snapshot(account_key, unix_now_secs())
+        .await
+    else {
+        return true;
+    };
+    let Some(record) = snapshot.records.get(subject_id) else {
+        return false;
+    };
+    if record.updated_at < original_updated_at {
+        return true;
+    }
+    if record.failure.is_some() {
+        return false;
+    }
+    !record
+        .last_push
+        .as_ref()
+        .is_some_and(|push| push.status == "failed")
 }
 
 async fn process_wanted_progress_step(
@@ -4290,26 +4339,13 @@ async fn process_wanted_progress_step(
             }
             Ok(())
         }
-        Err(err) => {
-            persist_if_status_unchanged_any(
-                state,
-                account_key,
-                subject_id,
-                &[
-                    subscription::WantedSubscriptionStatus::Pushed,
-                    subscription::WantedSubscriptionStatus::Downloading,
-                ],
-                err.message(),
-            )
-            .await;
-            Err(err)
-        }
+        Err(err) => Err(err),
     }
 }
 
 async fn process_wanted_completion_step(
     state: &AppState,
-    account_key: &str,
+    _account_key: &str,
     subject_id: &str,
 ) -> Result<(), ApiError> {
     match wanted_subscription_completion(
@@ -4320,59 +4356,8 @@ async fn process_wanted_completion_step(
     .await
     {
         Ok(_) => Ok(()),
-        Err(err) => {
-            persist_if_status_unchanged(
-                state,
-                account_key,
-                subject_id,
-                subscription::WantedSubscriptionStatus::Completed,
-                err.message(),
-            )
-            .await;
-            Err(err)
-        }
+        Err(err) => Err(err),
     }
-}
-
-async fn persist_if_status_unchanged(
-    state: &AppState,
-    account_key: &str,
-    subject_id: &str,
-    status: subscription::WantedSubscriptionStatus,
-    error: &str,
-) {
-    persist_if_status_unchanged_any(state, account_key, subject_id, &[status], error).await;
-}
-
-async fn persist_if_status_unchanged_any(
-    state: &AppState,
-    account_key: &str,
-    subject_id: &str,
-    statuses: &[subscription::WantedSubscriptionStatus],
-    error: &str,
-) {
-    let Ok(snapshot) = state
-        .wanted_store
-        .snapshot(account_key, unix_now_secs())
-        .await
-    else {
-        return;
-    };
-    let Some(record) = snapshot.records.get(subject_id) else {
-        return;
-    };
-    if !statuses.iter().any(|status| *status == record.status) {
-        return;
-    }
-    let _ = persist_subscription_sync_error(
-        state,
-        account_key,
-        subject_id,
-        subscription::WantedSubscriptionStatus::Failed,
-        error.to_string(),
-        unix_now_secs(),
-    )
-    .await;
 }
 
 fn spawn_wanted_watch_loop(state: AppState) {
@@ -6772,6 +6757,27 @@ mod subscription_category_tests {
         }
     }
 
+    fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let signature = format!("fn {name}");
+        let start = source.find(&signature).expect("function exists");
+        let open_offset = source[start..].find('{').expect("function has body");
+        let open = start + open_offset;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("function body closes");
+    }
+
     async fn seed_wanted_record(
         state: &AppState,
         account_key: &str,
@@ -6800,6 +6806,19 @@ mod subscription_category_tests {
             .get(subject_id)
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn automatic_progress_and_completion_steps_do_not_use_legacy_status_fallbacks() {
+        let source = include_str!("main.rs");
+        for name in [
+            "process_wanted_progress_step",
+            "process_wanted_completion_step",
+        ] {
+            let body = function_body(source, name);
+            assert!(!body.contains("persist_if_status_unchanged"));
+            assert!(!body.contains("persist_subscription_sync_error"));
+        }
     }
 
     #[tokio::test]
@@ -6947,6 +6966,88 @@ mod subscription_category_tests {
         assert!(record
             .attention_tags
             .contains(&subscription::SubscriptionAttentionTag::Failed));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn push_step_does_not_duplicate_already_persisted_push_failure() {
+        let root = temp_test_dir("push_step_no_duplicate_failure");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-push-duplicate";
+        seed_wanted_record(&state, account_key, subject_id).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
+            cfg.mteam_api_key = String::new();
+            cfg.subscription_watcher.search_interval_secs = 5;
+            cfg.subscription_categories = vec![category("电影", "电影")];
+            cfg.qb_servers = vec![QbServerEntry {
+                id: "nas".to_string(),
+                name: "nas".to_string(),
+                base_url: "http://127.0.0.1:8080".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                insecure_tls: false,
+            }];
+        }
+
+        let category = category("电影", "电影");
+        let qb = QbServerEntry {
+            id: "nas".to_string(),
+            name: "nas".to_string(),
+            base_url: "http://127.0.0.1:8080".to_string(),
+            username: "admin".to_string(),
+            password: String::new(),
+            insecure_tls: false,
+        };
+        let selected = subscription::TorrentCandidateMatchRecord {
+            candidate: torrent("12345", "测试电影 2160p"),
+            selected: true,
+            matched_rule_name: Some("default".to_string()),
+            matched_priority: Some(1),
+            matched_keywords: Vec::new(),
+            excluded_reason: None,
+            rule_evaluations: Vec::new(),
+        };
+        state
+            .wanted_store
+            .update_candidate_matches(account_key, subject_id, vec![selected.clone()], 205)
+            .await
+            .unwrap()
+            .unwrap();
+        record_push_failure(
+            &state,
+            account_key,
+            subject_id,
+            &qb,
+            &category,
+            Some(&selected),
+            "qB 添加种子失败".to_string(),
+            &state.config.read().await.subscription_watcher,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{}", err.message()));
+        let before = state.wanted_store.snapshot(account_key, 210).await.unwrap();
+        let before_record = before.records.get(subject_id).unwrap();
+        assert_eq!(before_record.retry_count, 1);
+        assert_eq!(before_record.failure.as_ref().unwrap().operation, "search");
+        assert_eq!(
+            before_record.last_push.as_ref().unwrap().status.as_str(),
+            "failed"
+        );
+
+        let err = process_wanted_push_step(&state, account_key, subject_id, true)
+            .await
+            .unwrap_err();
+
+        assert!(err.message().contains("M-Team API Key"));
+        let snapshot = state.wanted_store.snapshot(account_key, 220).await.unwrap();
+        let record = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(record.retry_count, 1);
+        assert_eq!(record.failure.as_ref().unwrap().operation, "search");
+        assert_eq!(record.last_push.as_ref().unwrap().status.as_str(), "failed");
 
         let _ = std::fs::remove_dir_all(root);
     }
