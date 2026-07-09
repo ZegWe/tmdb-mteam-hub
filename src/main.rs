@@ -16,7 +16,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use config::{FileConfig, QbServerEntry, SubscriptionCategory, TorrentMatchRule};
+use config::{
+    FileConfig, QbServerEntry, SubscriptionCategory, SubscriptionWatcherConfig, TorrentMatchRule,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tmdb_cache::TmdbDiskCache;
@@ -1080,6 +1082,7 @@ async fn wanted_subscription_push(
             &category,
             None,
             error.clone(),
+            &cfg.subscription_watcher,
         )
         .await?;
         write_operation_log(
@@ -1135,6 +1138,7 @@ async fn wanted_subscription_push(
                     &category,
                     Some(&selected),
                     e.message().to_string(),
+                    &cfg.subscription_watcher,
                 )
                 .await?;
                 write_operation_log(
@@ -1191,12 +1195,12 @@ async fn wanted_subscription_push(
             apply_existing_qb_lookup_to_push(&mut push, &lookup.torrent);
             let record = state
                 .wanted_store
-                .update_push_record(
+                .apply_movie_push_result(
                     &account_key,
                     &record.subject_id,
                     push.clone(),
-                    subscription::WantedSubscriptionStatus::Pushed,
                     None,
+                    &cfg.subscription_watcher,
                     unix_now_secs(),
                 )
                 .await
@@ -1270,6 +1274,7 @@ async fn wanted_subscription_push(
             &category,
             Some(&selected),
             e.message().to_string(),
+            &cfg.subscription_watcher,
         )
         .await?;
         write_operation_log(
@@ -1301,12 +1306,12 @@ async fn wanted_subscription_push(
     }
     let record = state
         .wanted_store
-        .update_push_record(
+        .apply_movie_push_result(
             &account_key,
             &record.subject_id,
             push.clone(),
-            subscription::WantedSubscriptionStatus::Pushed,
             None,
+            &cfg.subscription_watcher,
             unix_now_secs(),
         )
         .await
@@ -1446,13 +1451,13 @@ async fn wanted_subscription_completion(
         };
         let record = state
             .wanted_store
-            .update_completion_record(
+            .apply_movie_completion_result(
                 &account_key,
                 &record.subject_id,
                 push.clone(),
                 completion.clone(),
-                subscription::WantedSubscriptionStatus::Downloading,
                 None,
+                &cfg.subscription_watcher,
                 now,
             )
             .await
@@ -1546,26 +1551,19 @@ async fn wanted_subscription_completion(
     push.target_dir = completion.target_dir.clone();
     push.linked_files = completion.linked_files.clone();
 
-    let status = if completed {
-        subscription::WantedSubscriptionStatus::Linked
-    } else if body.dry_run {
-        subscription::WantedSubscriptionStatus::Completed
-    } else {
-        subscription::WantedSubscriptionStatus::Failed
-    };
     let record = state
         .wanted_store
-        .update_completion_record(
+        .apply_movie_completion_result(
             &account_key,
             &record.subject_id,
             push.clone(),
             completion.clone(),
-            status,
             if body.dry_run {
                 None
             } else {
                 completion.error.clone()
             },
+            &cfg.subscription_watcher,
             now,
         )
         .await
@@ -1717,16 +1715,13 @@ async fn wanted_subscription_progress(
 
     let record = state
         .wanted_store
-        .update_push_record(
+        .apply_movie_progress_result(
             &account_key,
             &record.subject_id,
             push.clone(),
-            if qb_torrent.is_complete() {
-                subscription::WantedSubscriptionStatus::Completed
-            } else {
-                subscription::WantedSubscriptionStatus::Downloading
-            },
+            qb_torrent.is_complete(),
             None,
+            &cfg.subscription_watcher,
             now,
         )
         .await
@@ -1813,28 +1808,20 @@ async fn persist_progress_sync_error(
     push.checked_at = Some(now);
     push.status = "failed".to_string();
     push.error = Some(error.to_string());
-    let mut record = state
+    let record = state
         .wanted_store
-        .update_push_record(
+        .apply_movie_progress_result(
             account_key,
             subject_id,
             push.clone(),
-            subscription::WantedSubscriptionStatus::Downloading,
+            false,
             Some(error.to_string()),
+            &cfg.subscription_watcher,
             now,
         )
         .await
         .map_err(|e| ApiError::internal(format!("写入 qB 下载进度错误失败: {e}")))?
         .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
-    let next_attempt_at = Some(now + cfg.subscription_watcher.progress_interval_secs);
-    if let Some(updated) = state
-        .wanted_store
-        .update_next_attempt_at(account_key, subject_id, next_attempt_at, now)
-        .await
-        .map_err(|e| ApiError::internal(format!("更新下载进度重试时间失败: {e}")))?
-    {
-        record = updated;
-    }
     write_operation_log(
         state,
         operation_log_entry(
@@ -1866,6 +1853,7 @@ async fn persist_completion_sync_error(
     error: &str,
     now: u64,
 ) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    let cfg = state.config.read().await.clone();
     push.checked_at = Some(now);
     push.status = "failed".to_string();
     push.error = Some(error.to_string());
@@ -1883,13 +1871,13 @@ async fn persist_completion_sync_error(
     };
     let record = state
         .wanted_store
-        .update_completion_record(
+        .apply_movie_completion_result(
             account_key,
             subject_id,
             push.clone(),
             completion.clone(),
-            subscription::WantedSubscriptionStatus::Failed,
             Some(error.to_string()),
+            &cfg.subscription_watcher,
             now,
         )
         .await
@@ -1926,6 +1914,7 @@ async fn persist_hardlink_sync_error(
     error: &str,
     now: u64,
 ) -> Result<subscription::WantedSubscriptionRecord, ApiError> {
+    let cfg = state.config.read().await.clone();
     push.checked_at = Some(now);
     push.status = "failed".to_string();
     push.error = Some(error.to_string());
@@ -1943,13 +1932,13 @@ async fn persist_hardlink_sync_error(
     };
     let record = state
         .wanted_store
-        .update_completion_record(
+        .apply_movie_completion_result(
             account_key,
             subject_id,
             push.clone(),
             completion.clone(),
-            subscription::WantedSubscriptionStatus::Failed,
             Some(error.to_string()),
+            &cfg.subscription_watcher,
             now,
         )
         .await
@@ -2476,6 +2465,7 @@ async fn record_push_failure(
     category: &SubscriptionCategory,
     selected: Option<&subscription::TorrentCandidateMatchRecord>,
     error: String,
+    watcher_cfg: &SubscriptionWatcherConfig,
 ) -> Result<(), ApiError> {
     let fallback = subscription::TorrentCandidateRecord {
         torrent_id: String::new(),
@@ -2500,12 +2490,12 @@ async fn record_push_failure(
     );
     state
         .wanted_store
-        .update_push_record(
+        .apply_movie_push_result(
             account_key,
             subscription_id,
             push,
-            subscription::WantedSubscriptionStatus::Failed,
             Some(error),
+            watcher_cfg,
             unix_now_secs(),
         )
         .await
@@ -6964,8 +6954,12 @@ mod subscription_category_tests {
         .unwrap_or_else(|err| panic!("{}", err.message()));
         let progress_push = progress_record.last_push.as_ref().unwrap();
         assert_eq!(
-            progress_record.status,
-            subscription::WantedSubscriptionStatus::Downloading
+            progress_record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(
+            progress_record.failure.as_ref().unwrap().operation,
+            "progress"
         );
         assert_eq!(progress_record.next_attempt_at, Some(225));
         assert_eq!(progress_push.status, "failed");
@@ -6990,6 +6984,14 @@ mod subscription_category_tests {
         assert_eq!(completion.status, "failed");
         assert_eq!(completion.checked_at, 240);
         assert_eq!(completion.error.as_deref(), Some("qB 文件列表读取失败"));
+        assert_eq!(
+            completion_record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Linking
+        );
+        assert_eq!(
+            completion_record.failure.as_ref().unwrap().operation,
+            "link"
+        );
         assert_eq!(
             completion_record.last_error.as_deref(),
             Some("qB 文件列表读取失败")

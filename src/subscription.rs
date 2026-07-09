@@ -885,6 +885,7 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    #[allow(dead_code)]
     pub async fn update_next_attempt_at(
         &self,
         account_key: &str,
@@ -959,6 +960,7 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    #[allow(dead_code)]
     pub async fn update_push_record(
         &self,
         account_key: &str,
@@ -978,6 +980,71 @@ impl WantedSubscriptionStore {
         record.last_error = error.filter(|s| !s.trim().is_empty());
         record.updated_at = now;
         apply_push_stage(record, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
+    pub async fn apply_movie_push_result(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        push: TorrentPushRecord,
+        error: Option<String>,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        apply_movie_push_result(record, push, error, cfg, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
+    pub async fn apply_movie_progress_result(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        push: TorrentPushRecord,
+        completed: bool,
+        error: Option<String>,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        apply_movie_progress_result(record, push, completed, error, cfg, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
+    pub async fn apply_movie_completion_result(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        push: TorrentPushRecord,
+        completion: HardlinkCompletionRecord,
+        error: Option<String>,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        apply_movie_completion_result(record, push, completion, error, cfg, now);
         state.updated_at = now;
         let record = record.clone();
         self.save_state_unlocked(account_key, &state)?;
@@ -2652,6 +2719,151 @@ pub fn apply_movie_waiting_release(
     record.updated_at = now;
 }
 
+pub fn apply_movie_push_result(
+    record: &mut WantedSubscriptionRecord,
+    push: TorrentPushRecord,
+    error: Option<String>,
+    cfg: &SubscriptionWatcherConfig,
+    now: u64,
+) {
+    let message = semantic_error_message(error, push.error.as_deref());
+    let failed = push.status == "failed";
+    record.last_push = Some(push);
+    if failed && movie_push_failure_is_waiting_release(record, message.as_deref()) {
+        apply_movie_waiting_release(
+            record,
+            message.as_deref().unwrap_or("未搜索到候选种子"),
+            cfg,
+            now,
+        );
+    } else if failed {
+        apply_parent_operation_failure(
+            record,
+            "search",
+            message.as_deref().unwrap_or("推送 qB 失败"),
+            cfg,
+            now,
+        );
+    } else {
+        clear_movie_transient_failure(record);
+        record.lifecycle_state = SubscriptionLifecycleState::Downloading;
+        record.execution_state = SubscriptionExecutionState::Idle;
+        record.next_attempt_at = Some(now);
+        record.force_eligible_once = false;
+        record.updated_at = now;
+    }
+    record.status = derive_legacy_status(record);
+}
+
+pub fn apply_movie_progress_result(
+    record: &mut WantedSubscriptionRecord,
+    push: TorrentPushRecord,
+    completed: bool,
+    error: Option<String>,
+    cfg: &SubscriptionWatcherConfig,
+    now: u64,
+) {
+    let message = semantic_error_message(error, push.error.as_deref());
+    let failed = push.status == "failed" || message.is_some();
+    record.last_push = Some(push);
+    record.lifecycle_state = SubscriptionLifecycleState::Downloading;
+    if failed {
+        apply_parent_operation_failure(
+            record,
+            "progress",
+            message.as_deref().unwrap_or("同步 qB 下载进度失败"),
+            cfg,
+            now,
+        );
+    } else if completed {
+        clear_movie_transient_failure(record);
+        record.lifecycle_state = SubscriptionLifecycleState::Linking;
+        record.execution_state = SubscriptionExecutionState::Idle;
+        record.next_attempt_at = Some(now);
+        record.force_eligible_once = false;
+        record.updated_at = now;
+    } else {
+        clear_movie_transient_failure(record);
+        record.execution_state = SubscriptionExecutionState::Idle;
+        record.next_attempt_at = Some(now + cfg.progress_interval_secs);
+        record.force_eligible_once = false;
+        record.updated_at = now;
+    }
+    record.status = derive_legacy_status(record);
+}
+
+pub fn apply_movie_completion_result(
+    record: &mut WantedSubscriptionRecord,
+    push: TorrentPushRecord,
+    completion: HardlinkCompletionRecord,
+    error: Option<String>,
+    cfg: &SubscriptionWatcherConfig,
+    now: u64,
+) {
+    let message = semantic_error_message(error, completion.error.as_deref());
+    record.last_push = Some(push);
+    let status = completion.status.clone();
+    record.last_completion = Some(completion);
+    match status.as_str() {
+        "pending" => {
+            clear_movie_transient_failure(record);
+            record.lifecycle_state = SubscriptionLifecycleState::Downloading;
+            record.execution_state = SubscriptionExecutionState::Idle;
+            record.next_attempt_at = Some(now + cfg.progress_interval_secs);
+            record.force_eligible_once = false;
+            record.updated_at = now;
+        }
+        "failed" => {
+            record.lifecycle_state = SubscriptionLifecycleState::Linking;
+            apply_parent_operation_failure(
+                record,
+                "link",
+                message.as_deref().unwrap_or("硬链接失败"),
+                cfg,
+                now,
+            );
+        }
+        "completed" | "linked" => {
+            clear_movie_transient_failure(record);
+            record.lifecycle_state = SubscriptionLifecycleState::Completed;
+            record.execution_state = SubscriptionExecutionState::Idle;
+            record.next_attempt_at = None;
+            record.force_eligible_once = false;
+            record.updated_at = now;
+        }
+        _ => {
+            clear_movie_transient_failure(record);
+            record.lifecycle_state = SubscriptionLifecycleState::Linking;
+            record.execution_state = SubscriptionExecutionState::Idle;
+            record.next_attempt_at = Some(now);
+            record.force_eligible_once = false;
+            record.updated_at = now;
+        }
+    }
+    record.status = derive_legacy_status(record);
+}
+
+fn clear_movie_transient_failure(record: &mut WantedSubscriptionRecord) {
+    record.failure = None;
+    record.last_error = None;
+    merge_attention_tags(record, Vec::new());
+}
+
+fn semantic_error_message(error: Option<String>, artifact_error: Option<&str>) -> Option<String> {
+    error
+        .and_then(|value| non_empty_string(&value))
+        .or_else(|| artifact_error.and_then(non_empty_string))
+}
+
+fn movie_push_failure_is_waiting_release(
+    record: &WantedSubscriptionRecord,
+    message: Option<&str>,
+) -> bool {
+    legacy_text_is_waiting_release(record.processing_stage.as_deref(), message)
+        || record.candidate_matches.is_empty()
+        || !record.candidate_matches.iter().any(|item| item.selected)
+}
+
 pub fn apply_parent_operation_failure(
     record: &mut WantedSubscriptionRecord,
     operation: &str,
@@ -4096,6 +4308,60 @@ mod tests {
             record.next_attempt_at,
             Some(2_000 + cfg.search_interval_secs)
         );
+        assert!(record.failure.is_none());
+    }
+
+    #[test]
+    fn push_success_sets_downloading_and_next_due_now() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Searching, 1_000);
+        let push = test_push("pushed", None);
+
+        apply_movie_push_result(&mut record, push, None, &cfg, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(record.next_attempt_at, Some(2_000));
+        assert!(record.failure.is_none());
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::WaitingRelease));
+    }
+
+    #[test]
+    fn progress_unfinished_keeps_downloading_for_progress_interval() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Downloading, 1_000);
+        let push = test_push("downloading", None);
+
+        apply_movie_progress_result(&mut record, push, false, None, &cfg, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(
+            record.next_attempt_at,
+            Some(2_000 + cfg.progress_interval_secs)
+        );
+    }
+
+    #[test]
+    fn completion_success_sets_completed() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Linking, 1_000);
+        let push = test_push("downloaded", None);
+        let completion = test_completion("completed");
+
+        apply_movie_completion_result(&mut record, push, completion, None, &cfg, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Completed
+        );
+        assert_eq!(record.next_attempt_at, None);
         assert!(record.failure.is_none());
     }
 
