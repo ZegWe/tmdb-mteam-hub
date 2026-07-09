@@ -2601,11 +2601,17 @@ pub fn apply_parent_operation_failure(
             .then_some(now + retry_interval_for_operation(operation, cfg)),
         retry_blocked,
     });
-    merge_attention_tags(record, vec![SubscriptionAttentionTag::Failed]);
     if retry_blocked {
-        merge_attention_tags(record, vec![SubscriptionAttentionTag::RetryBlocked]);
+        merge_attention_tags(
+            record,
+            vec![
+                SubscriptionAttentionTag::Failed,
+                SubscriptionAttentionTag::RetryBlocked,
+            ],
+        );
         record.next_attempt_at = None;
     } else {
+        merge_attention_tags(record, vec![SubscriptionAttentionTag::Failed]);
         record.next_attempt_at = Some(now + retry_interval_for_operation(operation, cfg));
     }
     record.force_eligible_once = false;
@@ -3998,6 +4004,28 @@ mod tests {
             record.next_attempt_at,
             Some(2_000 + cfg.link_retry_interval_secs)
         );
+    }
+
+    #[test]
+    fn retry_blocked_parent_failure_retains_failed_and_retry_blocked_tags() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Linking, 1_000);
+        record.retry_count = 2;
+        record.max_retries = 3;
+
+        apply_parent_operation_failure(&mut record, "link", "hardlink failed", &cfg, 2_000);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert!(
+            record
+                .attention_tags
+                .contains(&SubscriptionAttentionTag::Failed)
+        );
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
+        assert!(record.failure.as_ref().unwrap().retry_blocked);
+        assert_eq!(record.next_attempt_at, None);
     }
 
     #[test]
