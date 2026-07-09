@@ -926,6 +926,39 @@ impl WantedSubscriptionStore {
         Ok(Some(record))
     }
 
+    pub async fn transition_movie_meta_operation(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        cfg: &SubscriptionWatcherConfig,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        match record.lifecycle_state {
+            SubscriptionLifecycleState::Queued => apply_movie_operation_outcome(
+                record,
+                MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Meta),
+                cfg,
+                now,
+            ),
+            SubscriptionLifecycleState::Meta => apply_movie_operation_outcome(
+                record,
+                MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Searching),
+                cfg,
+                now,
+            ),
+            _ => return Ok(Some(record.clone())),
+        }
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
     pub async fn update_push_record(
         &self,
         account_key: &str,
@@ -4739,6 +4772,60 @@ mod tests {
         assert_eq!(rec.title, "新剧");
         assert_eq!(rec.status, WantedSubscriptionStatus::Unprocessed);
         assert_eq!(rec.release_year, Some(2025));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn movie_meta_transition_does_not_regress_current_record_from_stale_snapshot() {
+        let root = temp_state_dir("movie_meta_stale_snapshot");
+        let cfg = SubscriptionWatcherConfig {
+            bootstrap_existing_as_skipped: false,
+            ..SubscriptionWatcherConfig::default()
+        };
+        let store = WantedSubscriptionStore::new(root.clone());
+        store
+            .apply_wish_items(
+                "acct",
+                &[item("2", "测试电影", "2026 / 中国大陆 / 电影", &["电影"])],
+                &cfg,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .transition_movie_operation(
+                "acct",
+                "2",
+                MovieOperationOutcome::Advanced(SubscriptionLifecycleState::Downloading),
+                &cfg,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let updated = store
+            .transition_movie_meta_operation("acct", "2", &cfg, 300)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            updated.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(updated.updated_at, 200);
+        assert_eq!(updated.next_attempt_at, Some(200));
+
+        let snapshot = store.snapshot("acct", 310).await.unwrap();
+        let persisted = snapshot.records.get("2").unwrap();
+        assert_eq!(
+            persisted.lifecycle_state,
+            SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(persisted.updated_at, 200);
+        assert_eq!(persisted.next_attempt_at, Some(200));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -4099,25 +4099,11 @@ async fn process_movie_meta_operation(
     record: &subscription::WantedSubscriptionRecord,
 ) -> Result<(), ApiError> {
     let cfg = state.config.read().await.clone();
-    let outcome = match record.lifecycle_state {
-        subscription::SubscriptionLifecycleState::Queued => {
-            subscription::MovieOperationOutcome::Advanced(
-                subscription::SubscriptionLifecycleState::Meta,
-            )
-        }
-        subscription::SubscriptionLifecycleState::Meta => {
-            subscription::MovieOperationOutcome::Advanced(
-                subscription::SubscriptionLifecycleState::Searching,
-            )
-        }
-        lifecycle_state => subscription::MovieOperationOutcome::Advanced(lifecycle_state),
-    };
     state
         .wanted_store
-        .transition_movie_operation(
+        .transition_movie_meta_operation(
             account_key,
             &record.subject_id,
-            outcome,
             &cfg.subscription_watcher,
             unix_now_secs(),
         )
@@ -6891,7 +6877,7 @@ mod subscription_category_tests {
         );
         assert_eq!(record.last_error, None);
         assert!(record.failure.is_none());
-        assert!(record.next_attempt_at.is_some());
+        assert_eq!(record.next_attempt_at, Some(record.updated_at));
 
         let _ = std::fs::remove_dir_all(root);
     }
