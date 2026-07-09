@@ -305,6 +305,21 @@ pub enum SubscriptionDueOperation {
     TvLane(TvLaneKind),
 }
 
+impl SubscriptionDueOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubscriptionDueOperation::MovieMeta => "movie_meta",
+            SubscriptionDueOperation::MovieSearch => "movie_search",
+            SubscriptionDueOperation::MovieProgress => "movie_progress",
+            SubscriptionDueOperation::MovieLink => "movie_link",
+            SubscriptionDueOperation::TvMeta => "tv_meta",
+            SubscriptionDueOperation::TvLane(TvLaneKind::Link) => "tv_link",
+            SubscriptionDueOperation::TvLane(TvLaneKind::Progress) => "tv_progress",
+            SubscriptionDueOperation::TvLane(TvLaneKind::Search) => "tv_search",
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TvLaneKind {
@@ -1031,6 +1046,42 @@ impl WantedSubscriptionStore {
             return Ok(None);
         };
         apply_movie_completion_result(record, push, completion, error, cfg, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
+    pub async fn retry_current_node(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        retry_current_node(record, now);
+        state.updated_at = now;
+        let record = record.clone();
+        self.save_state_unlocked(account_key, &state)?;
+        Ok(Some(record))
+    }
+
+    pub async fn rerun_subscription_task(
+        &self,
+        account_key: &str,
+        subject_id: &str,
+        now: u64,
+    ) -> std::io::Result<Option<WantedSubscriptionRecord>> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.load_state_unlocked(account_key, now).await?;
+        let Some(record) = state.records.get_mut(subject_id.trim()) else {
+            return Ok(None);
+        };
+        rerun_subscription_task(record, now);
         state.updated_at = now;
         let record = record.clone();
         self.save_state_unlocked(account_key, &state)?;
@@ -2686,6 +2737,39 @@ pub fn apply_movie_operation_outcome(
     record.failure = None;
     record.last_error = None;
     merge_attention_tags(record, Vec::new());
+    record.updated_at = now;
+}
+
+pub fn retry_current_node(record: &mut WantedSubscriptionRecord, now: u64) {
+    record.failure = None;
+    record.attention_tags.retain(|tag| {
+        !matches!(
+            tag,
+            SubscriptionAttentionTag::Failed | SubscriptionAttentionTag::RetryBlocked
+        )
+    });
+    record.next_attempt_at = Some(now);
+    record.force_eligible_once = true;
+    record.updated_at = now;
+}
+
+pub fn rerun_subscription_task(record: &mut WantedSubscriptionRecord, now: u64) {
+    record.lifecycle_state = if record.media_kind == SubscriptionMediaKind::Tv {
+        SubscriptionLifecycleState::Meta
+    } else {
+        SubscriptionLifecycleState::Searching
+    };
+    record.execution_state = SubscriptionExecutionState::Idle;
+    record.failure = None;
+    record
+        .attention_tags
+        .retain(|tag| *tag == SubscriptionAttentionTag::Skipped);
+    record.last_push = None;
+    record.last_completion = None;
+    record.candidate_matches.clear();
+    record.next_attempt_at = Some(now);
+    record.force_eligible_once = true;
+    record.last_error = None;
     record.updated_at = now;
 }
 
@@ -4630,6 +4714,49 @@ mod tests {
             select_due_operation(&record, 1_000),
             Some(SubscriptionDueOperation::MovieSearch)
         );
+    }
+
+    #[test]
+    fn retry_current_clears_parent_failure_and_makes_current_node_due() {
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Linking, 1_000);
+        record.attention_tags = vec![
+            SubscriptionAttentionTag::Failed,
+            SubscriptionAttentionTag::RetryBlocked,
+        ];
+        record.failure = Some(test_failure("link", true));
+        record.next_attempt_at = None;
+
+        retry_current_node(&mut record, 2_000);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert!(record.failure.is_none());
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
+        assert_eq!(record.next_attempt_at, Some(2_000));
+        assert!(record.force_eligible_once);
+    }
+
+    #[test]
+    fn rerun_movie_resets_to_searching_but_keeps_douban_metadata() {
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Completed, 1_000);
+        record.title = "测试电影".to_string();
+        record.last_push = Some(test_push("downloaded", None));
+        record.last_completion = Some(test_completion("completed"));
+
+        rerun_subscription_task(&mut record, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert_eq!(record.title, "测试电影");
+        assert!(record.last_push.is_none());
+        assert!(record.last_completion.is_none());
+        assert_eq!(record.next_attempt_at, Some(2_000));
     }
 
     #[test]

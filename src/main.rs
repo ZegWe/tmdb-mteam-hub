@@ -776,12 +776,22 @@ async fn wanted_subscription_retry_current(
     PathParam(id): PathParam<String>,
 ) -> Result<Json<Value>, ApiError> {
     let (_cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
-    let action = retry_action_for_wanted_record(&record)?;
-    process_wanted_record_pipeline(&state, &account_key, record.clone()).await?;
-    let (_cfg, _account_key, record) = load_wanted_record_context(&state, &id).await?;
+    if record.lifecycle_state == subscription::SubscriptionLifecycleState::Completed {
+        return Err(ApiError::bad_request("当前订阅状态不需要重试"));
+    }
+    let now = unix_now_secs();
+    let record = state
+        .wanted_store
+        .retry_current_node(&account_key, &record.subject_id, now)
+        .await
+        .map_err(|e| ApiError::internal(format!("更新订阅重试状态失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    let action = subscription::select_due_operation(&record, now)
+        .map(|operation| operation.as_str())
+        .ok_or_else(|| ApiError::bad_request("当前订阅状态不需要重试"))?;
     Ok(Json(json!({
         "ok": true,
-        "action": action.as_str(),
+        "action": action,
         "record": record,
     })))
 }
@@ -791,13 +801,22 @@ async fn wanted_subscription_rerun(
     PathParam(id): PathParam<String>,
 ) -> Result<Json<Value>, ApiError> {
     let (_cfg, account_key, record) = load_wanted_record_context(&state, &id).await?;
-    process_wanted_push_step(&state, &account_key, &record.subject_id, true).await?;
-    let (_cfg, _account_key, record) = load_wanted_record_context(&state, &id).await?;
-    process_wanted_record_pipeline(&state, &account_key, record).await?;
-    let (_cfg, _account_key, record) = load_wanted_record_context(&state, &id).await?;
+    if record.subject_id.trim().is_empty() {
+        return Err(ApiError::bad_request("订阅记录缺少 subject_id"));
+    }
+    let now = unix_now_secs();
+    let record = state
+        .wanted_store
+        .rerun_subscription_task(&account_key, &record.subject_id, now)
+        .await
+        .map_err(|e| ApiError::internal(format!("更新订阅重跑状态失败: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+    let action = subscription::select_due_operation(&record, now)
+        .map(|operation| operation.as_str())
+        .ok_or_else(|| ApiError::bad_request("当前订阅状态不需要重跑"))?;
     Ok(Json(json!({
         "ok": true,
-        "action": SubscriptionRetryAction::Push.as_str(),
+        "action": action,
         "record": record,
     })))
 }
@@ -4088,143 +4107,6 @@ async fn process_tv_lane_operation(
     )))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubscriptionRetryAction {
-    Push,
-    Progress,
-    Completion,
-}
-
-impl SubscriptionRetryAction {
-    fn as_str(self) -> &'static str {
-        match self {
-            SubscriptionRetryAction::Push => "push",
-            SubscriptionRetryAction::Progress => "progress",
-            SubscriptionRetryAction::Completion => "completion",
-        }
-    }
-}
-
-fn retry_action_for_wanted_record(
-    record: &subscription::WantedSubscriptionRecord,
-) -> Result<SubscriptionRetryAction, ApiError> {
-    match record.processing_stage.as_deref().unwrap_or("") {
-        "queued" | "searching" | "no_candidates" | "no_match" | "matched" | "pushing"
-        | "push_failed" | "skipped" => return Ok(SubscriptionRetryAction::Push),
-        "pushed" | "downloading" => return Ok(SubscriptionRetryAction::Progress),
-        "download_complete" | "link_planned" | "link_failed" => {
-            return Ok(SubscriptionRetryAction::Completion);
-        }
-        "linked" => {
-            return Err(ApiError::bad_request("当前订阅状态不需要重试"));
-        }
-        _ => {}
-    }
-
-    match record.status {
-        subscription::WantedSubscriptionStatus::Unprocessed
-        | subscription::WantedSubscriptionStatus::Matching
-        | subscription::WantedSubscriptionStatus::Processing => Ok(SubscriptionRetryAction::Push),
-        subscription::WantedSubscriptionStatus::Pushed
-        | subscription::WantedSubscriptionStatus::Downloading => {
-            Ok(SubscriptionRetryAction::Progress)
-        }
-        subscription::WantedSubscriptionStatus::Completed => {
-            Ok(SubscriptionRetryAction::Completion)
-        }
-        subscription::WantedSubscriptionStatus::Failed => {
-            if record.last_completion.is_some() {
-                Ok(SubscriptionRetryAction::Completion)
-            } else if record.last_push.is_some() {
-                Ok(SubscriptionRetryAction::Push)
-            } else {
-                Ok(SubscriptionRetryAction::Push)
-            }
-        }
-        subscription::WantedSubscriptionStatus::Skipped => Ok(SubscriptionRetryAction::Push),
-        subscription::WantedSubscriptionStatus::Linked => {
-            Err(ApiError::bad_request("当前订阅状态不需要重试"))
-        }
-    }
-}
-
-fn pipeline_action_for_wanted_record(
-    record: &subscription::WantedSubscriptionRecord,
-) -> Option<SubscriptionRetryAction> {
-    match record.status {
-        subscription::WantedSubscriptionStatus::Unprocessed
-        | subscription::WantedSubscriptionStatus::Matching
-        | subscription::WantedSubscriptionStatus::Processing
-        | subscription::WantedSubscriptionStatus::Skipped => Some(SubscriptionRetryAction::Push),
-        subscription::WantedSubscriptionStatus::Pushed
-        | subscription::WantedSubscriptionStatus::Downloading => {
-            Some(SubscriptionRetryAction::Progress)
-        }
-        subscription::WantedSubscriptionStatus::Completed => {
-            Some(SubscriptionRetryAction::Completion)
-        }
-        subscription::WantedSubscriptionStatus::Linked
-        | subscription::WantedSubscriptionStatus::Failed => None,
-    }
-}
-
-fn pipeline_should_stop_after_action(action: SubscriptionRetryAction) -> bool {
-    matches!(
-        action,
-        SubscriptionRetryAction::Push
-            | SubscriptionRetryAction::Progress
-            | SubscriptionRetryAction::Completion
-    )
-}
-
-async fn process_wanted_record_pipeline(
-    state: &AppState,
-    account_key: &str,
-    mut record: subscription::WantedSubscriptionRecord,
-) -> Result<(), ApiError> {
-    for _ in 0..4 {
-        let Some(action) = pipeline_action_for_wanted_record(&record) else {
-            return Ok(());
-        };
-        process_subscription_retry_action_once(state, account_key, &record.subject_id, action)
-            .await?;
-
-        let snapshot = state
-            .wanted_store
-            .snapshot(account_key, unix_now_secs())
-            .await
-            .map_err(|e| ApiError::internal(format!("读取想看订阅处理队列失败: {e}")))?;
-        let Some(next_record) = snapshot.records.get(&record.subject_id).cloned() else {
-            return Err(ApiError::bad_request("订阅记录不存在"));
-        };
-        record = next_record;
-
-        if pipeline_should_stop_after_action(action) {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-async fn process_subscription_retry_action_once(
-    state: &AppState,
-    account_key: &str,
-    subject_id: &str,
-    action: SubscriptionRetryAction,
-) -> Result<(), ApiError> {
-    match action {
-        SubscriptionRetryAction::Push => {
-            process_wanted_push_step(state, account_key, subject_id, true).await
-        }
-        SubscriptionRetryAction::Progress => {
-            process_wanted_progress_step(state, account_key, subject_id).await
-        }
-        SubscriptionRetryAction::Completion => {
-            process_wanted_completion_step(state, account_key, subject_id).await
-        }
-    }
-}
-
 async fn process_wanted_push_step(
     state: &AppState,
     account_key: &str,
@@ -6454,53 +6336,6 @@ mod subscription_category_tests {
     }
 
     #[test]
-    fn retry_action_follows_current_processing_stage() {
-        let mut record = wanted_record("subject-1", "测试电影", Some(2024));
-
-        record.status = subscription::WantedSubscriptionStatus::Skipped;
-        record.processing_stage = Some("skipped".to_string());
-        assert_eq!(
-            retry_action_for_wanted_record(&record).ok(),
-            Some(SubscriptionRetryAction::Push)
-        );
-        assert_eq!(
-            pipeline_action_for_wanted_record(&record),
-            Some(SubscriptionRetryAction::Push)
-        );
-
-        record.status = subscription::WantedSubscriptionStatus::Pushed;
-        record.processing_stage = Some("no_match".to_string());
-        assert_eq!(
-            retry_action_for_wanted_record(&record).ok(),
-            Some(SubscriptionRetryAction::Push)
-        );
-
-        record.processing_stage = Some("pushed".to_string());
-        assert_eq!(
-            pipeline_action_for_wanted_record(&record),
-            Some(SubscriptionRetryAction::Progress)
-        );
-
-        record.status = subscription::WantedSubscriptionStatus::Pushed;
-        record.processing_stage = Some("downloading".to_string());
-        assert_eq!(
-            retry_action_for_wanted_record(&record).ok(),
-            Some(SubscriptionRetryAction::Progress)
-        );
-
-        record.status = subscription::WantedSubscriptionStatus::Completed;
-        record.processing_stage = Some("link_failed".to_string());
-        assert_eq!(
-            retry_action_for_wanted_record(&record).ok(),
-            Some(SubscriptionRetryAction::Completion)
-        );
-        assert_eq!(
-            pipeline_action_for_wanted_record(&record),
-            Some(SubscriptionRetryAction::Completion)
-        );
-    }
-
-    #[test]
     fn watcher_uses_select_due_operation_for_movie_states() {
         let mut record = wanted_record("subject-1", "测试电影", Some(2024));
         record.lifecycle_state = subscription::SubscriptionLifecycleState::Downloading;
@@ -6528,16 +6363,20 @@ mod subscription_category_tests {
     }
 
     #[test]
-    fn pipeline_stops_after_push_before_progress_lookup() {
-        assert!(pipeline_should_stop_after_action(
-            SubscriptionRetryAction::Push
-        ));
-        assert!(pipeline_should_stop_after_action(
-            SubscriptionRetryAction::Progress
-        ));
-        assert!(pipeline_should_stop_after_action(
-            SubscriptionRetryAction::Completion
-        ));
+    fn due_operation_action_labels_are_stable() {
+        assert_eq!(
+            subscription::SubscriptionDueOperation::MovieSearch.as_str(),
+            "movie_search"
+        );
+        assert_eq!(
+            subscription::SubscriptionDueOperation::MovieLink.as_str(),
+            "movie_link"
+        );
+        assert_eq!(
+            subscription::SubscriptionDueOperation::TvLane(subscription::TvLaneKind::Progress)
+                .as_str(),
+            "tv_progress"
+        );
     }
 
     #[test]
