@@ -1370,7 +1370,7 @@ async fn wanted_subscription_completion(
         Some(push) => push,
         None => {
             let error = "订阅记录缺少 qB pushed record".to_string();
-            state
+            let record = state
                 .wanted_store
                 .apply_parent_operation_failure_result(
                     &account_key,
@@ -1383,6 +1383,25 @@ async fn wanted_subscription_completion(
                 .await
                 .map_err(|e| ApiError::internal(format!("写入硬链接前置错误失败: {e}")))?
                 .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    account_key.clone(),
+                    "hardlink",
+                    "link_result",
+                    "subscription",
+                    Some(record.subject_id.clone()),
+                    Some(record.title.clone()),
+                    "failed",
+                    "硬链接失败：订阅记录缺少 qB pushed record",
+                    Some(error.clone()),
+                    json!({
+                        "operation": "link",
+                        "reason": "missing_last_push",
+                    }),
+                ),
+            )
+            .await;
             return Err(ApiError::bad_request(error));
         }
     };
@@ -1646,7 +1665,7 @@ async fn wanted_subscription_progress(
         Some(push) => push,
         None => {
             let error = "订阅记录缺少 qB pushed record".to_string();
-            state
+            let record = state
                 .wanted_store
                 .apply_parent_operation_failure_result(
                     &account_key,
@@ -1659,6 +1678,25 @@ async fn wanted_subscription_progress(
                 .await
                 .map_err(|e| ApiError::internal(format!("写入下载进度前置错误失败: {e}")))?
                 .ok_or_else(|| ApiError::bad_request("订阅记录不存在"))?;
+            write_operation_log(
+                &state,
+                operation_log_entry(
+                    account_key.clone(),
+                    "download_progress",
+                    "sync_progress",
+                    "subscription",
+                    Some(record.subject_id.clone()),
+                    Some(record.title.clone()),
+                    "failed",
+                    "同步 qB 下载进度失败：订阅记录缺少 qB pushed record",
+                    Some(error.clone()),
+                    json!({
+                        "operation": "progress",
+                        "reason": "missing_last_push",
+                    }),
+                ),
+            )
+            .await;
             return Err(ApiError::bad_request(error));
         }
     };
@@ -6909,6 +6947,148 @@ mod subscription_category_tests {
         let persisted = snapshot.records.get(subject_id).unwrap();
         assert_eq!(persisted.retry_count, 0);
         assert_eq!(persisted.last_error.as_deref(), Some("qB 服务器不存在"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_push_progress_logs_failed_operation_and_keeps_semantic_state() {
+        let root = temp_test_dir("missing_push_progress_log");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-progress-missing-push";
+        seed_wanted_record(&state, account_key, subject_id).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
+            cfg.subscription_categories = vec![category("电影", "电影")];
+        }
+        state
+            .wanted_store
+            .transition_movie_operation(
+                account_key,
+                subject_id,
+                subscription::MovieOperationOutcome::Advanced(
+                    subscription::SubscriptionLifecycleState::Downloading,
+                ),
+                &state.config.read().await.subscription_watcher,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = wanted_subscription_progress(
+            State(state.clone()),
+            PathParam(subject_id.to_string()),
+            Json(WantedProgressBody::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.message().contains("缺少 qB pushed record"));
+        let snapshot = state.wanted_store.snapshot(account_key, 210).await.unwrap();
+        let record = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(
+            record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Downloading
+        );
+        assert_eq!(record.failure.as_ref().unwrap().operation, "progress");
+        assert_ne!(
+            record.status,
+            subscription::WantedSubscriptionStatus::Failed
+        );
+
+        let logs = state
+            .wanted_store
+            .query_operation_logs(subscription::OperationLogQuery {
+                status: Some("failed".to_string()),
+                ..subscription::OperationLogQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(logs.items.len(), 1);
+        let log = &logs.items[0];
+        assert_eq!(log.category, "download_progress");
+        assert_eq!(log.action, "sync_progress");
+        assert_eq!(log.target_id.as_deref(), Some(subject_id));
+        assert!(log.summary.contains("缺少 qB pushed record"));
+        assert!(log
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("缺少 qB pushed record"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_push_completion_logs_failed_operation_and_keeps_semantic_state() {
+        let root = temp_test_dir("missing_push_completion_log");
+        let state = test_app_state(&root);
+        let account_key = "acct";
+        let subject_id = "subject-completion-missing-push";
+        seed_wanted_record(&state, account_key, subject_id).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.douban_cookie = "dbcl2=acct:token; ck=test".to_string();
+            cfg.subscription_categories = vec![category("电影", "电影")];
+        }
+        state
+            .wanted_store
+            .transition_movie_operation(
+                account_key,
+                subject_id,
+                subscription::MovieOperationOutcome::Advanced(
+                    subscription::SubscriptionLifecycleState::Linking,
+                ),
+                &state.config.read().await.subscription_watcher,
+                200,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = wanted_subscription_completion(
+            State(state.clone()),
+            PathParam(subject_id.to_string()),
+            Json(WantedCompletionBody::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.message().contains("缺少 qB pushed record"));
+        let snapshot = state.wanted_store.snapshot(account_key, 210).await.unwrap();
+        let record = snapshot.records.get(subject_id).unwrap();
+        assert_eq!(
+            record.lifecycle_state,
+            subscription::SubscriptionLifecycleState::Linking
+        );
+        assert_eq!(record.failure.as_ref().unwrap().operation, "link");
+        assert_ne!(
+            record.status,
+            subscription::WantedSubscriptionStatus::Failed
+        );
+
+        let logs = state
+            .wanted_store
+            .query_operation_logs(subscription::OperationLogQuery {
+                status: Some("failed".to_string()),
+                ..subscription::OperationLogQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(logs.items.len(), 1);
+        let log = &logs.items[0];
+        assert_eq!(log.category, "hardlink");
+        assert_eq!(log.action, "link_result");
+        assert_eq!(log.target_id.as_deref(), Some(subject_id));
+        assert!(log.summary.contains("缺少 qB pushed record"));
+        assert!(log
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("缺少 qB pushed record"));
 
         let _ = std::fs::remove_dir_all(root);
     }
