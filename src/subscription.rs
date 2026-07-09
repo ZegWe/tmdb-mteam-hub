@@ -3898,6 +3898,68 @@ mod tests {
     }
 
     #[test]
+    fn movie_due_operation_follows_lifecycle_only() {
+        let cases = [
+            (
+                SubscriptionLifecycleState::Queued,
+                Some(SubscriptionDueOperation::MovieMeta),
+            ),
+            (
+                SubscriptionLifecycleState::Meta,
+                Some(SubscriptionDueOperation::MovieMeta),
+            ),
+            (
+                SubscriptionLifecycleState::Searching,
+                Some(SubscriptionDueOperation::MovieSearch),
+            ),
+            (
+                SubscriptionLifecycleState::Downloading,
+                Some(SubscriptionDueOperation::MovieProgress),
+            ),
+            (
+                SubscriptionLifecycleState::Linking,
+                Some(SubscriptionDueOperation::MovieLink),
+            ),
+            (SubscriptionLifecycleState::Completed, None),
+        ];
+
+        for (state, expected) in cases {
+            let mut record = movie_record_in_state(state, 1_000);
+            record.next_attempt_at = Some(1_000);
+            assert_eq!(select_due_operation(&record, 1_000), expected);
+        }
+    }
+
+    #[test]
+    fn skipped_tag_blocks_automatic_due_unless_forced() {
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Searching, 1_000);
+        record.attention_tags = vec![SubscriptionAttentionTag::Skipped];
+        record.next_attempt_at = Some(1_000);
+        assert_eq!(select_due_operation(&record, 1_000), None);
+
+        record.force_eligible_once = true;
+        assert_eq!(
+            select_due_operation(&record, 1_000),
+            Some(SubscriptionDueOperation::MovieSearch)
+        );
+    }
+
+    #[test]
+    fn tv_lane_failure_does_not_block_other_due_lanes() {
+        let mut record = tv_record_all_lanes_due(1_000);
+        let tv = record.tv.as_mut().unwrap();
+        tv.lanes.link.next_attempt_at = Some(2_000);
+        tv.lanes.progress.failure = Some(test_failure("progress", false));
+        tv.lanes.progress.next_attempt_at = Some(1_000);
+        tv.lanes.search.next_attempt_at = Some(1_000);
+
+        assert_eq!(
+            select_due_operation(&record, 1_000),
+            Some(SubscriptionDueOperation::TvLane(TvLaneKind::Progress))
+        );
+    }
+
+    #[test]
     fn wanted_records_cache_douban_subject_detail() {
         let mut state = WantedSubscriptionState::new("acct", 100);
         let cfg = SubscriptionWatcherConfig {
