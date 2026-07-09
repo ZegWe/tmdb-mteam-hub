@@ -2034,6 +2034,7 @@ fn merge_attention_tags(
             tag,
             SubscriptionAttentionTag::Failed
                 | SubscriptionAttentionTag::WaitingRelease
+                | SubscriptionAttentionTag::RetryBlocked
                 | SubscriptionAttentionTag::NeedsReconciliation
         )
     });
@@ -4026,6 +4027,73 @@ mod tests {
             .contains(&SubscriptionAttentionTag::RetryBlocked));
         assert!(record.failure.as_ref().unwrap().retry_blocked);
         assert_eq!(record.next_attempt_at, None);
+    }
+
+    #[test]
+    fn non_blocked_parent_failure_clears_stale_retry_blocked_tag() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Linking, 1_000);
+        record.retry_count = 1;
+        record.max_retries = 3;
+        record.attention_tags = vec![SubscriptionAttentionTag::RetryBlocked];
+
+        apply_parent_operation_failure(&mut record, "link", "hardlink failed", &cfg, 2_000);
+
+        assert_eq!(record.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert!(
+            record
+                .attention_tags
+                .contains(&SubscriptionAttentionTag::Failed)
+        );
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
+        assert!(!record.failure.as_ref().unwrap().retry_blocked);
+        assert_eq!(
+            record.next_attempt_at,
+            Some(2_000 + cfg.link_retry_interval_secs)
+        );
+    }
+
+    #[test]
+    fn movie_waiting_release_clears_stale_failed_and_retry_blocked_tags() {
+        let cfg = test_watcher_cfg();
+        let mut record = movie_record_in_state(SubscriptionLifecycleState::Searching, 1_000);
+        record.attention_tags = vec![
+            SubscriptionAttentionTag::Failed,
+            SubscriptionAttentionTag::RetryBlocked,
+        ];
+        record.failure = Some(SubscriptionFailure {
+            scope: FailureScope::Parent,
+            owner_id: record.subject_id.clone(),
+            operation: "link".to_string(),
+            error_type: "system".to_string(),
+            message: "hardlink failed".to_string(),
+            retry_count: 3,
+            max_retries: 3,
+            failed_at: 1_500,
+            next_retry_at: None,
+            retry_blocked: true,
+        });
+
+        apply_movie_waiting_release(&mut record, "未搜索到候选种子", &cfg, 2_000);
+
+        assert_eq!(
+            record.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert!(
+            record
+                .attention_tags
+                .contains(&SubscriptionAttentionTag::WaitingRelease)
+        );
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Failed));
+        assert!(!record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
+        assert!(record.failure.is_none());
     }
 
     #[test]
