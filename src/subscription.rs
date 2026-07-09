@@ -1903,6 +1903,15 @@ pub fn migrate_legacy_status_fields(record: &mut WantedSubscriptionRecord, now: 
     if record.failure.is_none() {
         record.failure = failure_from_legacy_error(record, now);
     }
+    preserve_retry_blocked_attention_tag(record, &mut tags);
+    merge_attention_tags(record, tags);
+    record.status = derive_legacy_status(record);
+}
+
+fn preserve_retry_blocked_attention_tag(
+    record: &WantedSubscriptionRecord,
+    tags: &mut Vec<SubscriptionAttentionTag>,
+) {
     if record
         .failure
         .as_ref()
@@ -1911,8 +1920,6 @@ pub fn migrate_legacy_status_fields(record: &mut WantedSubscriptionRecord, now: 
     {
         tags.push(SubscriptionAttentionTag::RetryBlocked);
     }
-    merge_attention_tags(record, tags);
-    record.status = derive_legacy_status(record);
 }
 
 fn infer_lifecycle_from_legacy(
@@ -3024,14 +3031,15 @@ fn set_stage(
 }
 
 fn sync_lifecycle_from_legacy_stage(record: &mut WantedSubscriptionRecord, now: u64) {
-    let (state, tags) = infer_lifecycle_from_legacy(record);
+    let (state, mut tags) = infer_lifecycle_from_legacy(record);
     record.lifecycle_state = state;
     record.execution_state = SubscriptionExecutionState::Idle;
-    merge_attention_tags(record, tags);
     record.next_attempt_at.get_or_insert(now);
     if record.failure.is_none() {
         record.failure = failure_from_legacy_error(record, now);
     }
+    preserve_retry_blocked_attention_tag(record, &mut tags);
+    merge_attention_tags(record, tags);
 }
 
 fn apply_status_stage(record: &mut WantedSubscriptionRecord, now: u64) {
@@ -3791,6 +3799,37 @@ mod tests {
         });
 
         migrate_legacy_status_fields(&mut record, 2_000);
+
+        assert!(record.failure.as_ref().unwrap().retry_blocked);
+        assert!(record
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::RetryBlocked));
+    }
+
+    #[test]
+    fn legacy_stage_sync_preserves_retry_blocked_tag_for_blocked_failure() {
+        let mut record = bare_record_with_status(WantedSubscriptionStatus::Completed, None);
+        record.attention_tags = vec![SubscriptionAttentionTag::RetryBlocked];
+        record.failure = Some(SubscriptionFailure {
+            scope: FailureScope::Parent,
+            owner_id: record.subject_id.clone(),
+            operation: "link".to_string(),
+            error_type: "system".to_string(),
+            message: "hardlink failed".to_string(),
+            retry_count: 3,
+            max_retries: 3,
+            failed_at: 1_500,
+            next_retry_at: None,
+            retry_blocked: true,
+        });
+
+        set_stage(
+            &mut record,
+            "download_complete",
+            "下载完成，等待硬链接",
+            Some("执行硬链接"),
+            2_000,
+        );
 
         assert!(record.failure.as_ref().unwrap().retry_blocked);
         assert!(record
