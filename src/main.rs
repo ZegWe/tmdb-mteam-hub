@@ -4781,11 +4781,17 @@ async fn search_tmdb(
 #[derive(Deserialize)]
 struct DoubanSearchQuery {
     q: String,
-    #[serde(default = "default_douban_limit")]
-    limit: usize,
+    #[serde(default = "default_page_usize")]
+    page: usize,
+    #[serde(default = "default_douban_page_size")]
+    page_size: usize,
 }
 
-fn default_douban_limit() -> usize {
+fn default_page_usize() -> usize {
+    1
+}
+
+fn default_douban_page_size() -> usize {
     20
 }
 
@@ -4817,9 +4823,10 @@ async fn douban_search(
 ) -> Result<Json<Value>, ApiError> {
     let cfg = state.config.read().await.clone();
     let cookie = cfg.douban_cookie.clone();
-    let limit = q.limit.clamp(1, 50);
-    let items = match douban::search(&cookie, &q.q, limit).await {
-        Ok(items) => items,
+    let page = q.page.max(1);
+    let page_size = q.page_size.clamp(1, 20);
+    let result = match douban::search(&cookie, &q.q, page, page_size).await {
+        Ok(result) => result,
         Err(err) => {
             write_operation_log(
                 &state,
@@ -4833,7 +4840,7 @@ async fn douban_search(
                     "failed",
                     "豆瓣搜索失败",
                     Some(err.to_string()),
-                    json!({ "source": "douban", "limit": limit }),
+                    json!({ "source": "douban", "page": page, "page_size": page_size }),
                 ),
             )
             .await;
@@ -4841,7 +4848,7 @@ async fn douban_search(
         }
     };
     let items_value =
-        serde_json::to_value(&items).map_err(|e| ApiError::internal(e.to_string()))?;
+        serde_json::to_value(&result.items).map_err(|e| ApiError::internal(e.to_string()))?;
     write_operation_log(
         &state,
         operation_log_entry(
@@ -4852,9 +4859,15 @@ async fn douban_search(
             None,
             Some(q.q.trim().to_string()),
             "success",
-            format!("豆瓣搜索完成：{} 条结果", items.len()),
+            format!("豆瓣搜索完成：{} 条结果", result.items.len()),
             None,
-            json!({ "source": "douban", "result_count": items.len(), "limit": limit }),
+            json!({
+                "source": "douban",
+                "result_count": result.items.len(),
+                "page": result.page,
+                "page_size": result.page_size,
+                "has_more": result.has_more,
+            }),
         ),
     )
     .await;
@@ -4862,6 +4875,9 @@ async fn douban_search(
         "items": items_value.clone(),
         "movies": items_value,
         "tv": [],
+        "page": result.page,
+        "page_size": result.page_size,
+        "has_more": result.has_more,
     })))
 }
 

@@ -26,6 +26,8 @@ const LOGIN_REFERER: &str = "https://accounts.douban.com/passport/login";
 const IMAGE_REFERER: &str = "https://movie.douban.com/";
 const LIBRARY_PAGE_SIZE: usize = 15;
 const LIBRARY_MAX_PAGES: usize = 80;
+const SEARCH_PAGE_SIZE: usize = 20;
+const SEARCH_MAX_PAGES: usize = 5;
 
 static QR_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -105,6 +107,14 @@ pub struct DoubanSearchResult {
     pub poster_url: String,
     pub rating: DoubanRating,
     pub vote_average: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DoubanSearchPage {
+    pub items: Vec<DoubanSearchResult>,
+    pub page: usize,
+    pub page_size: usize,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -422,32 +432,52 @@ pub async fn qr_poll(session: &QrSession) -> Result<QrPollResult, DoubanError> {
 pub async fn search(
     cookie_header: &str,
     query: &str,
-    limit: usize,
-) -> Result<Vec<DoubanSearchResult>, DoubanError> {
+    page: usize,
+    page_size: usize,
+) -> Result<DoubanSearchPage, DoubanError> {
     if query.trim().is_empty() {
         return Err(DoubanError::bad_request("搜索关键字不能为空"));
     }
-    if limit < 1 {
-        return Err(DoubanError::bad_request("limit 必须大于 0"));
+    if page < 1 {
+        return Err(DoubanError::bad_request("page 必须大于 0"));
     }
+    if page_size < 1 {
+        return Err(DoubanError::bad_request("page_size 必须大于 0"));
+    }
+    let page_size = page_size.clamp(1, SEARCH_PAGE_SIZE);
+    let page = page.min(SEARCH_MAX_PAGES);
+    let start = (page - 1) * page_size;
+    let fetch_count = page_size + 1;
+    let query = query.trim();
     let cookie = normalize_cookie_header(cookie_header);
-    let count = limit.to_string();
-    let url = rexxar_search_url(query.trim(), &count)?;
     let referer = format!(
         "https://m.douban.com/search/?query={}",
-        percent_encode_query_component(query.trim())
+        percent_encode_query_component(query)
     );
+    let url = rexxar_search_url(query, start, fetch_count)?;
     let data = fetch_rexxar_json(url, &cookie, &referer).await?;
-    search_results_from_rexxar_json(&data, limit)
+    let raw_count = rexxar_search_item_count(&data)?;
+    let mut items = search_results_from_rexxar_json(&data, fetch_count)?;
+    let has_more = page < SEARCH_MAX_PAGES && (items.len() > page_size || raw_count >= fetch_count);
+    items.truncate(page_size);
+
+    Ok(DoubanSearchPage {
+        items,
+        page,
+        page_size,
+        has_more,
+    })
 }
 
-fn rexxar_search_url(query: &str, count: &str) -> Result<Url, DoubanError> {
+fn rexxar_search_url(query: &str, start: usize, count: usize) -> Result<Url, DoubanError> {
     let mut url = Url::parse(REXXAR_SEARCH_URL)
         .map_err(|e| DoubanError::upstream(format!("构造豆瓣 rexxar 搜索 URL 失败: {e}")))?;
+    let start = start.to_string();
+    let count = count.to_string();
     url.query_pairs_mut()
         .append_pair("q", query)
-        .append_pair("start", "0")
-        .append_pair("count", count);
+        .append_pair("start", &start)
+        .append_pair("count", &count);
     Ok(url)
 }
 
@@ -545,13 +575,7 @@ fn search_results_from_rexxar_json(
     data: &Value,
     limit: usize,
 ) -> Result<Vec<DoubanSearchResult>, DoubanError> {
-    let items = data
-        .get("subjects")
-        .and_then(|v| v.get("items"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            DoubanError::upstream("豆瓣 rexxar 搜索结果结构异常: 缺少 subjects.items")
-        })?;
+    let items = rexxar_search_items(data)?;
     let mut out = Vec::new();
     for item in items {
         if value_to_string(item.get("layout")).as_deref() != Some("subject") {
@@ -599,6 +623,17 @@ fn search_results_from_rexxar_json(
         }
     }
     Ok(out)
+}
+
+fn rexxar_search_item_count(data: &Value) -> Result<usize, DoubanError> {
+    Ok(rexxar_search_items(data)?.len())
+}
+
+fn rexxar_search_items(data: &Value) -> Result<&Vec<Value>, DoubanError> {
+    data.get("subjects")
+        .and_then(|v| v.get("items"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| DoubanError::upstream("豆瓣 rexxar 搜索结果结构异常: 缺少 subjects.items"))
 }
 
 fn subject_detail_from_rexxar_json(
@@ -2039,12 +2074,15 @@ mod tests {
 
     #[test]
     fn rexxar_search_url_omits_type_filter() {
-        let url = rexxar_search_url("测试剧集", "20").expect("search url");
+        let url = rexxar_search_url("测试剧集", 40, 20).expect("search url");
         let pairs = url.query_pairs().collect::<Vec<_>>();
 
         assert!(pairs
             .iter()
             .any(|(key, value)| key == "q" && value == "测试剧集"));
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| key == "start" && value == "40"));
         assert!(pairs
             .iter()
             .any(|(key, value)| key == "count" && value == "20"));

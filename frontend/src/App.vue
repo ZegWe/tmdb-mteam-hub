@@ -163,6 +163,25 @@
                 </div>
               </article>
             </div>
+            <div v-if="showDoubanSearchPager" class="search-pager" aria-label="豆瓣搜索分页">
+              <button
+                type="button"
+                class="btn btn-secondary"
+                :disabled="searchLoading || doubanSearchPage.page <= 1"
+                @click="loadDoubanSearchPage(doubanSearchPage.page - 1)"
+              >
+                上一页
+              </button>
+              <span class="search-pager-status">{{ doubanSearchPagerText }}</span>
+              <button
+                type="button"
+                class="btn btn-secondary"
+                :disabled="searchLoading || !doubanSearchPage.has_more"
+                @click="loadDoubanSearchPage(doubanSearchPage.page + 1)"
+              >
+                下一页
+              </button>
+            </div>
           </section>
           <section v-show="searchSource !== 'douban'" id="tv-section">
             <h2 id="tv-title">剧集</h2>
@@ -1127,6 +1146,18 @@ const searchLoading = ref(false);
 const searchLoadingText = ref("正在搜索 TMDB…");
 const movies = ref([]);
 const tv = ref([]);
+const doubanSearchPage = reactive({ page: 1, page_size: 20, has_more: false });
+const showDoubanSearchPager = computed(
+  () => searchSource.value === "douban" && (movies.value.length > 0 || doubanSearchPage.page > 1),
+);
+const doubanSearchPagerText = computed(() => {
+  const start = movies.value.length
+    ? (Number(doubanSearchPage.page || 1) - 1) * Number(doubanSearchPage.page_size || 20) + 1
+    : 0;
+  const end = start ? start + movies.value.length - 1 : 0;
+  const range = start && end ? `${start}-${end}` : "0";
+  return `第 ${doubanSearchPage.page} 页 · ${range}`;
+});
 
 const detailOpen = ref(false);
 const detailLoading = ref(false);
@@ -1348,6 +1379,8 @@ function cardSubtitle(item) {
 
 function setSearchSource(source) {
   searchSource.value = source === "douban" ? "douban" : "tmdb";
+  doubanSearchPage.page = 1;
+  doubanSearchPage.has_more = false;
 }
 
 function setSearchLoading(on, text = "正在搜索…") {
@@ -1355,29 +1388,45 @@ function setSearchLoading(on, text = "正在搜索…") {
   searchLoadingText.value = text;
 }
 
-async function runSearch() {
+async function runSearch(pageNumber = 1) {
   clearError();
   const q = query.value.trim();
   if (!q) {
     showError("请输入搜索词");
     return;
   }
+  const targetPage = typeof pageNumber === "number" && Number.isFinite(pageNumber) ? pageNumber : 1;
   setSearchLoading(true, searchSource.value === "douban" ? "正在搜索豆瓣…" : "正在搜索 TMDB…");
   try {
     if (searchSource.value === "douban") {
-      const data = await api(`/api/douban/search?${new URLSearchParams({ q, limit: "20" })}`);
+      const params = new URLSearchParams({
+        q,
+        page: String(Math.max(1, targetPage)),
+        page_size: String(doubanSearchPage.page_size || 20),
+      });
+      const data = await api(`/api/douban/search?${params}`);
       movies.value = data.items || data.movies || [];
       tv.value = [];
+      doubanSearchPage.page = Number(data?.page || targetPage) || targetPage;
+      doubanSearchPage.page_size = Number(data?.page_size || doubanSearchPage.page_size || 20);
+      doubanSearchPage.has_more = !!data?.has_more;
     } else {
       const data = await api(`/api/search?${new URLSearchParams({ q })}`);
       movies.value = data.movies || [];
       tv.value = data.tv || [];
+      doubanSearchPage.page = 1;
+      doubanSearchPage.has_more = false;
     }
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
   } finally {
     setSearchLoading(false);
   }
+}
+
+function loadDoubanSearchPage(pageNumber) {
+  if (searchLoading.value || searchSource.value !== "douban") return;
+  runSearch(Math.max(1, Number(pageNumber) || 1));
 }
 
 function openCardDetail(item, fallbackType) {
