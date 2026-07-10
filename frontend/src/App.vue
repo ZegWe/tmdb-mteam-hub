@@ -218,18 +218,10 @@
               type="button"
               class="btn btn-secondary"
               :disabled="subscriptionsLoading"
+              title="从豆瓣获取最新想看订阅"
               @click="loadSubscriptions({ poll: true })"
             >
-              轮询想看
-            </button>
-            <button
-              type="button"
-              class="btn btn-secondary"
-              :disabled="subscriptionsLoading"
-              title="只重新读取本地已保存的订阅状态"
-              @click="loadSubscriptions()"
-            >
-              刷新本地列表
+              刷新
             </button>
           </div>
         </header>
@@ -2391,7 +2383,7 @@ async function loadSubscriptions({ poll = false, silent = false } = {}) {
     return subscriptionState.value;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const detail = `${poll ? "轮询想看失败" : "刷新本地订阅列表失败"}：${msg}`;
+    const detail = `${poll ? "刷新豆瓣订阅失败" : "刷新本地订阅列表失败"}：${msg}`;
     showError(detail);
     if (!silent) showToast(detail, "err");
     return null;
@@ -2595,8 +2587,8 @@ function operationLogRelatedLabel(key) {
 }
 
 function subscriptionPollToast(outcome) {
-  if (!outcome || typeof outcome !== "object") return "订阅轮询完成";
-  return `订阅轮询完成：新增待处理 ${Number(outcome.created_unprocessed || 0)} · 跳过旧想看 ${Number(outcome.created_skipped || 0)} · 更新已有 ${Number(outcome.updated_existing || 0)}`;
+  if (!outcome || typeof outcome !== "object") return "订阅刷新完成";
+  return `订阅刷新完成：新增待处理 ${Number(outcome.created_unprocessed || 0)} · 跳过旧想看 ${Number(outcome.created_skipped || 0)} · 更新已有 ${Number(outcome.updated_existing || 0)}`;
 }
 
 function normalizedStatus(value) {

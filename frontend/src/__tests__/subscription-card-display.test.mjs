@@ -90,6 +90,26 @@ function sourceBetween(start, end, description, source = appSource) {
   return source.slice(startIndex, endIndex);
 }
 
+{
+  const subscriptionHeader = sourceBetween(
+    '<header class="top subscriptions-top">',
+    "</header>",
+    "subscription page header",
+  );
+  assert.equal(
+    subscriptionHeader.match(/<button/g)?.length,
+    1,
+    "subscription page should expose one refresh button",
+  );
+  assert.match(
+    subscriptionHeader,
+    /@click="loadSubscriptions\(\{ poll: true \}\)"/,
+    "subscription refresh should fetch the latest Douban wanted list",
+  );
+  assert.match(subscriptionHeader, />\s*刷新\s*<\/button>/);
+  assert.doesNotMatch(subscriptionHeader, /轮询想看|刷新本地列表/);
+}
+
 for (const [name, body] of [
   [
     "subscriptionDisplayStatus",
