@@ -6,10 +6,23 @@ export default defineConfig({
   root: "frontend",
   plugins: [vue()],
   fmt: {
-    ignorePatterns: ["static/**", "target/**", "Cargo.toml"],
+    ignorePatterns: [
+      "static/**",
+      "target/**",
+      "tests/fixtures/**",
+      "docs/superpowers/**",
+      "Cargo.toml",
+    ],
   },
   lint: {
     ignorePatterns: ["static/**", "target/**"],
+  },
+  test: {
+    environment: "happy-dom",
+    include: ["src/**/*.vitest.{js,mjs}"],
+    setupFiles: ["./src/__tests__/vitest.setup.js"],
+    clearMocks: true,
+    restoreMocks: true,
   },
   resolve: {
     alias: {

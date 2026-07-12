@@ -1,0 +1,219 @@
+.settings-page-form {
+  max-width: 1120px;
+  padding: 1rem 1.5rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-section {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.settings-section h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+#settings-form label {
+  margin-top: 0.85rem;
+  display: block;
+  font-size: 0.88rem;
+}
+
+#settings-form input,
+#settings-form textarea,
+#settings-form select {
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+#settings-form select {
+  height: 2.5rem;
+  padding: 0.45rem 2.25rem 0.45rem 0.65rem;
+  line-height: 1.35;
+}
+
+#settings-form select.select-sm {
+  height: 2.25rem;
+  padding-top: 0.36rem;
+  padding-bottom: 0.36rem;
+}
+
+#settings-form textarea {
+  min-height: 5.2rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+#settings-form input[type="checkbox"],
+#settings-form input[type="radio"] {
+  width: auto;
+  max-width: none;
+  margin-top: 0;
+  padding: 0;
+  vertical-align: middle;
+}
+
+.douban-login-tools {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.douban-login-tools .hint {
+  min-height: 1.25rem;
+}
+
+.douban-qr-box {
+  width: fit-content;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.douban-qr-box img {
+  width: 180px;
+  height: 180px;
+  display: block;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.subscription-categories-fieldset,
+.torrent-rules-fieldset,
+.qb-servers-fieldset {
+  margin-top: 0;
+}
+
+.subscription-categories-fieldset legend,
+.torrent-rules-fieldset legend,
+.qb-servers-fieldset legend {
+  padding: 0 0.25rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.subscription-categories-list,
+.torrent-rules-list,
+.qb-servers-list {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.subscription-category-row,
+.torrent-rule-row,
+.qb-server-row {
+  padding: 0.55rem 0.6rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.subscription-category-row label,
+.torrent-rule-row label,
+.qb-server-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.subscription-category-row input[type="text"],
+.subscription-category-row select,
+.torrent-rule-row input[type="text"],
+.torrent-rule-row input[type="number"],
+.torrent-rule-row select,
+.qb-server-row input[type="text"],
+.qb-server-row input[type="password"] {
+  width: 100%;
+  padding: 0.42rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 0.85rem;
+}
+
+.subscription-category-actions,
+.torrent-rule-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.subscription-category-actions .hint,
+.torrent-rule-actions .hint {
+  flex: 1 1 280px;
+}
+
+.qb-row-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.qb-row-tail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.qb-test-msg {
+  max-width: min(420px, 100%);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.qb-test-msg-ok {
+  color: var(--success);
+}
+
+.qb-test-msg-error {
+  color: var(--danger);
+}
+
+#settings-form .qb-server-row .qb-insecure {
+  margin-top: 0;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+@media (max-width: 640px) {
+  .subscription-category-row,
+  .torrent-rule-row,
+  .qb-server-row {
+    grid-template-columns: 1fr;
+  }
+}

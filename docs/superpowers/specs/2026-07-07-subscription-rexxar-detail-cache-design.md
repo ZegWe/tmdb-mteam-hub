@@ -1,4 +1,16 @@
+---
+status: implemented
+owner: tmdb-mteam-hub
+last_verified: 2026-07-11
+implementation_plan: docs/superpowers/plans/2026-07-07-subscription-rexxar-detail-cache.md
+related_adr: docs/adr/0002-subscription-state-convergence.md
+---
+
 # Subscription Rexxar Detail Cache Design
+
+> Historical behavior design: the displayed metadata behavior remains current, while the old watcher,
+> aggregate record and store references below have been superseded by the latest-only architecture in
+> the [architecture convergence PRD](./2026-07-11-project-architecture-convergence-prd.md).
 
 ## Goal
 

@@ -1,0 +1,135 @@
+.search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 900px;
+  padding: 1rem 1.5rem;
+}
+
+.source-switch {
+  display: inline-flex;
+}
+
+.source-pill {
+  min-width: 4.2rem;
+}
+
+.search-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1rem 0 0.25rem;
+}
+
+.search-pager-status {
+  min-width: 7.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.search-layout {
+  position: relative;
+  display: grid;
+  gap: 2rem;
+  min-height: 120px;
+  padding: 0 1.5rem 3rem;
+}
+
+.layout-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--background) 90%, transparent);
+  color: var(--text);
+  font-size: 0.9rem;
+  backdrop-filter: blur(4px);
+}
+
+.search-layout h2 {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-auto-rows: 1fr;
+  gap: 0.75rem;
+}
+
+.media-card {
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  color: inherit;
+  text-align: initial;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    transform 0.12s;
+}
+
+.media-card:hover {
+  border-color: var(--accent-dim);
+  transform: translateY(-2px);
+}
+
+.media-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  flex: 0 0 auto;
+  object-fit: cover;
+  background: #000;
+}
+
+.media-card .meta {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0.6rem 0.8rem;
+  text-align: center;
+}
+
+.media-card .title,
+.media-card .subtle {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-card .title {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.media-card .subtle {
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.media-card-search {
+  width: 100%;
+  align-items: stretch;
+}
+
+.media-card-search .meta {
+  align-items: center;
+  justify-content: center;
+}

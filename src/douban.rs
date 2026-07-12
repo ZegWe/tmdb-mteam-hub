@@ -3,15 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reqwest::cookie::{CookieStore, Jar};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const DESKTOP_CHROME_UA: &str = concat!(
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ",
-    "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-);
+use crate::clients::douban::{DoubanClient, DoubanSession};
+use crate::clients::http::{ClientError, DOUBAN_POLICY};
+
 const AUTH_COOKIE_NAME: &str = "dbcl2";
 const SUBJECT_URL_PREFIX: &str = "https://movie.douban.com/subject/";
 const SUBJECT_INTEREST_URL_PREFIX: &str = "https://movie.douban.com/j/subject/";
@@ -22,8 +20,6 @@ const MOVIE_BASE_URL: &str = "https://movie.douban.com/";
 const MINE_URL: &str = "https://movie.douban.com/mine";
 const QR_CODE_URL: &str = "https://accounts.douban.com/j/mobile/login/qrlogin_code";
 const QR_STATUS_URL: &str = "https://accounts.douban.com/j/mobile/login/qrlogin_status";
-const LOGIN_REFERER: &str = "https://accounts.douban.com/passport/login";
-const IMAGE_REFERER: &str = "https://movie.douban.com/";
 const LIBRARY_PAGE_SIZE: usize = 15;
 const LIBRARY_MAX_PAGES: usize = 80;
 const SEARCH_PAGE_SIZE: usize = 20;
@@ -33,23 +29,37 @@ static QR_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct DoubanError {
-    pub status: StatusCode,
+    pub kind: DoubanErrorKind,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoubanErrorKind {
+    BadRequest,
+    Upstream,
 }
 
 impl DoubanError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
+            kind: DoubanErrorKind::BadRequest,
             message: message.into(),
         }
     }
 
     fn upstream(message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_GATEWAY,
+            kind: DoubanErrorKind::Upstream,
             message: message.into(),
         }
+    }
+
+    fn client(error: ClientError) -> Self {
+        Self::upstream(error.to_string())
+    }
+
+    pub fn is_bad_request(&self) -> bool {
+        self.kind == DoubanErrorKind::BadRequest
     }
 }
 
@@ -61,11 +71,10 @@ impl std::fmt::Display for DoubanError {
 
 impl std::error::Error for DoubanError {}
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QrSession {
     pub code: String,
-    pub client: Client,
-    pub jar: Arc<Jar>,
+    pub(crate) transport: DoubanSession,
     pub image: Arc<Vec<u8>>,
 }
 
@@ -176,6 +185,30 @@ pub struct DoubanLibraryList {
     pub status: &'static str,
     pub label: &'static str,
     pub items: Vec<DoubanLibraryItem>,
+    #[serde(flatten)]
+    pub snapshot: SnapshotMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotCompleteness {
+    Complete,
+    Partial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotMetadata {
+    pub completeness: SnapshotCompleteness,
+    pub fetched_pages: usize,
+    pub truncated_by_limit: bool,
+    pub end_observed: bool,
+}
+
+impl SnapshotMetadata {
+    #[cfg(test)]
+    pub fn is_complete(self) -> bool {
+        self.completeness == SnapshotCompleteness::Complete && self.end_observed
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +229,72 @@ pub struct DoubanLibraryItem {
     pub comment: String,
     pub tags: Vec<String>,
     pub user_rating: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryPageDecision {
+    Continue,
+    Complete,
+    Partial,
+}
+
+struct LibraryPagination {
+    limit: usize,
+    items: Vec<DoubanLibraryItem>,
+    seen: HashSet<String>,
+    fetched_pages: usize,
+    truncated_by_limit: bool,
+    end_observed: bool,
+}
+
+impl LibraryPagination {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            items: Vec::new(),
+            seen: HashSet::new(),
+            fetched_pages: 0,
+            truncated_by_limit: false,
+            end_observed: false,
+        }
+    }
+
+    fn push_page(&mut self, page_items: Vec<DoubanLibraryItem>) -> LibraryPageDecision {
+        self.fetched_pages += 1;
+        if page_items.is_empty() {
+            self.end_observed = true;
+            return LibraryPageDecision::Complete;
+        }
+
+        let before = self.items.len();
+        for item in page_items {
+            if self.seen.insert(item.subject_id.clone()) {
+                self.items.push(item);
+                if self.items.len() >= self.limit {
+                    self.truncated_by_limit = true;
+                    return LibraryPageDecision::Partial;
+                }
+            }
+        }
+
+        if self.items.len() == before || self.fetched_pages >= LIBRARY_MAX_PAGES {
+            return LibraryPageDecision::Partial;
+        }
+        LibraryPageDecision::Continue
+    }
+
+    fn snapshot(&self, decision: LibraryPageDecision) -> SnapshotMetadata {
+        SnapshotMetadata {
+            completeness: if decision == LibraryPageDecision::Complete && self.end_observed {
+                SnapshotCompleteness::Complete
+            } else {
+                SnapshotCompleteness::Partial
+            },
+            fetched_pages: self.fetched_pages,
+            truncated_by_limit: self.truncated_by_limit,
+            end_observed: self.end_observed,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
@@ -355,15 +454,14 @@ fn extract_ck_from_html(html: &str) -> Option<String> {
     None
 }
 
-pub async fn qr_start() -> Result<(String, QrSession, QrStartResult), DoubanError> {
-    let jar = Arc::new(Jar::default());
-    let client = Client::builder()
-        .use_rustls_tls()
-        .cookie_provider(jar.clone())
-        .build()
-        .map_err(|e| DoubanError::upstream(format!("创建豆瓣登录客户端失败: {e}")))?;
+pub async fn qr_start(
+    douban_client: &DoubanClient,
+) -> Result<(String, QrSession, QrStartResult), DoubanError> {
+    let transport = douban_client
+        .isolated_cookie_session()
+        .map_err(DoubanError::client)?;
 
-    let code_json: QrCodeResponse = request_json(&client, QR_CODE_URL).await?;
+    let code_json: QrCodeResponse = request_json(&transport, QR_CODE_URL).await?;
     let payload = code_json
         .payload
         .ok_or_else(|| DoubanError::upstream("豆瓣 QR code 响应缺少 payload"))?;
@@ -377,22 +475,14 @@ pub async fn qr_start() -> Result<(String, QrSession, QrStartResult), DoubanErro
         .ok_or_else(|| DoubanError::upstream("豆瓣 QR code 响应缺少 img"))?
         .replace("\\/", "/");
 
-    let image = client
-        .get(&image_url)
-        .header("User-Agent", DESKTOP_CHROME_UA)
-        .header("Accept", "image/png,image/*,*/*;q=0.8")
-        .header("Referer", LOGIN_REFERER)
-        .send()
+    let image = transport
+        .qr_image(&image_url)
         .await
-        .map_err(|e| DoubanError::upstream(format!("下载豆瓣 QR 图片失败: {e}")))?;
-    let status = image.status();
-    let bytes = image
-        .bytes()
-        .await
-        .map_err(|e| DoubanError::upstream(format!("读取豆瓣 QR 图片失败: {e}")))?;
-    if !status.is_success() || bytes.is_empty() {
+        .map_err(DoubanError::client)?;
+    if !image.is_success() || image.body.is_empty() {
         return Err(DoubanError::upstream(format!(
-            "豆瓣 QR 图片下载失败: HTTP {status}"
+            "豆瓣 QR 图片下载失败: HTTP {}",
+            image.status
         )));
     }
 
@@ -403,9 +493,8 @@ pub async fn qr_start() -> Result<(String, QrSession, QrStartResult), DoubanErro
     };
     let session = QrSession {
         code,
-        client,
-        jar,
-        image: Arc::new(bytes.to_vec()),
+        transport,
+        image: Arc::new(image.body),
     };
     Ok((session_id, session, result))
 }
@@ -413,12 +502,18 @@ pub async fn qr_start() -> Result<(String, QrSession, QrStartResult), DoubanErro
 pub async fn qr_poll(session: &QrSession) -> Result<QrPollResult, DoubanError> {
     let status_url = Url::parse_with_params(QR_STATUS_URL, &[("code", session.code.as_str())])
         .map_err(|e| DoubanError::upstream(format!("构造豆瓣 QR 状态 URL 失败: {e}")))?;
-    let status_json: QrStatusResponse = request_json(&session.client, status_url.as_str()).await?;
+    let status_json: QrStatusResponse =
+        request_json(&session.transport, status_url.as_str()).await?;
     let login_status = status_json
         .payload
         .map(|p| p.login_status)
         .unwrap_or_default();
-    let cookie_header = jar_cookie_header(&session.jar)?;
+    let cookie_header = normalize_cookie_header(
+        &session
+            .transport
+            .cookie_header(MOVIE_BASE_URL)
+            .map_err(DoubanError::client)?,
+    );
     let done = has_auth_cookie(&cookie_header);
     Ok(QrPollResult {
         done,
@@ -430,6 +525,7 @@ pub async fn qr_poll(session: &QrSession) -> Result<QrPollResult, DoubanError> {
 }
 
 pub async fn search(
+    client: &DoubanClient,
     cookie_header: &str,
     query: &str,
     page: usize,
@@ -455,7 +551,7 @@ pub async fn search(
         percent_encode_query_component(query)
     );
     let url = rexxar_search_url(query, start, fetch_count)?;
-    let data = fetch_rexxar_json(url, &cookie, &referer).await?;
+    let data = fetch_rexxar_json(client, url, &cookie, &referer).await?;
     let raw_count = rexxar_search_item_count(&data)?;
     let mut items = search_results_from_rexxar_json(&data, fetch_count)?;
     let has_more = page < SEARCH_MAX_PAGES && (items.len() > page_size || raw_count >= fetch_count);
@@ -482,15 +578,18 @@ fn rexxar_search_url(query: &str, start: usize, count: usize) -> Result<Url, Dou
 }
 
 pub async fn subject_detail(
+    client: &DoubanClient,
     cookie_header: &str,
     subject: &str,
 ) -> Result<DoubanSubjectDetail, DoubanError> {
     let subject_id = subject_id(subject)?;
     let cookie = normalize_cookie_header(cookie_header);
-    let data = fetch_rexxar_subject(&subject_id, &cookie).await?;
+    let data = fetch_rexxar_subject(client, &subject_id, &cookie).await?;
     let mut detail = subject_detail_from_rexxar_json(&subject_id, &data)?;
     if has_auth_cookie(&cookie) {
-        if let Ok(html) = fetch_html(&subject_url(&subject_id), &cookie, MOVIE_BASE_URL).await {
+        if let Ok(html) =
+            fetch_html(client, &subject_url(&subject_id), &cookie, MOVIE_BASE_URL).await
+        {
             let (user_interest, user_rating) = subject_user_interest_from_html(&html);
             if user_interest.is_some() {
                 detail.user_interest = user_interest;
@@ -501,74 +600,38 @@ pub async fn subject_detail(
     Ok(detail)
 }
 
-pub async fn subject_detail_rexxar(
+async fn fetch_rexxar_subject(
+    client: &DoubanClient,
+    subject_id: &str,
     cookie_header: &str,
-    subject: &str,
-) -> Result<DoubanSubjectDetail, DoubanError> {
-    let subject_id = subject_id(subject)?;
-    let cookie = normalize_cookie_header(cookie_header);
-    let data = fetch_rexxar_subject(&subject_id, &cookie).await?;
-    subject_detail_from_rexxar_json(&subject_id, &data)
-}
-
-async fn fetch_rexxar_subject(subject_id: &str, cookie_header: &str) -> Result<Value, DoubanError> {
+) -> Result<Value, DoubanError> {
     let mut url = Url::parse(&format!("{REXXAR_MOVIE_URL_PREFIX}{subject_id}"))
         .map_err(|e| DoubanError::upstream(format!("构造豆瓣 rexxar 详情 URL 失败: {e}")))?;
     url.query_pairs_mut()
         .append_pair("ck", "")
         .append_pair("for_mobile", "1");
     let referer = format!("{REXXAR_MOVIE_REFERER_PREFIX}{subject_id}/");
-    fetch_rexxar_json(url, cookie_header, &referer).await
+    fetch_rexxar_json(client, url, cookie_header, &referer).await
 }
 
 async fn fetch_rexxar_json(
+    douban_client: &DoubanClient,
     url: Url,
     cookie_header: &str,
     referer: &str,
 ) -> Result<Value, DoubanError> {
-    let client = Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|e| DoubanError::upstream(format!("创建豆瓣 rexxar 客户端失败: {e}")))?;
-    let mut req = client
-        .get(url)
-        .header("User-Agent", DESKTOP_CHROME_UA)
-        .header("Accept", "application/json")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Origin", "https://m.douban.com")
-        .header("Referer", referer);
-    if !cookie_header.trim().is_empty() {
-        req = req.header("Cookie", cookie_header);
-    }
-    let resp = req
-        .send()
+    let response = douban_client
+        .rexxar_json(url, cookie_header, referer)
         .await
-        .map_err(|e| DoubanError::upstream(format!("豆瓣 rexxar 请求失败: {e}")))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| DoubanError::upstream(format!("读取豆瓣 rexxar 响应失败: {e}")))?;
-    if !status.is_success() {
-        return Err(DoubanError::upstream(format!(
-            "豆瓣 rexxar 接口 HTTP {status}: {}",
-            rexxar_error_message(&text).unwrap_or_else(|| text.chars().take(120).collect())
+        .map_err(DoubanError::client)?;
+    if !response.is_success() {
+        return Err(DoubanError::client(ClientError::for_status(
+            DOUBAN_POLICY.provider,
+            response.status,
         )));
     }
-    serde_json::from_str::<Value>(&text).map_err(|e| {
-        DoubanError::upstream(format!(
-            "解析豆瓣 rexxar JSON 失败: {e}: {}",
-            text.chars().take(120).collect::<String>()
-        ))
-    })
-}
-
-fn rexxar_error_message(text: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(text).ok()?;
-    value_to_string(value.get("localized_message"))
-        .filter(|s| !s.is_empty())
-        .or_else(|| value_to_string(value.get("msg")))
+    serde_json::from_slice::<Value>(&response.body)
+        .map_err(|_| DoubanError::upstream("解析豆瓣 rexxar JSON 失败"))
 }
 
 fn search_results_from_rexxar_json(
@@ -685,48 +748,39 @@ fn subject_detail_from_rexxar_json(
 }
 
 pub async fn library(
+    client: &DoubanClient,
     cookie_header: &str,
     status: DoubanLibraryStatus,
     limit: usize,
 ) -> Result<DoubanLibraryList, DoubanError> {
     let cookie = require_auth_cookie(cookie_header)?;
     let limit = limit.clamp(1, LIBRARY_PAGE_SIZE * LIBRARY_MAX_PAGES);
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut pagination = LibraryPagination::new(limit);
     let mut start = 0usize;
+    let mut decision = LibraryPageDecision::Partial;
 
     for _ in 0..LIBRARY_MAX_PAGES {
         let url = library_page_url(status, start)?;
-        let html = fetch_html(url.as_str(), &cookie, "https://movie.douban.com/").await?;
+        let html = fetch_html(client, url.as_str(), &cookie, "https://movie.douban.com/").await?;
         let page_items = extract_library_items(&html, status);
-        if page_items.is_empty() {
-            break;
-        }
-
-        let before = out.len();
-        for item in page_items {
-            if seen.insert(item.subject_id.clone()) {
-                out.push(item);
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        if out.len() >= limit || out.len() == before {
+        decision = pagination.push_page(page_items);
+        if decision != LibraryPageDecision::Continue {
             break;
         }
         start += LIBRARY_PAGE_SIZE;
     }
 
+    let snapshot = pagination.snapshot(decision);
     Ok(DoubanLibraryList {
         status: status.as_str(),
         label: status.label(),
-        items: out,
+        items: pagination.items,
+        snapshot,
     })
 }
 
 pub async fn mark_interest(
+    douban_client: &DoubanClient,
     cookie_header: &str,
     subject: &str,
     interest: DoubanInterest,
@@ -749,7 +803,7 @@ pub async fn mark_interest(
     let ck = if let Some(ck) = cookie_value(&cookie, "ck") {
         ck
     } else {
-        let html = fetch_html(&detail_url, &cookie, MOVIE_BASE_URL).await?;
+        let html = fetch_html(douban_client, &detail_url, &cookie, MOVIE_BASE_URL).await?;
         extract_ck_from_html(&html)
             .ok_or_else(|| DoubanError::bad_request("豆瓣页面缺少 ck，无法提交看过/想看标记"))?
     };
@@ -766,36 +820,13 @@ pub async fn mark_interest(
         ("private", "on"),
     ];
 
-    let client = Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .map_err(|e| DoubanError::upstream(format!("创建豆瓣标记客户端失败: {e}")))?;
-    let resp = client
-        .post(&url)
-        .header("User-Agent", DESKTOP_CHROME_UA)
-        .header("Accept", "application/json, text/javascript, */*; q=0.01")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Referer", detail_url)
-        .header("X-Requested-With", "XMLHttpRequest")
-        .header("Cookie", cookie)
-        .form(&form)
-        .send()
+    let response = douban_client
+        .mark_interest(&url, &detail_url, &cookie, &form)
         .await
-        .map_err(|e| DoubanError::upstream(format!("豆瓣标记请求失败: {e}")))?;
-    let status = resp.status();
-    let final_url = resp.url().to_string();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| DoubanError::upstream(format!("读取豆瓣标记响应失败: {e}")))?;
-    ensure_html_success(status, &final_url, &text)?;
-    let data: DoubanInterestResponse = serde_json::from_str(&text).map_err(|e| {
-        DoubanError::upstream(format!(
-            "解析豆瓣标记响应失败: {e}: {}",
-            text.chars().take(300).collect::<String>()
-        ))
-    })?;
+        .map_err(DoubanError::client)?;
+    ensure_html_success(response.status, &response.final_url)?;
+    let data: DoubanInterestResponse = serde_json::from_slice(&response.body)
+        .map_err(|_| DoubanError::upstream("解析豆瓣标记响应失败"))?;
     if data.r.unwrap_or(0) != 0 {
         let msg = if data.msg.trim().is_empty() {
             format!("豆瓣标记失败: r={}", data.r.unwrap_or_default())
@@ -821,81 +852,63 @@ fn normalize_interest_tags(raw: &str) -> Result<String, DoubanError> {
     Ok(tags)
 }
 
-pub async fn fetch_image(raw_url: &str) -> Result<(String, Vec<u8>), DoubanError> {
+pub async fn fetch_image(
+    douban_client: &DoubanClient,
+    raw_url: &str,
+) -> Result<(String, Vec<u8>), DoubanError> {
     let candidates = image_fetch_candidates(raw_url);
     if candidates.is_empty() {
         return Err(DoubanError::bad_request("无效的豆瓣封面图片 URL"));
     }
 
-    let client = Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .map_err(|e| DoubanError::upstream(format!("创建豆瓣图片客户端失败: {e}")))?;
-    let mut last_error = String::new();
+    let mut last_error = "未找到可用的豆瓣图片响应".to_string();
 
     for url in candidates {
         let Ok(parsed) = Url::parse(&url) else {
-            last_error = format!("URL 无效: {url}");
+            last_error = "豆瓣图片 URL 无效".to_string();
             continue;
         };
         if !is_allowed_douban_image_url(&parsed) {
-            last_error = format!("拒绝非豆瓣图片 URL: {url}");
+            last_error = "拒绝非豆瓣图片 URL".to_string();
             continue;
         }
 
-        let resp = match client
-            .get(parsed)
-            .header("User-Agent", DESKTOP_CHROME_UA)
-            .header(
-                "Accept",
-                "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            )
-            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-            .header("Referer", IMAGE_REFERER)
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                last_error = format!("{url}: {e}");
+        let response = match douban_client.image(parsed).await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = error.to_string();
                 continue;
             }
         };
 
-        let status = resp.status();
-        let final_url = resp.url().clone();
+        let Ok(final_url) = Url::parse(&response.final_url) else {
+            last_error = "豆瓣图片最终 URL 无效".to_string();
+            continue;
+        };
         if !is_allowed_douban_image_url(&final_url) {
-            last_error = format!("豆瓣图片跳转到不可信地址: {final_url}");
+            last_error = "豆瓣图片跳转到不可信地址".to_string();
             continue;
         }
-        if !status.is_success() {
-            last_error = format!("{url}: HTTP {status}");
+        if !response.is_success() {
+            last_error =
+                ClientError::for_status(DOUBAN_POLICY.provider, response.status).to_string();
             continue;
         }
 
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
-            .filter(|s| !s.is_empty())
+        let content_type = response
+            .content_type
             .unwrap_or_else(|| "image/jpeg".to_string());
         if !content_type.starts_with("image/") {
-            last_error = format!("{url}: 非图片响应 {content_type}");
+            last_error = format!("豆瓣图片响应类型无效: {content_type}");
             continue;
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| DoubanError::upstream(format!("读取豆瓣图片失败: {e}")))?;
-        if bytes.is_empty() {
-            last_error = format!("{url}: 图片为空");
+        if response.body.is_empty() {
+            last_error = "豆瓣图片为空".to_string();
             continue;
         }
 
-        return Ok((content_type, bytes.to_vec()));
+        return Ok((content_type, response.body));
     }
 
     Err(DoubanError::upstream(format!(
@@ -904,68 +917,40 @@ pub async fn fetch_image(raw_url: &str) -> Result<(String, Vec<u8>), DoubanError
 }
 
 async fn request_json<T: for<'de> Deserialize<'de>>(
-    client: &Client,
+    session: &DoubanSession,
     url: &str,
 ) -> Result<T, DoubanError> {
-    let resp = client
-        .get(url)
-        .header("User-Agent", DESKTOP_CHROME_UA)
-        .header("Accept", "application/json, text/javascript, */*; q=0.01")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Referer", LOGIN_REFERER)
-        .header("X-Requested-With", "XMLHttpRequest")
-        .send()
+    let response = session
+        .request_json(url)
         .await
-        .map_err(|e| DoubanError::upstream(format!("豆瓣请求失败: {e}")))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| DoubanError::upstream(format!("读取豆瓣响应失败: {e}")))?;
-    if !status.is_success() {
-        return Err(DoubanError::upstream(format!(
-            "豆瓣接口 HTTP {status}: {}",
-            text.chars().take(500).collect::<String>()
+        .map_err(DoubanError::client)?;
+    if !response.is_success() {
+        return Err(DoubanError::client(ClientError::for_status(
+            DOUBAN_POLICY.provider,
+            response.status,
         )));
     }
-    serde_json::from_str(&text).map_err(|e| {
-        DoubanError::upstream(format!(
-            "解析豆瓣 JSON 失败: {e}: {}",
-            text.chars().take(500).collect::<String>()
-        ))
-    })
+    serde_json::from_slice(&response.body).map_err(|_| DoubanError::upstream("解析豆瓣 JSON 失败"))
 }
 
-async fn fetch_html(url: &str, cookie_header: &str, referer: &str) -> Result<String, DoubanError> {
-    let client = Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|e| DoubanError::upstream(format!("创建豆瓣客户端失败: {e}")))?;
-    let resp = client
-        .get(url)
-        .header("User-Agent", DESKTOP_CHROME_UA)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Referer", referer)
-        .header("Cookie", cookie_header)
-        .send()
+async fn fetch_html(
+    douban_client: &DoubanClient,
+    url: &str,
+    cookie_header: &str,
+    referer: &str,
+) -> Result<String, DoubanError> {
+    let response = douban_client
+        .html(url, cookie_header, referer)
         .await
-        .map_err(|e| DoubanError::upstream(format!("豆瓣影视请求失败: {e}")))?;
-    let status = resp.status();
-    let final_url = resp.url().to_string();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| DoubanError::upstream(format!("读取豆瓣页面失败: {e}")))?;
-    ensure_html_success(status, &final_url, &text)?;
-    Ok(text)
+        .map_err(DoubanError::client)?;
+    let text = response
+        .text(DOUBAN_POLICY.provider)
+        .map_err(DoubanError::client)?;
+    ensure_html_success(response.status, &response.final_url)?;
+    Ok(text.to_string())
 }
 
-fn ensure_html_success(status: StatusCode, final_url: &str, body: &str) -> Result<(), DoubanError> {
+fn ensure_html_success(status: u16, final_url: &str) -> Result<(), DoubanError> {
     if final_url.contains("accounts.douban.com") || final_url.contains("/passport/login") {
         return Err(DoubanError::bad_request(
             "豆瓣请求被重定向到登录页，请更新 Cookie",
@@ -976,25 +961,10 @@ fn ensure_html_success(status: StatusCode, final_url: &str, body: &str) -> Resul
             "豆瓣请求被重定向到安全验证页，请稍后重试或重新登录",
         ));
     }
-    if !status.is_success() {
-        return Err(DoubanError::upstream(format!(
-            "豆瓣页面 HTTP {status}: {}",
-            extract_title(body).unwrap_or_default()
-        )));
+    if !(200..300).contains(&status) {
+        return Err(DoubanError::upstream(format!("豆瓣页面 HTTP {status}")));
     }
     Ok(())
-}
-
-fn jar_cookie_header(jar: &Jar) -> Result<String, DoubanError> {
-    let url = Url::parse(MOVIE_BASE_URL)
-        .map_err(|e| DoubanError::upstream(format!("构造豆瓣 Cookie URL 失败: {e}")))?;
-    let Some(value) = jar.cookies(&url) else {
-        return Ok(String::new());
-    };
-    value
-        .to_str()
-        .map(normalize_cookie_header)
-        .map_err(|e| DoubanError::upstream(format!("读取豆瓣 Cookie 失败: {e}")))
 }
 
 fn new_session_id() -> String {
@@ -1246,14 +1216,6 @@ fn extract_user_rating(block: &str) -> Option<u8> {
     (1u8..=5)
         .rev()
         .find(|n| block.contains(&format!("rating{n}-t")))
-}
-
-fn extract_title(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
-    let start = lower.find("<title")?;
-    let tag_end = lower[start..].find('>')? + start + 1;
-    let end = lower[tag_end..].find("</title>")? + tag_end;
-    Some(normalize_ws(&strip_html(&html[tag_end..end])))
 }
 
 fn rating_from_value(value: Option<&Value>) -> DoubanRating {
@@ -1809,6 +1771,93 @@ fn html_unescape(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn library_item(subject_id: &str) -> DoubanLibraryItem {
+        DoubanLibraryItem {
+            source: "douban",
+            media_type: "movie",
+            id: subject_id.to_string(),
+            subject_id: subject_id.to_string(),
+            title: format!("item-{subject_id}"),
+            url: subject_url(subject_id),
+            abstract_text: String::new(),
+            abstract_2: String::new(),
+            cover_url: String::new(),
+            poster_url: String::new(),
+            status: "wish",
+            status_label: "想看",
+            date: String::new(),
+            comment: String::new(),
+            tags: Vec::new(),
+            user_rating: None,
+        }
+    }
+
+    #[test]
+    fn library_pagination_is_complete_only_after_observing_end() {
+        let mut pagination = LibraryPagination::new(100);
+        assert_eq!(
+            pagination.push_page(vec![library_item("1")]),
+            LibraryPageDecision::Continue
+        );
+        let decision = pagination.push_page(Vec::new());
+        let snapshot = pagination.snapshot(decision);
+
+        assert_eq!(decision, LibraryPageDecision::Complete);
+        assert_eq!(snapshot.completeness, SnapshotCompleteness::Complete);
+        assert_eq!(snapshot.fetched_pages, 2);
+        assert!(snapshot.end_observed);
+        assert!(!snapshot.truncated_by_limit);
+        assert!(snapshot.is_complete());
+    }
+
+    #[test]
+    fn library_pagination_limit_is_partial_and_marked_truncated() {
+        let mut pagination = LibraryPagination::new(1);
+        let decision = pagination.push_page(vec![library_item("1"), library_item("2")]);
+        let snapshot = pagination.snapshot(decision);
+
+        assert_eq!(decision, LibraryPageDecision::Partial);
+        assert_eq!(pagination.items.len(), 1);
+        assert_eq!(snapshot.completeness, SnapshotCompleteness::Partial);
+        assert_eq!(snapshot.fetched_pages, 1);
+        assert!(snapshot.truncated_by_limit);
+        assert!(!snapshot.end_observed);
+        assert!(!snapshot.is_complete());
+    }
+
+    #[test]
+    fn library_pagination_repeated_page_is_partial() {
+        let mut pagination = LibraryPagination::new(100);
+        assert_eq!(
+            pagination.push_page(vec![library_item("1")]),
+            LibraryPageDecision::Continue
+        );
+        let decision = pagination.push_page(vec![library_item("1")]);
+        let snapshot = pagination.snapshot(decision);
+
+        assert_eq!(decision, LibraryPageDecision::Partial);
+        assert_eq!(pagination.items.len(), 1);
+        assert_eq!(snapshot.fetched_pages, 2);
+        assert!(!snapshot.truncated_by_limit);
+        assert!(!snapshot.end_observed);
+    }
+
+    #[test]
+    fn library_pagination_max_pages_is_partial() {
+        let mut pagination = LibraryPagination::new(LIBRARY_PAGE_SIZE * LIBRARY_MAX_PAGES + 1);
+        let mut decision = LibraryPageDecision::Continue;
+        for page in 0..LIBRARY_MAX_PAGES {
+            decision = pagination.push_page(vec![library_item(&format!("item-{page}"))]);
+        }
+        let snapshot = pagination.snapshot(decision);
+
+        assert_eq!(decision, LibraryPageDecision::Partial);
+        assert_eq!(snapshot.completeness, SnapshotCompleteness::Partial);
+        assert_eq!(snapshot.fetched_pages, LIBRARY_MAX_PAGES);
+        assert!(!snapshot.truncated_by_limit);
+        assert!(!snapshot.end_observed);
+    }
 
     #[test]
     fn proxied_image_url_keeps_original_url_for_fallbacks() {

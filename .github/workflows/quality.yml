@@ -1,0 +1,256 @@
+name: Quality
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check 2>&1 | tee rust-fmt.log
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee rust-clippy.log
+
+      - name: Verify backend boundaries
+        run: bash scripts/ci/verify-backend-boundaries.sh 2>&1 | tee rust-boundaries.log
+
+      - name: Run tests
+        run: cargo test --locked --all-targets 2>&1 | tee rust-tests.log
+
+      - name: Upload Rust failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-failure-logs-${{ github.run_attempt }}
+          path: rust-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+
+      - name: Set up npm
+        run: npm install --global npm@11.17.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify frontend
+        run: npm run verify:frontend 2>&1 | tee frontend-verify.log
+
+      - name: Upload frontend failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-failure-log-${{ github.run_attempt }}
+          path: frontend-verify.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser-e2e:
+    name: Browser E2E
+    needs: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+
+      - name: Set up npm
+        run: npm install --global npm@11.17.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install browser runtimes
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Run browser acceptance flows
+        run: PLAYWRIGHT_CROSS_BROWSER=1 npm run test:e2e 2>&1 | tee browser-e2e.log
+
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-diagnostics-${{ github.run_attempt }}
+          path: |
+            browser-e2e.log
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+
+      - name: Set up npm
+        run: npm install --global npm@11.17.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check living documentation formatting
+        run: |
+          npm run check -- --no-lint README.md docs \
+            deploy/nas/README.md deploy/nas/docker-compose.yml .github/workflows/quality.yml \
+            .github/workflows/docker-publish.yml scripts/ci/verify-delivery-contracts.mjs \
+            scripts/generate-api-contracts.mjs src/http/openapi.json \
+            2>&1 | tee docs-format.log
+
+      - name: Check internal documentation links
+        shell: bash
+        run: |
+          node --input-type=module 2>&1 <<'NODE' | tee docs-links.log
+          import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+          import { dirname, extname, resolve } from "node:path";
+
+          const inputs = [
+            "README.md",
+            "docs",
+            "deploy/nas/README.md",
+          ];
+
+          function markdownFiles(path) {
+            if (!existsSync(path)) return [];
+            if (!statSync(path).isDirectory()) return extname(path) === ".md" ? [path] : [];
+            return readdirSync(path, { withFileTypes: true }).flatMap((entry) =>
+              markdownFiles(resolve(path, entry.name)),
+            );
+          }
+
+          const errors = [];
+          const files = inputs.flatMap(markdownFiles);
+          const linkPattern = /!?\[[^\]]*\]\(([^)]+)\)/g;
+
+          for (const file of files) {
+            const source = readFileSync(file, "utf8");
+            for (const match of source.matchAll(linkPattern)) {
+              let target = match[1].trim().replace(/^<|>$/g, "");
+              if (!target || /^(?:[a-z]+:|#)/i.test(target)) continue;
+              target = target.split(/\s+["']/)[0].split("#")[0];
+              if (!target) continue;
+              const decoded = decodeURIComponent(target);
+              const absolute = resolve(dirname(file), decoded);
+              if (!existsSync(absolute)) errors.push(`${file}: missing link target ${target}`);
+            }
+          }
+
+          if (errors.length) {
+            console.error(errors.join("\n"));
+            process.exit(1);
+          }
+          console.log(`checked ${files.length} Markdown files`);
+          NODE
+
+      - name: Verify delivery contracts
+        run: |
+          node scripts/ci/verify-delivery-contracts.mjs 2>&1 | tee docs-delivery.log
+
+      - name: Upload documentation failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-failure-logs-${{ github.run_attempt }}
+          path: docs-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  container:
+    name: Container build
+    needs:
+      - rust
+      - frontend
+      - browser-e2e
+      - docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate NAS Compose
+        run: docker compose -f deploy/nas/docker-compose.yml config 2>&1 | tee container-compose.log
+
+      - name: Build container
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: tmdb-mteam-hub:quality
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify runtime artifacts
+        run: |
+          docker run --rm --entrypoint sh tmdb-mteam-hub:quality -c \
+            'test -x /usr/local/bin/tmdb-mteam-server &&
+            test ! -e /usr/local/bin/subscription-migrate-v5 && test -s /app/static/index.html' \
+            2>&1 | tee container-artifacts.log
+
+      - name: Smoke-test latest-only backup and clean restore
+        shell: bash
+        run: scripts/ci/container-acceptance.sh tmdb-mteam-hub:quality 2>&1 | tee container-smoke.log
+
+      - name: Upload container failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-failure-logs-${{ github.run_attempt }}
+          path: container-*.log
+          if-no-files-found: ignore
+          retention-days: 7

@@ -12,29 +12,24 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE_NAME: ghcr.io/zegwe/tmdb-mteam-hub
 
 jobs:
+  quality:
+    name: Required quality gates
+    uses: ./.github/workflows/quality.yml
+
   build-and-push:
+    needs: quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-
-      - name: Build frontend
-        run: |
-          cd /tmp
-          npm install -g npm@11.17.0
-          cd "$GITHUB_WORKSPACE"
-          npm ci
-          npm run build
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

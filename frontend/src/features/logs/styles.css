@@ -1,0 +1,294 @@
+.logs-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem 1rem;
+}
+
+.logs-top .sub {
+  grid-column: 1 / 2;
+}
+
+.logs-top .actions {
+  grid-column: 2 / 3;
+  grid-row: 1 / span 2;
+  justify-content: flex-end;
+  margin-top: 0;
+}
+
+.operation-log-filters {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.8fr) minmax(8rem, 0.65fr) minmax(16rem, 1.6fr) auto;
+  align-items: end;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 86%, var(--muted-bg));
+}
+
+.operation-log-filters label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.operation-log-filters select,
+.operation-log-filters input {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.operation-log-search {
+  min-width: min(100%, 16rem);
+}
+
+.operation-log-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.operation-log-summary {
+  padding: 0.75rem 1.5rem 0;
+}
+
+.operation-log-list {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.65rem 1.5rem 0;
+}
+
+.operation-log-card.card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 0.42fr);
+  gap: 0.85rem 1rem;
+  padding: 0.85rem 0.95rem;
+  overflow: visible;
+  cursor: default;
+}
+
+.operation-log-main,
+.operation-log-meta {
+  min-width: 0;
+}
+
+.operation-log-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.operation-log-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.operation-log-category,
+.operation-log-status {
+  max-width: 100%;
+  min-height: 1.45rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.15;
+  white-space: normal;
+  word-break: keep-all;
+}
+
+.operation-log-status-success {
+  border-color: color-mix(in srgb, var(--success) 42%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--success);
+}
+
+.operation-log-status-failed {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.operation-log-status-processing {
+  border-color: color-mix(in srgb, var(--info) 38%, transparent);
+  background: color-mix(in srgb, var(--info) 10%, transparent);
+  color: var(--info);
+}
+
+.operation-log-card h2 {
+  min-width: 0;
+  margin: 0.45rem 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.98rem;
+  font-weight: 650;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.operation-log-target {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+  word-break: break-word;
+}
+
+.operation-log-error {
+  margin: 0.5rem 0 0;
+  padding: 0.45rem 0.55rem;
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.operation-log-meta {
+  align-self: start;
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.operation-log-meta div {
+  min-width: 0;
+}
+
+.operation-log-meta dt {
+  margin: 0;
+  color: color-mix(in srgb, var(--muted) 82%, var(--text));
+  font-weight: 600;
+}
+
+.operation-log-meta dd {
+  margin: 0.12rem 0 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operation-log-matches {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.45rem;
+  padding-top: 0.15rem;
+}
+
+.operation-log-matches-title {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.operation-log-match {
+  display: grid;
+  gap: 0.22rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted-bg);
+}
+
+.operation-log-match-selected {
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+
+.operation-log-match-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.operation-log-match-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.operation-log-match-head span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.operation-log-match-meta,
+.operation-log-match-rule,
+.operation-log-match-reason,
+.operation-log-match-evaluations {
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.operation-log-match-reason {
+  color: var(--danger);
+}
+
+.operation-log-pager {
+  display: flex;
+  justify-content: center;
+  padding: 1rem 1.5rem 3rem;
+}
+
+@media (max-width: 640px) {
+  .logs-top {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .logs-top .sub,
+  .logs-top .actions {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .logs-top .actions,
+  .logs-top .btn {
+    width: 100%;
+  }
+
+  .operation-log-filters {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0.85rem;
+  }
+
+  .operation-log-filter-actions {
+    justify-content: stretch;
+  }
+
+  .operation-log-filter-actions .btn {
+    flex: 1 1 8rem;
+  }
+
+  .operation-log-summary,
+  .operation-log-list,
+  .operation-log-pager {
+    padding-right: 0.85rem;
+    padding-left: 0.85rem;
+  }
+
+  .operation-log-card.card {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0.75rem;
+  }
+}

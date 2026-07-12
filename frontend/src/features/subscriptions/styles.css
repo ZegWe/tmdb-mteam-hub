@@ -1,0 +1,361 @@
+.subscription-toolbar {
+  padding: 0 1.5rem 0.5rem;
+}
+
+.subscription-list {
+  padding: 0.5rem 1.5rem 3rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.subscription-card {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.subscription-card:hover {
+  border-color: var(--accent-dim);
+  transform: translateY(-1px);
+}
+
+.subscription-card-cover {
+  position: relative;
+  width: 100%;
+  background: #000;
+}
+
+.subscription-card-cover img {
+  width: 100%;
+  display: block;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+}
+
+.subscription-detail-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.subscription-detail h3 {
+  min-width: 0;
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.subscription-status {
+  min-height: 1.55rem;
+  padding: 0.18rem 0.5rem;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.subscription-status-completed {
+  border-color: rgba(124, 207, 154, 0.45);
+  color: var(--success);
+}
+
+.subscription-status-failed {
+  border-color: rgba(239, 113, 113, 0.55);
+  color: var(--danger);
+}
+
+.subscription-status-downloading {
+  border-color: rgba(96, 165, 250, 0.55);
+  color: var(--info);
+}
+
+.subscription-status-skipped {
+  color: var(--muted);
+}
+
+.subscription-card-meta {
+  min-height: 0;
+  padding: 0.6rem 0.65rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  text-align: center;
+}
+
+.subscription-card .subscription-status {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 1;
+  max-width: calc(100% - 1rem);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(8px);
+}
+
+.subscription-card .title,
+.subscription-card .subtle {
+  width: 100%;
+  display: block;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: initial;
+}
+
+.subscription-card .title {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.subscription-card .subtle {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.subscription-state-graph {
+  min-height: 3.5rem;
+  margin: 0.35rem 0 0.8rem;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(42px, 1fr));
+  align-items: start;
+  gap: 0.25rem;
+}
+
+.subscription-state-node {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 0.82rem 1rem minmax(0, 1rem);
+  justify-items: center;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.subscription-state-node::before {
+  content: "";
+  position: absolute;
+  top: 0.36rem;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.subscription-state-node:first-child::before {
+  left: 50%;
+}
+
+.subscription-state-node:last-child::before {
+  right: 50%;
+}
+
+.subscription-state-dot {
+  position: relative;
+  z-index: 1;
+  width: 0.72rem;
+  height: 0.72rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.subscription-state-label,
+.subscription-state-attention {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subscription-state-attention {
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.subscription-state-node-done,
+.subscription-state-node-current {
+  color: var(--text);
+}
+
+.subscription-state-node-done::before,
+.subscription-state-node-current::before {
+  background: rgba(124, 207, 154, 0.55);
+}
+
+.subscription-state-node-done .subscription-state-dot {
+  border-color: rgba(124, 207, 154, 0.7);
+  background: #7ccf9a;
+}
+
+.subscription-state-node-current .subscription-state-dot {
+  border-color: rgba(96, 165, 250, 0.85);
+  background: #60a5fa;
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.18);
+}
+
+.subscription-state-node-failed .subscription-state-dot,
+.subscription-state-node-retry_blocked .subscription-state-dot {
+  border-color: rgba(239, 113, 113, 0.75);
+  background: var(--danger);
+}
+
+.subscription-state-node-waiting_release .subscription-state-dot {
+  border-color: rgba(245, 158, 11, 0.75);
+  background: #f59e0b;
+}
+
+.subscription-state-node-skipped .subscription-state-dot {
+  border-color: rgba(148, 163, 184, 0.7);
+  background: var(--muted);
+}
+
+.subscription-progress {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.subscription-progress span {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #7ccf9a);
+}
+
+.subscription-detail-download-progress {
+  margin-bottom: 0.75rem;
+  display: grid;
+  grid-template-rows: 7px 1rem;
+  align-content: start;
+  gap: 0.35rem;
+}
+
+.subscription-detail-download-progress span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1rem;
+}
+
+.subscription-detail-error {
+  margin: 0.65rem 0 0;
+  color: var(--danger);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.subscription-detail {
+  display: grid;
+  gap: 1rem;
+}
+
+.subscription-detail-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.subscription-episode-list,
+.subscription-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.subscription-episode-row,
+.subscription-file-row {
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 0.78rem;
+}
+
+.subscription-episode-row .subscription-progress {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.subscription-episode-title,
+.subscription-file-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.subscription-episode-state,
+.subscription-file-status,
+.subscription-episode-files {
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.subscription-file-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.subscription-file-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  .subscription-detail-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .subscription-episode-row,
+  .subscription-file-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .subscription-episode-state,
+  .subscription-file-status,
+  .subscription-episode-files {
+    white-space: normal;
+  }
+}

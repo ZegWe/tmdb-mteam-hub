@@ -1,0 +1,3857 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TMDB M-Team Hub Management API",
+    "version": "1.0.0"
+  },
+  "security": [
+    {
+      "ManagementSession": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Process health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatusDto"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Storage readiness",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatusDto"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/auth/status": {
+      "get": {
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Management authentication status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusDto"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthLoginRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated management session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "description": "Login rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Logged-out management session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusDto"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Redacted runtime configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "put": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigUpdateDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated redacted runtime configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration mutation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "Configuration revision is stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request payload is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "TMDB search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TmdbSearchResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid search request or missing TMDB credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "TMDB request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/search": {
+      "get": {
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Douban search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanSearchResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Douban search request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/library": {
+      "get": {
+        "parameters": [
+          {
+            "name": "force_refresh",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1200,
+              "default": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current Douban wish and collect library",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanLibraryResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Douban authentication is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/tags": {
+      "get": {
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1200,
+              "default": 80
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured Douban wanted-tag history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanTagHistoryResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Douban authentication is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/subject/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized Douban subject detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanSubjectDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Douban subject",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/subject/{id}/interest": {
+      "post": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DoubanInterestRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated Douban interest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanInterestResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid interest mutation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/image": {
+      "get": {
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proxied Douban image bytes",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid image URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban image request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/qr/start": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Started an isolated Douban QR login session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanQrStartResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban QR request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/qr/poll": {
+      "get": {
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current QR login status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoubanQrPollResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "QR session is missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Douban QR request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/douban/qr/image": {
+      "get": {
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "QR session image",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "QR session is missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/operation-logs": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Operation log page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationLogPageDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/mteam/torrents": {
+      "get": {
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MteamSearchSource"
+            }
+          },
+          {
+            "name": "imdb_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "douban_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized M-Team torrent candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MteamSearchResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid search request or missing API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "M-Team request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/qb/test": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QbTestRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "qBittorrent connection test",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QbTestResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configured qB server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "qBittorrent request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/qb/push-mteam": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QbPushMteamRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "M-Team torrent submitted to qBittorrent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QbPushMteamResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid push request or missing configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "M-Team or qBittorrent request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/tmdb/movie/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "force_refresh",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized TMDB movie detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TmdbMediaDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid movie request or missing TMDB credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "TMDB request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/tmdb/tv/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "force_refresh",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized TMDB TV detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TmdbMediaDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TV request or missing TMDB credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "TMDB request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/tmdb/tv/{id}/season/{season}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "season",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "force_refresh",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized TMDB season detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TmdbSeasonDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid season request or missing TMDB credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "TMDB request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/subscriptions/wanted": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Subscription summary page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummaryPageDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/subscriptions/wanted/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "404": {
+            "description": "Subscription not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/subscriptions/wanted/poll": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Persisted subscription poll outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionPollOutcomeDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Subscription poll is disabled or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "Poll superseded by a newer attempt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Wanted source request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ManagementSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "tmdb_mteam_admin_session"
+      }
+    },
+    "responses": {
+      "ManagementUnauthorized": {
+        "description": "Management authentication is required",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorDto"
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "HTTP method is not allowed for this endpoint",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorDto"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Internal server error with a redacted public message",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorDto"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "A required local service or store is temporarily unavailable",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorDto"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "HealthStatusDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ok"]
+          }
+        }
+      },
+      "AuthStatusDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["authenticated", "token_configured", "bootstrap_allowed"],
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "token_configured": {
+            "type": "boolean"
+          },
+          "bootstrap_allowed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AuthLoginRequestDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["token"],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "RedactedQbServerDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "base_url", "username", "insecure_tls", "has_password"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "insecure_tls": {
+            "type": "boolean"
+          },
+          "has_password": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SubscriptionCategoryDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "wanted_tag",
+          "qb_server_id",
+          "qb_category",
+          "qb_save_dir_name",
+          "download_dir",
+          "link_target_dir"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "wanted_tag": {
+            "type": "string"
+          },
+          "qb_server_id": {
+            "type": "string"
+          },
+          "qb_category": {
+            "type": "string"
+          },
+          "qb_save_dir_name": {
+            "type": "string"
+          },
+          "download_dir": {
+            "type": "string"
+          },
+          "link_target_dir": {
+            "type": "string"
+          }
+        }
+      },
+      "SubscriptionWatcherDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "dry_run",
+          "poll_interval_secs",
+          "library_limit",
+          "max_retries",
+          "search_interval_secs",
+          "progress_interval_secs",
+          "link_retry_interval_secs",
+          "system_retry_interval_secs",
+          "bootstrap_existing_as_skipped"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "poll_interval_secs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "library_limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_retries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "search_interval_secs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "progress_interval_secs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "link_retry_interval_secs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "system_retry_interval_secs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bootstrap_existing_as_skipped": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TorrentRuleMatchMode": {
+        "type": "string",
+        "enum": ["all", "any"]
+      },
+      "TorrentMatchRuleDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "priority",
+          "mode",
+          "title_keywords",
+          "resolution_keywords",
+          "source_keywords"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/TorrentRuleMatchMode"
+          },
+          "title_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "resolution_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ConfigResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "listen_ip",
+          "listen_port",
+          "has_tmdb_api_key",
+          "has_mteam_api_key",
+          "has_douban_cookie",
+          "has_admin_token",
+          "qb_servers",
+          "subscription_categories",
+          "subscription_watcher",
+          "torrent_match_rules",
+          "allowed_origins",
+          "secure_cookie",
+          "restart_required"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "listen_ip": {
+            "type": "string"
+          },
+          "listen_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "has_tmdb_api_key": {
+            "type": "boolean"
+          },
+          "has_mteam_api_key": {
+            "type": "boolean"
+          },
+          "has_douban_cookie": {
+            "type": "boolean"
+          },
+          "has_admin_token": {
+            "type": "boolean"
+          },
+          "qb_servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RedactedQbServerDto"
+            }
+          },
+          "subscription_categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionCategoryDto"
+            }
+          },
+          "subscription_watcher": {
+            "$ref": "#/components/schemas/SubscriptionWatcherDto"
+          },
+          "torrent_match_rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TorrentMatchRuleDto"
+            }
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "secure_cookie": {
+            "type": "boolean"
+          },
+          "restart_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "QbServerPatchDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["base_url"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "insecure_tls": {
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string"
+          },
+          "clear_password": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ConfigUpdateDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expected_revision"],
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "confirm_enable_automation": {
+            "type": "boolean"
+          },
+          "listen_ip": {
+            "type": "string"
+          },
+          "listen_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "tmdb_api_key": {
+            "type": "string"
+          },
+          "clear_tmdb_api_key": {
+            "type": "boolean"
+          },
+          "mteam_api_key": {
+            "type": "string"
+          },
+          "clear_mteam_api_key": {
+            "type": "boolean"
+          },
+          "douban_cookie": {
+            "type": "string"
+          },
+          "clear_douban_cookie": {
+            "type": "boolean"
+          },
+          "admin_token": {
+            "type": "string"
+          },
+          "clear_admin_token": {
+            "type": "boolean"
+          },
+          "qb_servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QbServerPatchDto"
+            }
+          },
+          "subscription_categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionCategoryDto"
+            }
+          },
+          "subscription_watcher": {
+            "$ref": "#/components/schemas/SubscriptionWatcherDto"
+          },
+          "torrent_match_rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TorrentMatchRuleDto"
+            }
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "secure_cookie": {
+            "type": "boolean"
+          }
+        }
+      },
+      "QbTestRequestDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["server_id"],
+        "properties": {
+          "server_id": {
+            "type": "string"
+          }
+        }
+      },
+      "QbTestResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ok", "version"],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "QbPushMteamRequestDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["server_id", "torrent_id"],
+        "properties": {
+          "server_id": {
+            "type": "string"
+          },
+          "torrent_id": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "savepath": {
+            "type": "string"
+          }
+        }
+      },
+      "QbPushMteamResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ok"],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SubscriptionPollOutcomeDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "snapshot_complete",
+          "fetched_items",
+          "inserted",
+          "updated",
+          "unchanged",
+          "reactivated",
+          "deactivated",
+          "failure_count",
+          "next_poll_at",
+          "polled_at"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string"
+          },
+          "snapshot_complete": {
+            "type": "boolean"
+          },
+          "fetched_items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "inserted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unchanged": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reactivated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deactivated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failure_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_poll_at": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "polled_at": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SubscriptionMediaKind": {
+        "type": "string",
+        "enum": ["movie", "tv"]
+      },
+      "SubscriptionLifecycleState": {
+        "type": "string",
+        "enum": ["queued", "meta", "searching", "downloading", "linking", "completed"]
+      },
+      "SubscriptionExecutionState": {
+        "type": "string",
+        "enum": ["idle", "running"]
+      },
+      "SubscriptionAttentionTag": {
+        "type": "string",
+        "enum": ["waiting_release", "failed", "retry_blocked", "skipped", "needs_reconciliation"]
+      },
+      "MteamSearchSource": {
+        "type": "string",
+        "enum": ["imdb", "douban", "keyword"]
+      },
+      "MteamTorrentDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "small_description": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "seeders": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "leechers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string"
+          }
+        }
+      },
+      "MteamSearchResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "page", "page_size"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MteamTorrentDto"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      },
+      "TmdbMediaKind": {
+        "type": "string",
+        "enum": ["movie", "tv"]
+      },
+      "TmdbSearchItemDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "media_type",
+          "id",
+          "title",
+          "original_title",
+          "overview",
+          "poster_path",
+          "poster_url",
+          "release_date",
+          "first_air_date",
+          "vote_average"
+        ],
+        "properties": {
+          "media_type": {
+            "$ref": "#/components/schemas/TmdbMediaKind"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "original_title": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "poster_path": {
+            "type": ["string", "null"]
+          },
+          "poster_url": {
+            "type": ["string", "null"]
+          },
+          "release_date": {
+            "type": ["string", "null"]
+          },
+          "first_air_date": {
+            "type": ["string", "null"]
+          },
+          "vote_average": {
+            "type": ["number", "null"]
+          }
+        }
+      },
+      "NamedMediaValueDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "english_name", "code"],
+        "properties": {
+          "id": {
+            "type": ["integer", "null"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "english_name": {
+            "type": ["string", "null"]
+          },
+          "code": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "TmdbSeasonSummaryDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "season_number",
+          "name",
+          "episode_count",
+          "air_date",
+          "poster_path",
+          "poster_url"
+        ],
+        "properties": {
+          "season_number": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "episode_count": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "air_date": {
+            "type": ["string", "null"]
+          },
+          "poster_path": {
+            "type": ["string", "null"]
+          },
+          "poster_url": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "TmdbMediaDetailDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "media_type",
+          "id",
+          "title",
+          "original_title",
+          "overview",
+          "tagline",
+          "poster_path",
+          "poster_url",
+          "backdrop_path",
+          "backdrop_url",
+          "release_date",
+          "first_air_date",
+          "last_air_date",
+          "runtime",
+          "status",
+          "vote_average",
+          "vote_count",
+          "genres",
+          "production_countries",
+          "spoken_languages",
+          "origin_country",
+          "imdb_id",
+          "douban_id",
+          "douban_url",
+          "number_of_seasons",
+          "number_of_episodes",
+          "episode_run_time",
+          "networks",
+          "series_type",
+          "seasons"
+        ],
+        "properties": {
+          "media_type": {
+            "$ref": "#/components/schemas/TmdbMediaKind"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "original_title": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "tagline": {
+            "type": ["string", "null"]
+          },
+          "poster_path": {
+            "type": ["string", "null"]
+          },
+          "poster_url": {
+            "type": ["string", "null"]
+          },
+          "backdrop_path": {
+            "type": ["string", "null"]
+          },
+          "backdrop_url": {
+            "type": ["string", "null"]
+          },
+          "release_date": {
+            "type": ["string", "null"]
+          },
+          "first_air_date": {
+            "type": ["string", "null"]
+          },
+          "last_air_date": {
+            "type": ["string", "null"]
+          },
+          "runtime": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "status": {
+            "type": ["string", "null"]
+          },
+          "vote_average": {
+            "type": ["number", "null"]
+          },
+          "vote_count": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedMediaValueDto"
+            }
+          },
+          "production_countries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedMediaValueDto"
+            }
+          },
+          "spoken_languages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedMediaValueDto"
+            }
+          },
+          "origin_country": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "imdb_id": {
+            "type": ["string", "null"]
+          },
+          "douban_id": {
+            "type": ["string", "null"]
+          },
+          "douban_url": {
+            "type": ["string", "null"]
+          },
+          "number_of_seasons": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "number_of_episodes": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_run_time": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedMediaValueDto"
+            }
+          },
+          "series_type": {
+            "type": ["string", "null"]
+          },
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TmdbSeasonSummaryDto"
+            }
+          }
+        }
+      },
+      "TmdbEpisodeDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "episode_number",
+          "name",
+          "overview",
+          "air_date",
+          "still_path",
+          "still_url",
+          "runtime",
+          "vote_average"
+        ],
+        "properties": {
+          "id": {
+            "type": ["integer", "null"]
+          },
+          "episode_number": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "air_date": {
+            "type": ["string", "null"]
+          },
+          "still_path": {
+            "type": ["string", "null"]
+          },
+          "still_url": {
+            "type": ["string", "null"]
+          },
+          "runtime": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "vote_average": {
+            "type": ["number", "null"]
+          }
+        }
+      },
+      "TmdbSeasonDetailDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "season_number",
+          "name",
+          "overview",
+          "air_date",
+          "poster_path",
+          "poster_url",
+          "episodes"
+        ],
+        "properties": {
+          "id": {
+            "type": ["integer", "null"]
+          },
+          "season_number": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "air_date": {
+            "type": ["string", "null"]
+          },
+          "poster_path": {
+            "type": ["string", "null"]
+          },
+          "poster_url": {
+            "type": ["string", "null"]
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TmdbEpisodeDto"
+            }
+          }
+        }
+      },
+      "SubscriptionSummaryDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject_id",
+          "revision",
+          "active",
+          "inactive_at",
+          "last_seen_snapshot_id",
+          "media_kind",
+          "schedulable",
+          "blocked_reason",
+          "lifecycle_state",
+          "execution_state",
+          "next_attempt_at",
+          "retry_count",
+          "max_retries",
+          "retry_blocked",
+          "force_eligible_once",
+          "updated_at",
+          "title",
+          "release_year",
+          "poster_url",
+          "category_text",
+          "douban_sort_time",
+          "attention_tags"
+        ],
+        "properties": {
+          "subject_id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "inactive_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "last_seen_snapshot_id": {
+            "type": ["string", "null"]
+          },
+          "media_kind": {
+            "$ref": "#/components/schemas/SubscriptionMediaKind"
+          },
+          "schedulable": {
+            "type": "boolean"
+          },
+          "blocked_reason": {
+            "type": ["string", "null"]
+          },
+          "lifecycle_state": {
+            "$ref": "#/components/schemas/SubscriptionLifecycleState"
+          },
+          "execution_state": {
+            "$ref": "#/components/schemas/SubscriptionExecutionState"
+          },
+          "next_attempt_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "retry_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_retries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry_blocked": {
+            "type": "boolean"
+          },
+          "force_eligible_once": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "release_year": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 9999
+          },
+          "poster_url": {
+            "type": "string"
+          },
+          "category_text": {
+            "type": ["string", "null"]
+          },
+          "douban_sort_time": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "attention_tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionAttentionTag"
+            }
+          }
+        }
+      },
+      "SubscriptionSummaryPageDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "next_cursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionSummaryDto"
+            }
+          },
+          "next_cursor": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "SubscriptionSourceDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "cover_url",
+          "original_title",
+          "aka",
+          "languages",
+          "countries",
+          "genres",
+          "directors",
+          "actors",
+          "date_published",
+          "duration",
+          "synopsis",
+          "rating_value",
+          "rating_count",
+          "tags",
+          "douban_date",
+          "douban_return_order"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": "string"
+          },
+          "original_title": {
+            "type": ["string", "null"]
+          },
+          "aka": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "countries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "directors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "actors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "date_published": {
+            "type": ["string", "null"]
+          },
+          "duration": {
+            "type": ["string", "null"]
+          },
+          "synopsis": {
+            "type": ["string", "null"]
+          },
+          "rating_value": {
+            "type": ["number", "null"]
+          },
+          "rating_count": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "douban_date": {
+            "type": ["string", "null"]
+          },
+          "douban_return_order": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        }
+      },
+      "SubscriptionObservationDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["created_at", "first_seen_at", "last_seen_at"],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "first_seen_at": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_seen_at": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SubscriptionIssueDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "owner",
+          "artifact_id",
+          "lane",
+          "season_number",
+          "episode_number",
+          "operation",
+          "error_type",
+          "message",
+          "occurred_at"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "enum": ["subscription", "download_artifact", "link_artifact", "tv_lane", "tv_episode"]
+          },
+          "artifact_id": {
+            "type": ["string", "null"]
+          },
+          "lane": {
+            "type": ["string", "null"],
+            "enum": ["search", "progress", "link", null]
+          },
+          "season_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "operation": {
+            "type": ["string", "null"]
+          },
+          "error_type": {
+            "type": ["string", "null"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        }
+      },
+      "SubscriptionCandidateDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "torrent_id",
+          "title",
+          "subtitle",
+          "source",
+          "size",
+          "seeders",
+          "leechers",
+          "uploaded_at",
+          "selected",
+          "matched_rule_name",
+          "matched_priority",
+          "matched_keywords",
+          "excluded_reason"
+        ],
+        "properties": {
+          "torrent_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "subtitle": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "size": {
+            "type": ["string", "null"]
+          },
+          "seeders": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "leechers": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "uploaded_at": {
+            "type": ["string", "null"]
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "matched_rule_name": {
+            "type": ["string", "null"]
+          },
+          "matched_priority": {
+            "type": ["integer", "null"]
+          },
+          "matched_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "excluded_reason": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "SubscriptionTvEpisodeDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["season_number", "episode_number", "label", "intent"],
+        "properties": {
+          "season_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "episode_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "label": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string",
+            "enum": ["target", "skipped"]
+          }
+        }
+      },
+      "SubscriptionTvDetailDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "season_number",
+          "episode_total",
+          "target_start_episode",
+          "target_end_episode",
+          "episodes"
+        ],
+        "properties": {
+          "season_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "episode_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target_start_episode": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target_end_episode": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionTvEpisodeDto"
+            }
+          }
+        }
+      },
+      "SubscriptionDownloadFileDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "size",
+          "progress",
+          "season_number",
+          "episode_number",
+          "episode_end_number",
+          "episode_label"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "progress": {
+            "type": "number",
+            "minimum": 0
+          },
+          "season_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_end_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_label": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "SubscriptionDownloadArtifactDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "torrent_id",
+          "torrent_title",
+          "qb_server_id",
+          "qb_server_name",
+          "qb_category",
+          "qb_save_dir_name",
+          "qb_hash",
+          "qb_name",
+          "qb_state",
+          "state",
+          "progress",
+          "total_size",
+          "files",
+          "pushed_at",
+          "checked_at",
+          "completed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "torrent_id": {
+            "type": "string"
+          },
+          "torrent_title": {
+            "type": "string"
+          },
+          "qb_server_id": {
+            "type": "string"
+          },
+          "qb_server_name": {
+            "type": ["string", "null"]
+          },
+          "qb_category": {
+            "type": "string"
+          },
+          "qb_save_dir_name": {
+            "type": "string"
+          },
+          "qb_hash": {
+            "type": ["string", "null"]
+          },
+          "qb_name": {
+            "type": ["string", "null"]
+          },
+          "qb_state": {
+            "type": ["string", "null"]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pushed",
+              "downloading",
+              "downloaded",
+              "missing",
+              "failed",
+              "ignored",
+              "superseded"
+            ]
+          },
+          "progress": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "total_size": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionDownloadFileDto"
+            }
+          },
+          "pushed_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "checked_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "completed_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        }
+      },
+      "SubscriptionLinkFileDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_path",
+          "target_path",
+          "size",
+          "outcome",
+          "season_number",
+          "episode_number",
+          "episode_end_number",
+          "episode_label",
+          "error"
+        ],
+        "properties": {
+          "source_path": {
+            "type": "string"
+          },
+          "target_path": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["pending", "linked", "failed", "missing", "conflict"]
+          },
+          "season_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_end_number": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "episode_label": {
+            "type": ["string", "null"]
+          },
+          "error": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "SubscriptionLinkArtifactDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "download_artifact_id",
+          "state",
+          "source_path",
+          "target_dir",
+          "checked_at",
+          "completed_at",
+          "files"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "download_artifact_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["planned", "partial", "completed", "failed"]
+          },
+          "source_path": {
+            "type": ["string", "null"]
+          },
+          "target_dir": {
+            "type": ["string", "null"]
+          },
+          "checked_at": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completed_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionLinkFileDto"
+            }
+          }
+        }
+      },
+      "SubscriptionDetailDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "source",
+          "observation",
+          "issues",
+          "skip_reason",
+          "candidates",
+          "tv",
+          "downloads",
+          "links"
+        ],
+        "properties": {
+          "summary": {
+            "$ref": "#/components/schemas/SubscriptionSummaryDto"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SubscriptionSourceDto"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/SubscriptionObservationDto"
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionIssueDto"
+            }
+          },
+          "skip_reason": {
+            "type": ["string", "null"]
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionCandidateDto"
+            }
+          },
+          "tv": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SubscriptionTvDetailDto"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "downloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionDownloadArtifactDto"
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionLinkArtifactDto"
+            }
+          }
+        }
+      },
+      "OperationLogEntryDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "created_at",
+          "category",
+          "action",
+          "target_type",
+          "target_id",
+          "target_title",
+          "status",
+          "summary",
+          "error",
+          "related"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "category": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": ["string", "null"]
+          },
+          "target_title": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "error": {
+            "type": ["string", "null"]
+          },
+          "related": {
+            "$ref": "#/components/schemas/OperationLogRelatedDto"
+          }
+        }
+      },
+      "OperationLogRelatedFieldDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "value"],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "OperationLogRuleEvaluationDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule_name",
+          "matched",
+          "matched_keywords",
+          "missing_keywords",
+          "excluded_reason"
+        ],
+        "properties": {
+          "rule_name": {
+            "type": "string"
+          },
+          "matched": {
+            "type": "boolean"
+          },
+          "matched_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "missing_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "excluded_reason": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "OperationLogTorrentMatchDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "torrent_id",
+          "seeders",
+          "leechers",
+          "size",
+          "uploaded_at",
+          "matched_keywords",
+          "rule_evaluations"
+        ],
+        "properties": {
+          "torrent_id": {
+            "type": "string"
+          },
+          "seeders": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "leechers": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "size": {
+            "type": ["string", "null"]
+          },
+          "uploaded_at": {
+            "type": ["string", "null"]
+          },
+          "matched_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rule_evaluations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperationLogRuleEvaluationDto"
+            }
+          }
+        }
+      },
+      "OperationLogRelatedDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fields", "torrent_matches"],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperationLogRelatedFieldDto"
+            }
+          },
+          "torrent_matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperationLogTorrentMatchDto"
+            }
+          }
+        }
+      },
+      "OperationLogPageDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "page", "page_size", "total", "has_more"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperationLogEntryDto"
+            }
+          },
+          "page": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TmdbSearchResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["movies", "tv"],
+        "properties": {
+          "movies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TmdbSearchItemDto"
+            }
+          },
+          "tv": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TmdbSearchItemDto"
+            }
+          }
+        }
+      },
+      "DoubanRatingDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value", "count", "info", "star_count"],
+        "properties": {
+          "value": {
+            "type": ["number", "null"]
+          },
+          "count": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "info": {
+            "type": "string"
+          },
+          "star_count": {
+            "type": ["number", "null"]
+          }
+        }
+      },
+      "DoubanSearchItemDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "media_type",
+          "id",
+          "subject_id",
+          "title",
+          "url",
+          "abstract_text",
+          "abstract_2",
+          "cover_url",
+          "poster_url",
+          "rating",
+          "vote_average"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "const": "douban"
+          },
+          "media_type": {
+            "type": "string",
+            "const": "douban"
+          },
+          "id": {
+            "type": "string"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "abstract_text": {
+            "type": "string"
+          },
+          "abstract_2": {
+            "type": "string"
+          },
+          "cover_url": {
+            "type": "string"
+          },
+          "poster_url": {
+            "type": "string"
+          },
+          "rating": {
+            "$ref": "#/components/schemas/DoubanRatingDto"
+          },
+          "vote_average": {
+            "type": ["number", "null"]
+          }
+        }
+      },
+      "DoubanSearchResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "page", "page_size", "has_more"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoubanSearchItemDto"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DoubanSubjectDetailDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "media_type",
+          "id",
+          "subject_id",
+          "url",
+          "title",
+          "image",
+          "poster_url",
+          "directors",
+          "writers",
+          "actors",
+          "genres",
+          "date_published",
+          "duration",
+          "summary",
+          "rating"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "const": "douban"
+          },
+          "media_type": {
+            "type": "string",
+            "const": "douban"
+          },
+          "id": {
+            "type": "string"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "original_title": {
+            "type": "string"
+          },
+          "aka": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "countries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "image": {
+            "type": "string"
+          },
+          "poster_url": {
+            "type": "string"
+          },
+          "directors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "writers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "actors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "date_published": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "rating": {
+            "$ref": "#/components/schemas/DoubanRatingDto"
+          },
+          "user_interest": {
+            "type": "string",
+            "enum": ["wish", "collect"]
+          },
+          "user_rating": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          }
+        }
+      },
+      "DoubanInterestRequestDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["interest"],
+        "properties": {
+          "interest": {
+            "type": "string",
+            "enum": ["wish", "collect"]
+          },
+          "rating": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 5
+          },
+          "tags": {
+            "type": "string"
+          }
+        }
+      },
+      "DoubanInterestResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ok", "interest", "rating", "tags"],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "interest": {
+            "type": "string",
+            "enum": ["wish", "collect"]
+          },
+          "rating": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 5
+          },
+          "tags": {
+            "type": "string"
+          }
+        }
+      },
+      "DoubanSnapshotCompleteness": {
+        "type": "string",
+        "enum": ["complete", "partial"]
+      },
+      "DoubanLibraryItemDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "media_type",
+          "id",
+          "subject_id",
+          "title",
+          "url",
+          "abstract_text",
+          "abstract_2",
+          "cover_url",
+          "poster_url",
+          "status",
+          "status_label",
+          "date",
+          "comment",
+          "tags",
+          "user_rating"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "const": "douban"
+          },
+          "media_type": {
+            "type": "string",
+            "const": "douban"
+          },
+          "id": {
+            "type": "string"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "abstract_text": {
+            "type": "string"
+          },
+          "abstract_2": {
+            "type": "string"
+          },
+          "cover_url": {
+            "type": "string"
+          },
+          "poster_url": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["wish", "collect"]
+          },
+          "status_label": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "user_rating": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 5
+          }
+        }
+      },
+      "DoubanLibraryListDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "label",
+          "items",
+          "completeness",
+          "fetched_pages",
+          "truncated_by_limit",
+          "end_observed"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["wish", "collect"]
+          },
+          "label": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoubanLibraryItemDto"
+            }
+          },
+          "completeness": {
+            "$ref": "#/components/schemas/DoubanSnapshotCompleteness"
+          },
+          "fetched_pages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated_by_limit": {
+            "type": "boolean"
+          },
+          "end_observed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DoubanLibraryResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "cached", "fetched_at", "ttl_seconds", "limit", "wish", "collect"],
+        "properties": {
+          "source": {
+            "type": "string",
+            "const": "douban"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "fetched_at": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1200
+          },
+          "wish": {
+            "$ref": "#/components/schemas/DoubanLibraryListDto"
+          },
+          "collect": {
+            "$ref": "#/components/schemas/DoubanLibraryListDto"
+          }
+        }
+      },
+      "DoubanTagCountDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tag", "count", "category"],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "category": {
+            "type": "string"
+          }
+        }
+      },
+      "DoubanTagCategoryDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "wanted_tag"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "wanted_tag": {
+            "type": "string"
+          }
+        }
+      },
+      "DoubanTagHistoryResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "cached",
+          "updated_at",
+          "tags",
+          "tag_counts",
+          "subscription_categories"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tag_counts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoubanTagCountDto"
+            }
+          },
+          "subscription_categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoubanTagCategoryDto"
+            }
+          }
+        }
+      },
+      "DoubanQrStartResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "image_url"],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          }
+        }
+      },
+      "DoubanQrPollResponseDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["done", "login_status", "message", "description", "cookie_saved"],
+        "properties": {
+          "done": {
+            "type": "boolean"
+          },
+          "login_status": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "cookie_saved": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiErrorDto": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message"],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,16 +1,31 @@
 # 默认在「启动进程时的当前工作目录」读写 config.toml，
 # TMDB 磁盘缓存为「当前目录下的 cache/tmdb/」。
 # 豆瓣想看/看过缓存为「当前目录下的 cache/douban/」。
-# 订阅状态 SQLite 数据库默认为「当前目录下的 cache/subscriptions/wanted.sqlite」。
+# 订阅状态 SQLite 数据库默认为「当前目录下的 cache/subscriptions/subscriptions.sqlite」；
+# 容器镜像显式设置为 /data/state/subscriptions.sqlite。旧 wanted.sqlite 会被完全忽略。
 # 固定路径可使用环境变量：CONFIG_PATH、TMDB_CACHE_DIR、DOUBAN_CACHE_DIR、SUBSCRIPTION_STATE_DIR。
 # 缓存 TTL 可使用环境变量：TMDB_CACHE_TTL_SECS、DOUBAN_CACHE_TTL_SECS。
-# 服务监听地址，修改后需重启生效。
-listen_ip = "0.0.0.0"
+# housekeeping 可使用：CACHE_CLEANUP_INTERVAL_SECS、OPERATION_LOG_RETENTION_DAYS、
+# OPERATION_LOG_MAX_ROWS_PER_ACCOUNT；值为 0 可关闭对应周期/限制。
+# Execution worker 可使用：EXECUTION_LEASE_TTL_SECS、EXECUTION_BATCH_SIZE、
+# EXECUTION_CONCURRENCY、EXECUTION_IDLE_INTERVAL_SECS、EXECUTION_JITTER_SECS、
+# FILESYSTEM_EFFECT_CONCURRENCY。
+# 服务监听地址，修改后需重启生效。新安装默认只监听本机；如需扩大暴露范围请显式修改。
+# 已有配置中的 0.0.0.0 不会被静默改写，但未配置有效管理 token 时服务会拒绝启动。
+listen_ip = "127.0.0.1"
 listen_port = 8787
 
 tmdb_api_key = ""
 mteam_api_key = ""
 douban_cookie = ""
+
+# 管理面安全。admin_token 非空时至少 24 字符；非 loopback 监听必须配置。
+# allowed_origins 只填写需要跨 origin 访问 API 的精确 http(s) origin；同源部署保持空数组。
+# HTTPS 部署应开启 secure_cookie；直接使用本地 HTTP 时保持 false。
+[management]
+admin_token = ""
+allowed_origins = []
+secure_cookie = false
 
 # qBittorrent，可有多台；保存后写入 [[qb_servers]] 表数组。
 # [[qb_servers]]
@@ -30,8 +45,12 @@ douban_cookie = ""
 # download_dir = "/downloads/movies"
 # link_target_dir = "/media/movies"
 
-# 想看订阅监听。首次启用默认只建档并跳过已有想看，之后新出现的想看条目进入未处理队列。
+# 想看订阅监听。新安装默认关闭并保持 dry-run；首次启用时 API/UI 要求显式确认。
+# dry-run 只轮询并刷新订阅记录，不 claim Execution，也不请求下载 token、推送 qB 或创建硬链接。
+# 验证分类、qB 和目录配置后，才同时设置 enabled = true、dry_run = false 进入实时模式。
 [subscription_watcher]
+enabled = false
+dry_run = true
 poll_interval_secs = 3600
 library_limit = 200
 max_retries = 3

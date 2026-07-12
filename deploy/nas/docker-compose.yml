@@ -1,16 +1,29 @@
 services:
   tmdb-mteam-hub:
-    image: ghcr.io/zegwe/tmdb-mteam-hub:latest
+    image: ghcr.io/zegwe/tmdb-mteam-hub:${TMDB_MTEAM_HUB_TAG:-latest}
     container_name: tmdb-mteam-hub
     restart: unless-stopped
+    user: "${PUID:-0}:${PGID:-0}"
     ports:
-      - "8787:8787"
+      - "${HOST_BIND_IP:-127.0.0.1}:8787:8787"
     environment:
       CONFIG_PATH: /data/config/config.toml
       TMDB_CACHE_DIR: /data/cache/tmdb
       DOUBAN_CACHE_DIR: /data/cache/douban
-      SUBSCRIPTION_STATE_DIR: /data/cache/subscriptions
+      SUBSCRIPTION_STATE_DIR: /data/state
+      HEALTHCHECK_URL: "${HEALTHCHECK_URL:-http://127.0.0.1:8787/healthz}"
+      CACHE_CLEANUP_INTERVAL_SECS: "${CACHE_CLEANUP_INTERVAL_SECS:-21600}"
+      OPERATION_LOG_RETENTION_DAYS: "${OPERATION_LOG_RETENTION_DAYS:-90}"
+      OPERATION_LOG_MAX_ROWS_PER_ACCOUNT: "${OPERATION_LOG_MAX_ROWS_PER_ACCOUNT:-10000}"
       RUST_LOG: tmdb_mteam_server=info,tower_http=info
     volumes:
       - ./config:/data/config
-      - ./cache:/data/cache
+      - ./state:/data/state
+      - ./cache/tmdb:/data/cache/tmdb
+      - ./cache/douban:/data/cache/douban
+      - "${MEDIA_ROOT:-/volume1/media}:/srv/media"
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-3}"

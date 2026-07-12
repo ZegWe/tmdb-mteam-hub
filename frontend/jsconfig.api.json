@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/shared/api/auth-session.js",
+    "src/shared/api/client.js",
+    "src/shared/api/contracts.js",
+    "src/shared/api/contracts.typecheck.js",
+    "src/shared/api/endpoints/logs.js",
+    "src/shared/api/endpoints/search.js",
+    "src/shared/api/endpoints/subscriptions.js"
+  ]
+}

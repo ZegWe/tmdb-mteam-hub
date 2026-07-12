@@ -1,4 +1,16 @@
+---
+status: implemented
+owner: tmdb-mteam-hub
+last_verified: 2026-07-11
+implementation_plan: docs/superpowers/plans/2026-07-07-subscription-cover-cards.md
+related_adr: docs/adr/0002-subscription-state-convergence.md
+---
+
 # Subscription Cover Cards Design
+
+> Historical behavior design: cover-card behavior remains current, while references below to the old
+> backend record/store have been superseded by the latest-only architecture in the
+> [architecture convergence PRD](./2026-07-11-project-architecture-convergence-prd.md).
 
 ## Goal
 

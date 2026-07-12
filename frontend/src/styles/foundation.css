@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+[data-theme="mediahub"] {
+  color-scheme: light;
+}
+
+[data-theme="mediahub-dark"] {
+  color-scheme: dark;
+}
+
+:root,
+[data-theme] {
+  --background: var(--app-background);
+  --foreground: var(--app-foreground);
+  --card: var(--app-card);
+  --card-foreground: var(--app-card-foreground);
+  --popover: var(--app-popover);
+  --popover-foreground: var(--app-popover-foreground);
+  --primary: var(--app-primary);
+  --primary-foreground: var(--app-primary-foreground);
+  --secondary: var(--app-secondary);
+  --secondary-foreground: var(--app-secondary-foreground);
+  --muted-bg: var(--app-muted-bg);
+  --muted-foreground: var(--app-muted-foreground);
+  --accent-bg: var(--app-accent-bg);
+  --accent-foreground: var(--app-accent-foreground);
+  --destructive: var(--app-destructive);
+  --destructive-foreground: var(--app-destructive-foreground);
+  --border: var(--app-border);
+  --input: var(--app-input);
+  --ring: var(--app-ring);
+  --success: var(--app-success);
+  --warning: var(--app-warning);
+  --info: var(--app-info);
+  --radius: 8px;
+  --shadow-sm: var(--app-shadow-sm);
+  --shadow-md: var(--app-shadow-md);
+  --bg: var(--background);
+  --surface: var(--card);
+  --text: var(--foreground);
+  --muted: var(--muted-foreground);
+  --accent: var(--ring);
+  --accent-dim: var(--app-accent-dim);
+  --danger: var(--destructive);
+  font-family:
+    Inter,
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}

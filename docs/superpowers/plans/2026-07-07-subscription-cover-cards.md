@@ -1,4 +1,17 @@
+---
+status: implemented
+owner: tmdb-mteam-hub
+last_verified: 2026-07-11
+spec: docs/superpowers/specs/2026-07-07-subscription-cover-cards-design.md
+related_adr: docs/adr/0002-subscription-state-convergence.md
+---
+
 # Subscription Cover Cards Implementation Plan
+
+> Historical implementation record: the card behavior remains implemented, but the
+> `WantedSubscriptionRecord`/`src/subscription.rs` storage references below describe the original
+> implementation. Current persistence is the latest-only `subscriptions.sqlite` repository defined by
+> the [architecture convergence PRD](../specs/2026-07-11-project-architecture-convergence-prd.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -1,3 +1,10 @@
+---
+status: implemented
+owner: tmdb-mteam-hub
+last_verified: 2026-07-11
+related_adr: docs/adr/0001-standalone-detail-routes.md
+---
+
 # Standalone Detail Page Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

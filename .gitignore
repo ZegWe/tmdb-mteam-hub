@@ -2,5 +2,7 @@
 /cache/
 node_modules/
 static/
+playwright-report/
+test-results/
 config.toml
 *.toml.tmp
