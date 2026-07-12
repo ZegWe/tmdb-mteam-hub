@@ -43,6 +43,7 @@ start_container() {
   local deployment_root="$2"
 
   docker run --detach --name "$container" \
+    --user "$(id -u):$(id -g)" \
     --publish 127.0.0.1::8787 \
     --volume "$deployment_root/config:/data/config" \
     --volume "$deployment_root/state:/data/state" \
