@@ -9,6 +9,9 @@ ARG OCI_CREATED=1970-01-01T00:00:00Z
 
 FROM node:${NODE_VERSION}-bookworm-slim AS frontend
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend ./frontend

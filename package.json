@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vp dev",
-    "build": "vite build",
+    "build": "vp build",
     "check": "vp check",
     "preview": "vp preview",
     "test": "vp test run",
