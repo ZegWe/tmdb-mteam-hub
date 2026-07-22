@@ -3459,6 +3459,9 @@
           "title": {
             "type": "string"
           },
+          "imdb_id": {
+            "type": "string"
+          },
           "original_title": {
             "type": "string"
           },

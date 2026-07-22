@@ -371,6 +371,8 @@ pub(crate) struct DoubanSubjectDetailDto {
     subject_id: String,
     url: String,
     title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    imdb_id: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     original_title: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -404,6 +406,7 @@ impl From<DoubanSubjectDetail> for DoubanSubjectDetailDto {
             subject_id: value.subject_id,
             url: value.url,
             title: value.title,
+            imdb_id: value.imdb_id,
             original_title: value.original_title,
             aka: value.aka,
             languages: value.languages,
@@ -532,6 +535,7 @@ mod tests {
             subject_id: "1292052".to_string(),
             url: "https://movie.douban.com/subject/1292052/".to_string(),
             title: "肖申克的救赎".to_string(),
+            imdb_id: None,
             original_title: String::new(),
             aka: Vec::new(),
             languages: Vec::new(),
@@ -552,6 +556,7 @@ mod tests {
         .unwrap();
 
         assert!(value.get("original_title").is_none());
+        assert!(value.get("imdb_id").is_none());
         assert!(value.get("aka").is_none());
         assert!(value.get("user_interest").is_none());
         assert!(value.get("user_rating").is_none());

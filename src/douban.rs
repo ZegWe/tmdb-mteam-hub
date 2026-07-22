@@ -134,6 +134,8 @@ pub struct DoubanSubjectDetail {
     pub subject_id: String,
     pub url: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imdb_id: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub original_title: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -590,6 +592,9 @@ pub async fn subject_detail(
         if let Ok(html) =
             fetch_html(client, &subject_url(&subject_id), &cookie, MOVIE_BASE_URL).await
         {
+            if detail.imdb_id.is_none() {
+                detail.imdb_id = imdb_id_from_text(&html);
+            }
             let (user_interest, user_rating) = subject_user_interest_from_html(&html);
             if user_interest.is_some() {
                 detail.user_interest = user_interest;
@@ -725,6 +730,7 @@ fn subject_detail_from_rexxar_json(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| subject_url(subject_id)),
         title,
+        imdb_id: imdb_id_from_value(data),
         original_title: value_to_string(data.get("original_title")).unwrap_or_default(),
         aka: string_list(data.get("aka")),
         languages: string_list(data.get("languages")),
@@ -745,6 +751,34 @@ fn subject_detail_from_rexxar_json(
         user_interest,
         user_rating,
     })
+}
+
+fn imdb_id_from_value(data: &Value) -> Option<String> {
+    ["imdb_id", "imdb"]
+        .into_iter()
+        .filter_map(|key| value_to_string(data.get(key)))
+        .find_map(|value| imdb_id_from_text(&value))
+}
+
+fn imdb_id_from_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.len() >= 7 && trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(format!("tt{trimmed}"));
+    }
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len().saturating_sub(2) {
+        if bytes[index].eq_ignore_ascii_case(&b't') && bytes[index + 1].eq_ignore_ascii_case(&b't')
+        {
+            let digits = bytes[index + 2..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits >= 7 {
+                return Some(format!("tt{}", &text[index + 2..index + 2 + digits]));
+            }
+        }
+    }
+    None
 }
 
 pub async fn library(
@@ -1971,6 +2005,7 @@ mod tests {
             "id": "1292052",
             "title": "肖申克的救赎",
             "original_title": "The Shawshank Redemption",
+            "imdb_id": "tt0111161",
             "aka": ["月黑高飞(港)", "刺激1995(台)"],
             "url": "https://movie.douban.com/subject/1292052/",
             "cover_url": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p480747492.jpg",
@@ -1993,6 +2028,7 @@ mod tests {
 
         assert_eq!(detail.title, "肖申克的救赎");
         assert_eq!(detail.original_title, "The Shawshank Redemption");
+        assert_eq!(detail.imdb_id.as_deref(), Some("tt0111161"));
         assert_eq!(detail.aka, vec!["月黑高飞(港)", "刺激1995(台)"]);
         assert_eq!(detail.languages, vec!["英语"]);
         assert_eq!(detail.countries, vec!["美国"]);
@@ -2007,6 +2043,18 @@ mod tests {
         assert_eq!(detail.rating.count, Some(3300949));
         assert_eq!(detail.rating.star_count, Some(5.0));
         assert!(detail.poster_url.starts_with("/api/douban/image?url="));
+    }
+
+    #[test]
+    fn imdb_id_can_be_read_from_douban_html_or_numeric_json_value() {
+        assert_eq!(
+            imdb_id_from_text("<span class=\"pl\">IMDb:</span> tt0111161<br>"),
+            Some("tt0111161".to_string())
+        );
+        assert_eq!(
+            imdb_id_from_value(&json!({ "imdb": "0111161" })),
+            Some("tt0111161".to_string())
+        );
     }
 
     #[test]

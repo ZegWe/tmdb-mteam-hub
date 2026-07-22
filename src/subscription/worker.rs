@@ -760,6 +760,7 @@ fn execution_policy(config: &FileConfig) -> ExecutionPolicy {
         dry_run: watcher.dry_run,
         account_key: douban::auth_cache_key_fragment(&config.douban_cookie).unwrap_or_default(),
         effects: ExecutionEffectPolicy {
+            douban_cookie: config.douban_cookie.clone(),
             mteam_api_key: config.mteam_api_key.clone(),
             qb_servers: config
                 .qb_servers

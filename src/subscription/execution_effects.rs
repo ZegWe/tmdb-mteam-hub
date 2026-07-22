@@ -31,22 +31,26 @@ use super::repository::{
     ClaimedSubscription, ExecutionOperation, ExecutionPayloadDelta, ExecutionScheduleDelay,
     FinishExecutionDisposition,
 };
+use crate::clients::douban::DoubanClient;
 use crate::clients::mteam::MteamClient;
 use crate::clients::qbittorrent::{self, QbTorrentFile, QbTorrentInfo};
 use crate::config::QbServerEntry;
 
 #[derive(Clone)]
 pub(crate) struct LatestSubscriptionExecutionEffects {
+    douban: DoubanClient,
     mteam: MteamClient,
     hardlinks: HardlinkEffectAdapter,
 }
 
 impl LatestSubscriptionExecutionEffects {
     pub(crate) fn try_production(
+        douban: DoubanClient,
         mteam: MteamClient,
         filesystem_concurrency: usize,
     ) -> Result<Self, crate::storage::blocking::BlockingExecutorConfigError> {
         Ok(Self {
+            douban,
             mteam,
             hardlinks: HardlinkEffectAdapter::try_new(filesystem_concurrency)?,
         })
@@ -115,6 +119,7 @@ impl LatestSubscriptionExecutionEffects {
             let candidates = match self
                 .search_candidates(
                     policy.mteam_api_key.trim(),
+                    &policy.douban_cookie,
                     &key.subject_id,
                     &payload.source.title,
                 )
@@ -549,6 +554,7 @@ impl LatestSubscriptionExecutionEffects {
     async fn search_candidates(
         &self,
         api_key: &str,
+        douban_cookie: &str,
         subject_id: &str,
         title: &str,
     ) -> Result<Vec<CandidatePayload>, String> {
@@ -566,6 +572,25 @@ impl LatestSubscriptionExecutionEffects {
                 &mut seen,
                 candidates_from_response(&response, "douban", subject_id),
             );
+        }
+        if should_try_imdb_fallback(&candidates, subject_id) {
+            if let Ok(detail) =
+                crate::douban::subject_detail(&self.douban, douban_cookie, subject_id.trim()).await
+            {
+                if let Some(imdb_id) = detail.imdb_id {
+                    let imdb_url = format!("https://www.imdb.com/title/{imdb_id}/");
+                    let response = self
+                        .mteam
+                        .search(api_key, &mteam_search_body("imdb", &imdb_url))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    append_candidates(
+                        &mut candidates,
+                        &mut seen,
+                        candidates_from_response(&response, "imdb", &imdb_id),
+                    );
+                }
+            }
         }
         if !title.trim().is_empty() {
             let response = self
@@ -588,6 +613,10 @@ impl LatestSubscriptionExecutionEffects {
         });
         Ok(candidates)
     }
+}
+
+fn should_try_imdb_fallback(candidates: &[CandidatePayload], subject_id: &str) -> bool {
+    candidates.is_empty() && !subject_id.trim().is_empty()
 }
 
 impl SubscriptionExecutionEffects for LatestSubscriptionExecutionEffects {
@@ -911,5 +940,15 @@ mod tests {
         assert_eq!(selected.candidate.torrent_id, "1");
         assert!(candidates[0].selected);
         assert!(!candidates[1].selected);
+    }
+
+    #[test]
+    fn imdb_fallback_runs_only_after_an_empty_douban_result() {
+        assert!(should_try_imdb_fallback(&[], "1292052"));
+        assert!(!should_try_imdb_fallback(
+            &[candidate("1", "Douban result", 1)],
+            "1292052"
+        ));
+        assert!(!should_try_imdb_fallback(&[], "  "));
     }
 }
