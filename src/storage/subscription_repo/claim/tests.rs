@@ -970,7 +970,7 @@ async fn due_collision_exhaustion_keeps_first_and_second_candidates_for_later_bo
 }
 
 #[tokio::test]
-async fn skipped_due_drift_and_corrupt_first_candidate_fail_closed_without_skipping() {
+async fn skipped_due_drift_is_ignored_without_blocking_a_later_valid_candidate() {
     for (label, mutation) in [
         (
             "tag-skip-drift",
@@ -982,12 +982,6 @@ async fn skipped_due_drift_and_corrupt_first_candidate_fail_closed_without_skipp
             "payload-skip-drift",
             r#"UPDATE wanted_subscription_records
                   SET record_json = json_set(record_json, '$.skip_reason', 'manual skip')
-                WHERE account_key = 'fixture_rows_only' AND subject_id = 'rows-movie-001'"#,
-        ),
-        (
-            "corrupt-payload",
-            r#"UPDATE wanted_subscription_records
-                  SET record_json = '{"unknown":true}'
                 WHERE account_key = 'fixture_rows_only' AND subject_id = 'rows-movie-001'"#,
         ),
     ] {
@@ -1016,18 +1010,23 @@ async fn skipped_due_drift_and_corrupt_first_candidate_fail_closed_without_skipp
             Arc::new(FixedClock::new(NOW)),
             Arc::clone(&attempt_ids),
         );
-        let error = repository
+        let claimed = repository
             .claim_due(claim_due_command())
             .await
-            .expect_err("first poison candidate must stop the scan");
-        assert!(matches!(error, RepositoryError::CorruptData { .. }));
-        assert_eq!(attempt_ids.calls(), 0);
+            .expect("skipped legacy drift must not poison the due scan")
+            .into_claim()
+            .expect("the later valid candidate must remain claimable");
         assert_eq!(
-            row_controls(&fixture.path, "later-valid").execution_state,
-            "idle",
-            "poison candidate must not be skipped"
+            claimed.detail().summary().head.key.subject_id,
+            "later-valid"
         );
-        assert!(audit_rows(&fixture.path).is_empty());
+        assert_eq!(attempt_ids.calls(), 1);
+        assert_eq!(
+            row_controls(&fixture.path, BASE_SUBJECT).execution_state,
+            "idle",
+            "the skipped legacy row must remain unclaimed"
+        );
+        assert_eq!(audit_rows(&fixture.path).len(), 1);
     }
 }
 

@@ -72,6 +72,12 @@ SELECT subject_id
    AND execution_state = 'idle'
    AND force_eligible_once = 0
    AND retry_blocked = 0
+   AND NOT EXISTS (
+       SELECT 1
+         FROM json_each(attention_tags_json) AS attention
+        WHERE attention.value = 'skipped'
+   )
+   AND json_extract(record_json, '$.skip_reason') IS NULL
    AND next_attempt_at IS NOT NULL
    AND next_attempt_at <= ?2
  ORDER BY next_attempt_at, updated_at, subject_id
