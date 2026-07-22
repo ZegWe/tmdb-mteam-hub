@@ -214,7 +214,10 @@ fn fetch_site(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn cookie_mutation_is_same_origin(headers: &HeaderMap) -> bool {
-    fetch_site(headers).is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
+    match fetch_site(headers) {
+        Some(value) => value.eq_ignore_ascii_case("same-origin"),
+        None => !headers.contains_key(header::ORIGIN),
+    }
 }
 
 fn bootstrap_mutation_is_cross_site(headers: &HeaderMap) -> bool {
@@ -526,7 +529,11 @@ mod tests {
             .expect("login cookie should contain a pair")
             .to_string();
 
-        for fetch_site in [None, Some("same-site"), Some("cross-site")] {
+        for (fetch_site, origin) in [
+            (Some("same-site"), None),
+            (Some("cross-site"), None),
+            (None, Some("https://untrusted.example")),
+        ] {
             let mut request = Request::builder()
                 .method(Method::PUT)
                 .uri("/config")
@@ -535,6 +542,9 @@ mod tests {
                 .extension(loopback_peer());
             if let Some(fetch_site) = fetch_site {
                 request = request.header(SEC_FETCH_SITE, fetch_site);
+            }
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
             }
             let response = app
                 .clone()
@@ -552,11 +562,12 @@ mod tests {
         }
 
         let same_origin = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
                     .uri("/config")
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(SEC_FETCH_SITE, "same-origin")
                     .extension(loopback_peer())
@@ -566,6 +577,21 @@ mod tests {
             .await
             .expect("call same-origin mutation");
         assert_eq!(same_origin.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let no_fetch_metadata = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/config")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(loopback_peer())
+                    .body(Body::from("{}"))
+                    .expect("build no-fetch-metadata mutation"),
+            )
+            .await
+            .expect("call no-fetch-metadata mutation");
+        assert_eq!(no_fetch_metadata.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
