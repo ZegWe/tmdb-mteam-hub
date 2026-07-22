@@ -57,10 +57,6 @@
 
 #settings-form input[type="checkbox"],
 #settings-form input[type="radio"] {
-  width: auto;
-  max-width: none;
-  margin-top: 0;
-  padding: 0;
   vertical-align: middle;
 }
 
@@ -198,6 +194,15 @@
 
 .qb-test-msg-error {
   color: var(--danger);
+}
+
+#settings-form .qb-insecure {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text);
+  font-size: 0.78rem;
 }
 
 #settings-form .qb-server-row .qb-insecure {
