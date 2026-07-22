@@ -213,10 +213,24 @@ fn fetch_site(headers: &HeaderMap) -> Option<&str> {
     headers.get(SEC_FETCH_SITE)?.to_str().ok()
 }
 
+fn origin_matches_host(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true; // no Origin header: non-browser client, allow
+    };
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false; // Origin present but no Host header: cannot verify, reject
+    };
+    let authority = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .unwrap_or(origin);
+    authority.eq_ignore_ascii_case(host)
+}
+
 fn cookie_mutation_is_same_origin(headers: &HeaderMap) -> bool {
     match fetch_site(headers) {
         Some(value) => value.eq_ignore_ascii_case("same-origin"),
-        None => !headers.contains_key(header::ORIGIN),
+        None => origin_matches_host(headers),
     }
 }
 
@@ -225,7 +239,7 @@ fn bootstrap_mutation_is_cross_site(headers: &HeaderMap) -> bool {
         Some(value) => {
             value.eq_ignore_ascii_case("same-site") || value.eq_ignore_ascii_case("cross-site")
         }
-        None => headers.contains_key(header::ORIGIN),
+        None => !origin_matches_host(headers),
     }
 }
 
