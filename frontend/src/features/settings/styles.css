@@ -23,7 +23,7 @@
   font-size: 0.88rem;
 }
 
-#settings-form input,
+#settings-form input:where(:not([type="checkbox"]):not([type="radio"])),
 #settings-form textarea,
 #settings-form select {
   width: 100%;
