@@ -738,8 +738,8 @@ describe("subscription lazy route pages", () => {
     const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
 
     expect(wrapper.text()).not.toContain("重试当前节点");
-    expect(wrapper.text()).not.toContain("重跑任务");
-    expect(wrapper.find(".subscription-detail .row-actions").exists()).toBe(false);
+    expect(wrapper.text()).toContain("重跑任务");
+    expect(wrapper.find(".subscription-detail .subscription-detail-actions").exists()).toBe(true);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "/api/config",
       "/api/subscriptions/wanted?limit=100",
@@ -747,7 +747,7 @@ describe("subscription lazy route pages", () => {
     ]);
   });
 
-  it("shows inactive, TV, and ordinary movie scheduling capabilities without item actions", async () => {
+  it("shows inactive, TV, and ordinary movie with simplified cards and detail retry button", async () => {
     const records = [
       subscriptionRecord({
         subject_id: "movie-1",
@@ -792,17 +792,20 @@ describe("subscription lazy route pages", () => {
     const card = (title) =>
       wrapper.findAll(".subscription-card").find((node) => node.text().includes(title));
 
-    expect(card("普通电影").text()).toContain("可调度");
-    expect(card("历史订阅").text()).toContain("已停用");
-    expect(card("历史订阅").text()).toContain("不可调度");
-    expect(card("未开放剧集").text()).toContain("TV 未开放");
-    expect(card("未开放剧集").text()).toContain("不可调度");
+    // Cards should show title and year but NOT capability badges
+    expect(card("普通电影").text()).toContain("普通电影");
+    expect(card("普通电影").text()).not.toContain("可调度");
+    expect(card("历史订阅").text()).toContain("历史订阅");
+    expect(card("历史订阅").text()).not.toContain("已停用");
+    expect(card("历史订阅").text()).not.toContain("不可调度");
+    expect(card("未开放剧集").text()).toContain("未开放剧集");
+    expect(card("未开放剧集").text()).not.toContain("TV 未开放");
 
     await router.push({ name: "subscription-detail", params: { id: "inactive-1" } });
     await flushPromises();
     await vi.waitFor(() => expect(wrapper.get(".subscription-detail h3").text()).toBe("历史订阅"));
     expect(wrapper.get("#subscription-capability-note").text()).toContain("仅保留历史记录");
-    expect(wrapper.find(".subscription-detail .row-actions").exists()).toBe(false);
+    expect(wrapper.find(".subscription-detail .subscription-detail-actions").exists()).toBe(true);
 
     await router.push({ name: "subscription-detail", params: { id: "tv-1" } });
     await flushPromises();
@@ -812,12 +815,12 @@ describe("subscription lazy route pages", () => {
     expect(wrapper.get("#subscription-capability-note").text()).toContain(
       "不会执行搜索、下载或硬链接",
     );
-    expect(wrapper.find(".subscription-detail .row-actions").exists()).toBe(false);
+    expect(wrapper.find(".subscription-detail .subscription-detail-actions").exists()).toBe(true);
 
     await router.push({ name: "subscription-detail", params: { id: "movie-1" } });
     await flushPromises();
     await vi.waitFor(() => expect(wrapper.get(".subscription-detail h3").text()).toBe("普通电影"));
     expect(wrapper.get("#subscription-capability-note").text()).toContain("后台任务调度");
-    expect(wrapper.find(".subscription-detail .row-actions").exists()).toBe(false);
+    expect(wrapper.find(".subscription-detail .subscription-detail-actions").exists()).toBe(true);
   });
 });

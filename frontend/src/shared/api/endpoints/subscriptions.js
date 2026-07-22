@@ -504,3 +504,23 @@ export function pollWantedSubscriptions({ client = defaultApiClient, ...requestO
     body: {},
   });
 }
+
+/**
+ * @param {unknown} id
+ * @param {SubscriptionRequestOptions} [options]
+ * @returns {Promise<import("../contracts.js").SubscriptionSummaryDto>}
+ */
+export async function retrySubscription(
+  id,
+  { client = defaultApiClient, ...requestOptions } = {},
+) {
+  const subjectId = requestedSubscriptionId(id);
+  const signal = requestOptions.signal;
+  throwIfAborted(signal);
+  const response = await client.request(
+    `/api/subscriptions/wanted/${encodeURIComponent(subjectId)}/retry`,
+    { ...requestOptions, method: "POST", body: {} },
+  );
+  throwIfAborted(signal);
+  return normalizeSubscriptionSummaryRecord(response);
+}

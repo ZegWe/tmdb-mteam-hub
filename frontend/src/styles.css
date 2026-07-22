@@ -222,6 +222,18 @@
   flex: 0 0 auto;
 }
 
+.settings-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-top .actions {
+  margin-top: 0;
+  flex: 0 0 auto;
+}
+
 .detail-body {
   width: min(1180px, 100%);
   min-width: 0;

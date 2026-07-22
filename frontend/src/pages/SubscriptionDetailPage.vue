@@ -17,7 +17,12 @@
         <p>加载详情…</p>
       </div>
       <p v-else-if="detailError" class="empty-hint">加载失败：{{ detailError }}</p>
-      <SubscriptionDetailView v-else-if="selectedDetail" :selected-subscription="selectedDetail" />
+      <SubscriptionDetailView
+        v-else-if="selectedDetail"
+        :selected-subscription="selectedDetail"
+        :retrying="retryLoading"
+        @retry="retrySubscription"
+      />
     </div>
   </section>
 </template>
@@ -30,6 +35,7 @@ import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notificati
 import SubscriptionDetailView from "../components/SubscriptionDetailView.vue";
 import SubscriptionWatcherBanner from "../features/subscriptions/SubscriptionWatcherBanner.vue";
 import { SUBSCRIPTION_CONTEXT_KEY } from "../features/subscriptions/context.js";
+import { retrySubscription as retrySubscriptionApi } from "../shared/api/endpoints/subscriptions.js";
 
 const subscriptionContext = inject(SUBSCRIPTION_CONTEXT_KEY, null);
 if (!subscriptionContext) {
@@ -58,6 +64,7 @@ const detailLoading = computed(
     routeSyncLoading.value ||
     (activeDetailId ? subscriptionStore.isDetailLoading(activeDetailId) : false),
 );
+const retryLoading = ref(false);
 
 onMounted(() => {
   mounted = true;
@@ -188,6 +195,19 @@ function isMissingSubscription(error) {
 
 function isRequestAbort(error) {
   return error?.name === "AbortError" || error?.code === "request_aborted";
+}
+
+async function retrySubscription(subjectId) {
+  notifications.clearError();
+  try {
+    await retrySubscriptionApi(subjectId);
+    await subscriptionStore.loadDetail(subjectId, { force: true });
+    notifications.showToast("已重置订阅任务，将在下次调度时重新处理", "ok");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    notifications.showError(`重跑失败：${message}`);
+    notifications.showToast(`重跑失败：${message}`, "err");
+  }
 }
 
 function returnToSubscriptions() {

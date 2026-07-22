@@ -1,8 +1,21 @@
 <template>
   <section id="page-settings" class="app-page is-active">
     <header class="top settings-top">
-      <h1>设置</h1>
-      <p class="sub">API、自动订阅、豆瓣登录与 qBittorrent</p>
+      <div>
+        <h1>设置</h1>
+        <p class="sub">API、自动订阅、豆瓣登录与 qBittorrent</p>
+      </div>
+      <div class="actions">
+        <button
+          v-if="authContext?.canLogout?.value"
+          type="button"
+          class="btn btn-ghost"
+          :disabled="authContext?.logoutLoading?.value"
+          @click="authContext.logout()"
+        >
+          {{ authContext?.logoutLoading?.value ? "退出中…" : "退出登录" }}
+        </button>
+      </div>
     </header>
 
     <form id="settings-form" class="settings-page-form" @submit.prevent="saveSettings">
@@ -431,6 +444,7 @@
 
 <script setup>
 import { inject, onBeforeUnmount, onMounted } from "vue";
+import { AUTH_CONTEXT_KEY } from "../app/auth-context.js";
 import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notifications.js";
 import { qbServerOptionLabel } from "../features/settings/form-model.js";
 import { SETTINGS_STORE_KEY } from "../features/settings/store.js";
@@ -439,6 +453,7 @@ const settingsStore = inject(SETTINGS_STORE_KEY, null);
 if (!settingsStore) throw new Error("SettingsPage requires a provided settings store");
 
 const notifications = inject(APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS);
+const authContext = inject(AUTH_CONTEXT_KEY, null);
 const settings = settingsStore.form;
 const secretPresence = settingsStore.secretPresence;
 const clearSecrets = settingsStore.clearSecrets;

@@ -23,8 +23,7 @@ describe("SubscriptionCard", () => {
     {
       label: "schedulable movie",
       value: record(),
-      badges: ["可调度"],
-      toneClass: "badge-success",
+      expectedStatus: "待处理",
     },
     {
       label: "inactive history",
@@ -34,9 +33,9 @@ describe("SubscriptionCard", () => {
         active: false,
         schedulable: false,
         blocked_reason: "subscription_inactive",
+        lifecycle_state: "completed",
       }),
-      badges: ["已停用", "不可调度"],
-      toneClass: "badge-ghost",
+      expectedStatus: "已完成",
     },
     {
       label: "unsupported TV",
@@ -46,29 +45,24 @@ describe("SubscriptionCard", () => {
         media_kind: "tv",
         schedulable: false,
         blocked_reason: "tv_not_supported",
+        lifecycle_state: "downloading",
       }),
-      badges: ["TV 未开放", "不可调度"],
-      toneClass: "badge-warning",
+      expectedStatus: "下载中",
     },
-    {
-      label: "backend blocked movie",
-      value: record({
-        subject_id: "blocked-1",
-        title: "后端阻止电影",
-        schedulable: false,
-        blocked_reason: "manual_hold",
-      }),
-      badges: ["自动处理受限：manual hold", "不可调度"],
-      toneClass: "badge-error",
-    },
-  ])("renders $label badges from the subscription domain", ({ value, badges, toneClass }) => {
+  ])("renders $label with title, year, image, and status badge only", ({ value, expectedStatus }) => {
     const wrapper = mount(SubscriptionCard, { props: { record: value } });
 
     expect(wrapper.get(".title").text()).toBe(value.title);
-    expect(wrapper.get(".subtle").text()).toBe("2026");
+    expect(wrapper.get(".subtle").text()).toBe(String(value.release_year || value.subject_id));
     expect(wrapper.get("img").attributes("src")).toBe("https://example.test/poster.jpg");
-    for (const badge of badges) expect(wrapper.text()).toContain(badge);
-    expect(wrapper.find(`.${toneClass}`).exists()).toBe(true);
+    expect(wrapper.get(".subscription-status").text()).toBe(expectedStatus);
+
+    // No capability badges on cards
+    const cardText = wrapper.text();
+    expect(cardText).not.toContain("可调度");
+    expect(cardText).not.toContain("不可调度");
+    expect(cardText).not.toContain("已停用");
+    expect(cardText).not.toContain("TV 未开放");
   });
 
   it("emits one semantic open intent for click and keyboard activation", async () => {

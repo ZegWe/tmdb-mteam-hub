@@ -51,20 +51,11 @@
     </p>
     <App />
     <p v-if="error" class="auth-session-error" role="alert">{{ error }}</p>
-    <button
-      v-if="canLogout"
-      type="button"
-      class="auth-logout btn btn-ghost"
-      :disabled="logoutLoading"
-      @click="logout"
-    >
-      {{ logoutLoading ? "退出中…" : "退出登录" }}
-    </button>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
 import App from "../App.vue";
 import {
   getAuthStatus,
@@ -72,6 +63,7 @@ import {
   logoutAuthSession,
 } from "../shared/api/endpoints/auth.js";
 import { AUTH_SESSION_CHANGED_EVENT } from "../shared/api/auth-session.js";
+import { AUTH_CONTEXT_KEY } from "./auth-context.js";
 
 const authStatus = ref(null);
 const checkingStatus = ref(true);
@@ -86,6 +78,12 @@ const authenticated = computed(() => authStatus.value?.authenticated === true);
 const canLogout = computed(
   () => authenticated.value && authStatus.value?.token_configured === true,
 );
+
+provide(AUTH_CONTEXT_KEY, Object.freeze({
+  canLogout,
+  logoutLoading,
+  logout,
+}));
 
 onMounted(() => {
   globalThis.addEventListener?.(AUTH_SESSION_CHANGED_EVENT, handleAuthSessionChanged);
@@ -286,11 +284,6 @@ async function logout() {
 @media (max-width: 640px) {
   .auth-card {
     padding: 1.1rem;
-  }
-
-  .auth-logout {
-    top: 0.55rem;
-    right: 0.65rem;
   }
 
   .auth-bootstrap-warning {

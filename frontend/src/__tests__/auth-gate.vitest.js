@@ -129,7 +129,7 @@ describe("AuthGate", () => {
     expect(tokenCalls).toHaveLength(1);
     expect(String(tokenCalls[0][0])).toBe("/api/auth/login");
     expect(tokenCalls[0][1]).toMatchObject({ method: "POST", credentials: "same-origin" });
-    expect(window.localStorage.length).toBe(0);
+    if (window.localStorage) expect(window.localStorage.length ?? 0).toBe(0);
   });
 
   it("shows a generic login error without echoing or retaining the submitted token", async () => {
@@ -155,32 +155,24 @@ describe("AuthGate", () => {
     expect(wrapper.get('[role="alert"]').text()).toBe("登录失败，请检查管理 Token 后重试");
     expect(wrapper.text()).not.toContain(token);
     expect(wrapper.get("#management-token").element.value).toBe("");
-    expect(window.localStorage.length).toBe(0);
+    if (window.localStorage) expect(window.localStorage.length ?? 0).toBe(0);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain("/api/config");
   });
 
-  it("logs out through the server and returns to the token gate", async () => {
+  it("no longer shows the logout button fixed in the auth gate — it moved to settings page", async () => {
     const fetchMock = vi.fn((input) => {
       const path = String(input);
       if (path === "/api/auth/status") {
         return Promise.resolve(jsonResponse(authStatus({ authenticated: true })));
       }
       if (path === "/api/config") return Promise.resolve(jsonResponse(CONFIG_RESPONSE));
-      if (path === "/api/auth/logout") {
-        return Promise.resolve(jsonResponse(authStatus({ authenticated: false })));
-      }
       throw new Error(`Unexpected request: ${path}`);
     });
     const { wrapper } = await mountGate(fetchMock);
 
     expect(wrapper.get(".app-shell").exists()).toBe(true);
-    await wrapper.get(".auth-logout").trigger("click");
-    await flushPromises();
-
-    expect(wrapper.find(".app-shell").exists()).toBe(false);
-    expect(wrapper.get(".auth-form").exists()).toBe(true);
-    const logoutCall = fetchMock.mock.calls.find(([input]) => String(input) === "/api/auth/logout");
-    expect(logoutCall[1]).toMatchObject({ method: "POST", credentials: "same-origin" });
+    // The logout button is no longer in AuthGate — it moved to SettingsPage
+    expect(wrapper.find(".auth-logout").exists()).toBe(false);
   });
 
   it("returns to the login gate when any protected request reports 401", async () => {

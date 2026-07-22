@@ -25,6 +25,16 @@
         >
       </div>
     </div>
+    <div class="subscription-detail-actions">
+      <button
+        type="button"
+        class="btn btn-secondary"
+        :disabled="retrying"
+        @click="$emit('retry', selectedSubscription.subject_id)"
+      >
+        {{ retrying ? "重跑中…" : "重跑任务" }}
+      </button>
+    </div>
     <LifecycleGraph :record="selectedSubscription" />
     <p
       id="subscription-capability-note"
@@ -108,7 +118,10 @@ import {
 
 const props = defineProps({
   selectedSubscription: { type: Object, required: true },
+  retrying: { type: Boolean, default: false },
 });
+
+defineEmits(["retry"]);
 
 const subscriptionCapability = computed(() => subscriptionCapabilities(props.selectedSubscription));
 const issues = computed(() =>

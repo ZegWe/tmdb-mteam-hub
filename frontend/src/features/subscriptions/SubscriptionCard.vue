@@ -17,20 +17,6 @@
     <div class="meta subscription-card-meta">
       <div class="title">{{ title }}</div>
       <div class="subtle">{{ subtitle }}</div>
-      <div class="mt-2 flex flex-wrap justify-center gap-1" aria-label="订阅自动化能力">
-        <span
-          v-for="badge in capabilities.badges"
-          :key="badge.key"
-          class="badge badge-sm badge-outline"
-          :class="{
-            'badge-success': badge.tone === 'success',
-            'badge-warning': badge.tone === 'warning',
-            'badge-error': badge.tone === 'danger',
-            'badge-ghost': badge.tone === 'muted',
-          }"
-          >{{ badge.text }}</span
-        >
-      </div>
     </div>
   </article>
 </template>
@@ -40,7 +26,6 @@ import { computed } from "vue";
 import { itemImageUrl } from "../../shared/media/images.js";
 import {
   subscriptionCardSubtitle,
-  subscriptionCapabilities,
   subscriptionDisplayStatus,
 } from "./domain.js";
 
@@ -55,7 +40,6 @@ const title = computed(() => props.record.title || props.record.subject_id || "�
 const subtitle = computed(() => subscriptionCardSubtitle(props.record));
 const imageUrl = computed(() => itemImageUrl(props.record));
 const displayStatus = computed(() => subscriptionDisplayStatus(props.record));
-const capabilities = computed(() => subscriptionCapabilities(props.record));
 
 function open() {
   emit("open", props.record);

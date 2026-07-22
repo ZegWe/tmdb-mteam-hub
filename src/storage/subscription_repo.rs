@@ -312,6 +312,10 @@ impl SqliteSubscriptionRepository {
     pub(crate) fn preflight(&self) -> RepoFuture<()> {
         self.executor.preflight()
     }
+
+    pub(crate) fn force_retry(&self, key: SubscriptionKey, now_unix: u64) -> RepoFuture<SubscriptionHead> {
+        self.executor.run(move |connection| force_retry(connection, key, now_unix))
+    }
 }
 
 impl SubscriptionReadRepository for SqliteSubscriptionRepository {
@@ -354,6 +358,35 @@ fn get(connection: &Connection, key: SubscriptionKey) -> RepositoryResult<Subscr
         .map_err(|error| map_read_error("read subscription head by primary key", error))?
         .ok_or_else(|| RepositoryError::NotFound { key: key.clone() })?;
     raw.try_into_head()
+}
+
+fn force_retry(
+    connection: &Connection,
+    key: SubscriptionKey,
+    now_unix: u64,
+) -> RepositoryResult<SubscriptionHead> {
+    let changed = connection
+        .execute(
+            r#"UPDATE wanted_subscription_records
+                  SET revision = revision + 1,
+                      next_attempt_at = ?3,
+                      retry_blocked = 0,
+                      force_eligible_once = 1,
+                      attention_tags_json = (
+                          SELECT json_group_array(tag.value)
+                            FROM json_each(attention_tags_json) AS tag
+                           WHERE tag.value NOT IN ('skipped', 'retry_blocked')
+                      ),
+                      record_json = json_remove(record_json, '$.skip_reason'),
+                      updated_at = ?3
+                WHERE account_key = ?1 AND subject_id = ?2"#,
+            params![key.account_key.as_str(), key.subject_id.as_str(), i64::try_from(now_unix).unwrap_or(i64::MAX)],
+        )
+        .map_err(|error| map_write_error("force_retry", error))?;
+    if changed == 0 {
+        return Err(RepositoryError::NotFound { key });
+    }
+    get(connection, key)
 }
 
 fn load_detail(
