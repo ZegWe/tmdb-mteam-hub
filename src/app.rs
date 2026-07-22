@@ -200,6 +200,7 @@ impl AppState {
             Arc::new(DoubanWantedSource::new(upstream_clients.douban.clone())),
         );
         let execution_effects = LatestSubscriptionExecutionEffects::try_production(
+            upstream_clients.douban.clone(),
             upstream_clients.mteam.clone(),
             runtime.filesystem_effect_concurrency,
         )

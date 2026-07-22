@@ -28,6 +28,7 @@ pub(crate) struct ExecutionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ExecutionEffectPolicy {
+    pub(crate) douban_cookie: String,
     pub(crate) mteam_api_key: String,
     pub(crate) qb_servers: Vec<ExecutionQbServer>,
     pub(crate) categories: Vec<ExecutionCategory>,
