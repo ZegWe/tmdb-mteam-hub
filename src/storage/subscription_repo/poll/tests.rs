@@ -27,7 +27,7 @@ use crate::subscription::repository::{
 };
 use crate::subscription::{
     SubscriptionAttentionTag, SubscriptionExecutionState, SubscriptionLifecycleState,
-    SubscriptionMediaKind, INACTIVE_SUBSCRIPTION_REASON, TV_NOT_SUPPORTED_REASON,
+    SubscriptionMediaKind, INACTIVE_SUBSCRIPTION_REASON,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,14 +277,8 @@ fn blocked_movie(subject_id: &str, title: &str, sort_time: u64, reason: &str) ->
 fn tv(subject_id: &str, title: &str, sort_time: u64) -> SnapshotRecord {
     let mut source = source(title, sort_time);
     source.tags = vec!["tv".to_string()];
-    SnapshotRecord::try_new(
-        subject_id,
-        SubscriptionMediaKind::Tv,
-        false,
-        Some(BlockedReason::try_new(TV_NOT_SUPPORTED_REASON).unwrap()),
-        source,
-    )
-    .expect("build parked TV snapshot record")
+    SnapshotRecord::try_new(subject_id, SubscriptionMediaKind::Tv, true, None, source)
+        .expect("build schedulable TV snapshot record")
 }
 
 async fn begin(
@@ -1117,7 +1111,7 @@ async fn incomplete_is_seen_only_reports_effects_and_reactivates_without_touchin
 }
 
 #[tokio::test]
-async fn incomplete_parks_only_movie_to_tv_running_attempt_and_preserves_seen_movie_attempt() {
+async fn incomplete_supersedes_movie_to_tv_attempt_and_preserves_seen_movie_attempt() {
     let fixture = fresh_fixture("incomplete-supersede", ROWS_ONLY).await;
     let repository = repository(&fixture.path);
     let account = "incomplete-supersede-account";
@@ -1209,49 +1203,29 @@ async fn incomplete_parks_only_movie_to_tv_running_attempt_and_preserves_seen_mo
         SubscriptionExecutionState::Idle
     );
 
+    let converted = repository.load_detail(key(account, "park")).await.unwrap();
     assert_eq!(
-        account_operation_logs(&fixture.path, account),
-        vec![json!({
-            "created_at": 201,
-            "category": "subscription_scheduler",
-            "action": "supersede_attempt",
-            "target_type": "subscription",
-            "target_id": "park",
-            "target_title": "Park New TV",
-            "status": "success",
-            "summary": "superseded an execution attempt during wanted poll persistence",
-            "error": null,
-            "related": {
-                "schema": "subscription_attempt_superseded.v1",
-                "disposition": "superseded",
-                "reason": "parked_as_tv_not_supported",
-                "attempt_id": "attempt-park",
-                "claimed_operation": "movie_meta",
-                "lease_until": 150,
-                "lease_state_at_fence": "expired",
-                "fenced_at": 201,
-                "fenced_by": "wanted_poll",
-                "poll_generation": token.generation.value(),
-                "poll_snapshot_id": token.snapshot_id.as_str(),
-                "poll_snapshot_kind": "incomplete",
-                "revision_before": 2,
-                "revision_after": 3,
-                "execution_state_before": "running",
-                "execution_state_after": "idle",
-                "active_before": true,
-                "active_after": true,
-                "media_kind_before": "movie",
-                "media_kind_after": "tv",
-                "blocked_reason_before": null,
-                "blocked_reason_after": TV_NOT_SUPPORTED_REASON,
-                "replacement_attempt_id": null,
-            },
-        })]
+        converted.summary().head.media_kind,
+        SubscriptionMediaKind::Tv
     );
+    assert!(converted.summary().head.schedulable);
+    assert_eq!(
+        converted.summary().head.execution_state,
+        SubscriptionExecutionState::Idle
+    );
+    assert_eq!(
+        converted.summary().head.lifecycle_state,
+        SubscriptionLifecycleState::Queued
+    );
+    assert_eq!(converted.summary().head.next_attempt_at, Some(201));
+    let audits = account_operation_logs(&fixture.path, account);
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0]["related"]["reason"], "media_kind_changed");
+    assert_eq!(audits[0]["related"]["attempt_id"], "attempt-park");
 }
 
 #[tokio::test]
-async fn complete_snapshot_preserves_active_controls_parks_tv_and_deactivates_missing_once() {
+async fn complete_snapshot_preserves_active_controls_enables_tv_and_deactivates_missing_once() {
     let fixture = fresh_fixture("complete-controls", ROWS_ONLY).await;
     let repository = repository(&fixture.path);
     let account = "complete-controls-account";
@@ -1345,24 +1319,17 @@ async fn complete_snapshot_preserves_active_controls_parks_tv_and_deactivates_mi
     assert_eq!(d.summary().head.media_kind, SubscriptionMediaKind::Tv);
     assert_eq!(
         d.summary().head.lifecycle_state,
-        SubscriptionLifecycleState::Searching
+        SubscriptionLifecycleState::Queued
     );
-    assert_eq!(d.summary().head.retry_count, 1);
+    assert_eq!(d.summary().head.retry_count, 0);
     assert_eq!(d.summary().head.max_retries, 4);
     assert_eq!(
         d.summary().head.execution_state,
         SubscriptionExecutionState::Idle
     );
-    assert!(!d.summary().head.schedulable);
-    assert_eq!(
-        d.summary()
-            .head
-            .blocked_reason
-            .as_ref()
-            .map(BlockedReason::as_str),
-        Some(TV_NOT_SUPPORTED_REASON)
-    );
-    assert!(d.summary().head.next_attempt_at.is_none());
+    assert!(d.summary().head.schedulable);
+    assert!(d.summary().head.blocked_reason.is_none());
+    assert_eq!(d.summary().head.next_attempt_at, Some(201));
     assert!(!d.summary().head.force_eligible_once);
     let d_claims: (Option<String>, Option<String>, Option<i64>) = Connection::open(&fixture.path)
         .unwrap()
@@ -1375,45 +1342,9 @@ async fn complete_snapshot_preserves_active_controls_parks_tv_and_deactivates_mi
     assert_eq!(d_claims, (None, None, None));
 
     let parking_audits = account_operation_logs(&fixture.path, account);
-    assert_eq!(
-        parking_audits,
-        vec![json!({
-            "created_at": 201,
-            "category": "subscription_scheduler",
-            "action": "supersede_attempt",
-            "target_type": "subscription",
-            "target_id": "d",
-            "target_title": "D Is TV",
-            "status": "success",
-            "summary": "superseded an execution attempt during wanted poll persistence",
-            "error": null,
-            "related": {
-                "schema": "subscription_attempt_superseded.v1",
-                "disposition": "superseded",
-                "reason": "parked_as_tv_not_supported",
-                "attempt_id": "attempt-d",
-                "claimed_operation": "movie_search",
-                "lease_until": 250,
-                "lease_state_at_fence": "live",
-                "fenced_at": 201,
-                "fenced_by": "wanted_poll",
-                "poll_generation": result.token.generation.value(),
-                "poll_snapshot_id": result.token.snapshot_id.as_str(),
-                "poll_snapshot_kind": "complete",
-                "revision_before": 2,
-                "revision_after": 3,
-                "execution_state_before": "running",
-                "execution_state_after": "idle",
-                "active_before": true,
-                "active_after": true,
-                "media_kind_before": "movie",
-                "media_kind_after": "tv",
-                "blocked_reason_before": null,
-                "blocked_reason_after": TV_NOT_SUPPORTED_REASON,
-                "replacement_attempt_id": null,
-            },
-        })]
-    );
+    assert_eq!(parking_audits.len(), 1);
+    assert_eq!(parking_audits[0]["related"]["reason"], "media_kind_changed");
+    assert_eq!(parking_audits[0]["related"]["attempt_id"], "attempt-d");
     let stale = repository
         .apply_complete_snapshot(
             ApplyCompleteSnapshotCommand::try_new(
@@ -1436,15 +1367,8 @@ async fn complete_snapshot_preserves_active_controls_parks_tv_and_deactivates_mi
 
     let t = repository.load_detail(key(account, "t")).await.unwrap();
     assert_eq!(t.summary().head.media_kind, SubscriptionMediaKind::Tv);
-    assert!(!t.summary().head.schedulable);
-    assert_eq!(
-        t.summary()
-            .head
-            .blocked_reason
-            .as_ref()
-            .map(BlockedReason::as_str),
-        Some(TV_NOT_SUPPORTED_REASON)
-    );
+    assert!(t.summary().head.schedulable);
+    assert!(t.summary().head.blocked_reason.is_none());
 
     let b = repository.load_detail(key(account, "b")).await.unwrap();
     assert_eq!(b.summary().head.revision.value(), 2);
@@ -1486,16 +1410,16 @@ async fn complete_snapshot_preserves_active_controls_parks_tv_and_deactivates_mi
     assert_eq!(empty.deactivated, 4);
     let audits_after_empty = account_operation_logs(&fixture.path, account);
     assert_eq!(audits_after_empty.len(), 2);
-    assert_eq!(audits_after_empty[1]["target_id"], "a");
-    assert_eq!(audits_after_empty[1]["target_title"], "A Enriched");
+    let a_audit = audits_after_empty
+        .iter()
+        .find(|audit| audit["target_id"] == "a")
+        .unwrap();
+    assert_eq!(a_audit["target_title"], "A Enriched");
     assert_eq!(
-        audits_after_empty[1]["related"]["reason"],
+        a_audit["related"]["reason"],
         "missing_from_complete_snapshot"
     );
-    assert_eq!(
-        audits_after_empty[1]["related"]["lease_state_at_fence"],
-        "expired"
-    );
+    assert_eq!(a_audit["related"]["lease_state_at_fence"], "expired");
     let rows_after_empty = ["a", "b", "c", "d", "t"]
         .into_iter()
         .map(|subject| (subject, row_json(&fixture.path, account, subject).unwrap()))
@@ -1520,15 +1444,15 @@ async fn complete_snapshot_preserves_active_controls_parks_tv_and_deactivates_mi
         .map(|subject| (subject, row_json(&fixture.path, account, subject).unwrap()))
         .collect::<Vec<_>>();
     assert_eq!(rows_after_repeat, rows_after_empty);
-    let parked_tv = repository.load_detail(key(account, "t")).await.unwrap();
+    let inactive_tv = repository.load_detail(key(account, "t")).await.unwrap();
     assert_eq!(
-        parked_tv
+        inactive_tv
             .summary()
             .head
             .blocked_reason
             .as_ref()
             .map(BlockedReason::as_str),
-        Some(TV_NOT_SUPPORTED_REASON)
+        Some(INACTIVE_SUBSCRIPTION_REASON)
     );
 }
 
@@ -2131,7 +2055,7 @@ async fn supersede_audit_and_post_audit_meta_failures_roll_back_and_keep_token_r
         201,
         261,
         default_policy(),
-        vec![tv("park", "Park After", 20)],
+        Vec::new(),
     )
     .unwrap();
     let error = audit_repository
@@ -2615,13 +2539,7 @@ async fn poll_writes_leave_operation_logs_and_adjacent_accounts_untouched_and_us
         .unwrap();
     let plan = statement
         .query_map(
-            params![
-                account,
-                "snapshot",
-                200_i64,
-                TV_NOT_SUPPORTED_REASON,
-                INACTIVE_SUBSCRIPTION_REASON,
-            ],
+            params![account, "snapshot", 200_i64, INACTIVE_SUBSCRIPTION_REASON,],
             |row| row.get::<_, String>(3),
         )
         .unwrap()

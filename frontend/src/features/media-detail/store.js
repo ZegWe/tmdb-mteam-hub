@@ -62,6 +62,9 @@ export function createMediaDetailStore({
       rows: mteam.rows,
       loading: mteam.loading,
       error: mteam.error,
+      mediaType: mteam.mediaType,
+      seasons: mteam.seasons,
+      seasonNumber: mteam.seasonNumber,
     },
   }));
 
@@ -106,6 +109,10 @@ export function createMediaDetailStore({
     return mteamStore.select(source);
   }
 
+  function selectTorrentSeason(seasonNumber) {
+    return mteamStore.selectSeason(seasonNumber);
+  }
+
   function setInterest(value) {
     interestStore.setInterest(value);
   }
@@ -147,6 +154,7 @@ export function createMediaDetailStore({
     load,
     loadSeason,
     selectTorrentSource,
+    selectTorrentSeason,
     setInterest,
     updateRating,
     updateCategory,

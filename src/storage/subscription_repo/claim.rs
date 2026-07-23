@@ -23,7 +23,6 @@ use crate::subscription::repository::{
 };
 use crate::subscription::{
     SubscriptionAttentionTag, SubscriptionExecutionState, SubscriptionLifecycleState,
-    SubscriptionMediaKind,
 };
 
 const MAX_ATTEMPT_ID_ATTEMPTS: usize = 8;
@@ -51,7 +50,6 @@ SELECT subject_id
    AND active = 1
    AND schedulable = 1
    AND blocked_reason IS NULL
-   AND media_kind = 'movie'
    AND lifecycle_state != 'completed'
    AND execution_state = 'idle'
    AND force_eligible_once = 1
@@ -67,7 +65,6 @@ SELECT subject_id
    AND active = 1
    AND schedulable = 1
    AND blocked_reason IS NULL
-   AND media_kind = 'movie'
    AND lifecycle_state != 'completed'
    AND execution_state = 'idle'
    AND force_eligible_once = 0
@@ -939,13 +936,6 @@ fn classify(stored: &StoredSubscription, now: u64) -> RepositoryResult<Classific
     let head = &summary.head;
     if !head.active {
         return Ok(Classification::Rejected(ClaimRejection::Inactive));
-    }
-    if head.media_kind != SubscriptionMediaKind::Movie {
-        return Ok(Classification::Rejected(
-            ClaimRejection::UnsupportedMediaKind {
-                media_kind: head.media_kind,
-            },
-        ));
     }
     if head.lifecycle_state == SubscriptionLifecycleState::Completed {
         return Ok(Classification::Rejected(ClaimRejection::Completed));

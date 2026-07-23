@@ -170,7 +170,7 @@ export function subscriptionCapabilities(record) {
   const inactive =
     record?.active === false || record?.active === 0 || blockedReason === "subscription_inactive";
   const mediaKind = normalizedStatus(record?.media_kind) === "tv" ? "tv" : "movie";
-  const tvUnsupported = mediaKind === "tv" || blockedReason === "tv_not_supported";
+  const tvUnsupported = blockedReason === "tv_not_supported";
   const explicitSchedulable = normalizedBoolean(record?.schedulable);
   const schedulable =
     !inactive && !tvUnsupported && !blockedReason && explicitSchedulable !== false;
@@ -182,6 +182,7 @@ export function subscriptionCapabilities(record) {
     schedulable,
     blockedReasonText,
     lifecycle,
+    mediaKind,
   });
 
   const badges = [];
@@ -250,7 +251,7 @@ export function subscriptionDetailRows(record) {
     row("豆瓣时间", source.douban_date),
     row("上映年份", record.release_year),
     row("订阅活动", capabilities.active ? "活跃" : "已停用"),
-    row("媒体能力", capabilities.tvUnsupported ? "TV 自动化尚未开放" : "电影自动化"),
+    row("媒体能力", capabilities.mediaKind === "tv" ? "TV 自动化" : "电影自动化"),
     row("调度能力", capabilities.schedulable ? "可调度" : "不可调度"),
     row("阻止原因", capabilities.blockedReasonText),
     row("跳过原因", formatSubscriptionSkipReason(record.skip_reason)),
@@ -273,6 +274,7 @@ function subscriptionCapabilityExplanation({
   schedulable,
   blockedReasonText,
   lifecycle,
+  mediaKind,
 }) {
   if (inactive) {
     return "该订阅已不在当前完整想看快照中，仅保留历史记录；重新加入想看并完成同步后可恢复。";
@@ -286,9 +288,13 @@ function subscriptionCapabilityExplanation({
       : "后端已将此订阅标记为不可调度；后台任务会等待状态恢复。";
   }
   if (lifecycle === "completed") {
-    return "该电影订阅已完成。";
+    return `该${mediaLabel(mediaKind)}订阅已完成。`;
   }
-  return "该电影订阅当前可由后台任务调度。";
+  return `该${mediaLabel(mediaKind)}订阅当前可由后台任务调度。`;
+}
+
+function mediaLabel(mediaKind) {
+  return mediaKind === "tv" ? "TV" : "电影";
 }
 
 function subscriptionRatingText(source) {

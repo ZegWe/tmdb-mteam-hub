@@ -19,10 +19,7 @@ pub(crate) fn routes() -> Router<AppState> {
             "/subscriptions/wanted/poll",
             post(poll_wanted_subscriptions),
         )
-        .route(
-            "/subscriptions/wanted/{id}/retry",
-            post(retry_subscription),
-        )
+        .route("/subscriptions/wanted/{id}/retry", post(retry_subscription))
 }
 
 async fn poll_wanted_subscriptions(
@@ -44,8 +41,8 @@ async fn retry_subscription(
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<SubscriptionSummaryDto>, ApiError> {
     let config = state.config.snapshot().await;
-    let account_key = crate::douban::auth_cache_key_fragment(&config.value.douban_cookie)
-        .map_err(|_| {
+    let account_key =
+        crate::douban::auth_cache_key_fragment(&config.value.douban_cookie).map_err(|_| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "subscription_store_unavailable",
@@ -79,8 +76,8 @@ async fn retry_subscription(
                 ),
             }
         })?;
-    let command = GetSubscription::try_new(account_key, subject_id)
-        .map_err(|_| invalid_subscription_id())?;
+    let command =
+        GetSubscription::try_new(account_key, subject_id).map_err(|_| invalid_subscription_id())?;
     let detail = state
         .subscription_queries
         .get_subscription(command)

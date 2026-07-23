@@ -34,6 +34,57 @@ function createStore(
 }
 
 describe("M-Team torrent store", () => {
+  it("searches the selected TV season and annotates safe push coverage", async () => {
+    const searchTorrents = vi.fn().mockResolvedValue({
+      items: [
+        { id: "episode", name: "Series.S02E03.1080p" },
+        { id: "range", name: "Series.S02E04-E06.1080p" },
+        { id: "pack", name: "Series.S02.Complete.1080p" },
+        { id: "unknown", name: "Series.1080p" },
+      ],
+    });
+    const { store } = createStore(searchTorrents);
+
+    await store.initialize(
+      mediaContext({
+        mediaType: "tv",
+        doubanId: "",
+        data: {
+          original_title: "Series",
+          seasons: [
+            { season_number: 0, episode_count: 2 },
+            { season_number: 1, episode_count: 8 },
+            { season_number: 2, episode_count: 10 },
+            { season_number: 3, episode_count: 0 },
+          ],
+        },
+      }),
+    );
+
+    expect(store.state.seasonNumber).toBe(2);
+    expect(store.state.sources[0]).toEqual({
+      source: "tv_season",
+      label: "第 2 季",
+      params: { source: "keyword", keyword: "Series S02" },
+    });
+    expect(searchTorrents).toHaveBeenCalledWith(
+      { source: "keyword", keyword: "Series S02" },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(store.state.rows.map((row) => [row.tv_match.kind, row.tv_match.compatible])).toEqual([
+      ["episode", true],
+      ["partial_pack", true],
+      ["season_pack", true],
+      ["unknown", false],
+    ]);
+
+    await store.selectSeason(1);
+    expect(searchTorrents).toHaveBeenLastCalledWith(
+      { source: "keyword", keyword: "Series S01" },
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
   it("constructs sources in IMDb, Douban, keyword order from explicit media context", async () => {
     const row = { id: "imdb-result", name: "IMDb result" };
     const { searchTorrents, store } = createStore(

@@ -733,7 +733,7 @@ async fn claim_one_returns_typed_rejections_without_nonce_or_audit() {
                 ClaimOneResult::Rejected(ClaimRejection::Unschedulable { .. })
             ) | (
                 "tv",
-                ClaimOneResult::Rejected(ClaimRejection::UnsupportedMediaKind { .. })
+                ClaimOneResult::Rejected(ClaimRejection::Unschedulable { .. })
             ) | (
                 "not-due",
                 ClaimOneResult::Rejected(ClaimRejection::NotDue { .. })

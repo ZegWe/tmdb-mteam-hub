@@ -1,5 +1,26 @@
 <template>
   <section class="mteam-torrent-panel">
+    <div v-if="mteam.mediaType === 'tv' && mteam.seasons.length" class="mteam-tv-target">
+      <label>
+        搜索季
+        <select
+          class="select select-bordered select-sm"
+          :value="mteam.seasonNumber || ''"
+          @change="emit('select-season', Number($event.target.value))"
+        >
+          <option
+            v-for="season in mteam.seasons"
+            :key="season.season_number"
+            :value="season.season_number"
+          >
+            第 {{ season.season_number }} 季{{
+              season.episode_count ? `（${season.episode_count} 集）` : ""
+            }}
+          </option>
+        </select>
+      </label>
+      <span class="subtle">识别单集、部分合集和整季合集后再允许推送</span>
+    </div>
     <div class="mteam-actions">
       <template v-if="mteam.sources.length">
         <span class="mteam-actions-label subtle">M-Team</span>
@@ -43,19 +64,34 @@
                 <div class="torrent-name">
                   {{ torrent.name || torrent.title || torrent.id || "(无标题)" }}
                 </div>
+                <div
+                  v-if="torrent.tv_match"
+                  class="torrent-tv-match"
+                  :class="{ 'is-incompatible': !torrent.tv_match.compatible }"
+                >
+                  {{ torrent.tv_match.label
+                  }}<template v-if="!torrent.tv_match.compatible">
+                    · 不属于当前季或集数未知
+                  </template>
+                </div>
                 <div class="torrent-stats">{{ torrentStats(torrent) }}</div>
                 <div class="torrent-desc">{{ torrent.small_description || "" }}</div>
               </a>
               <div class="torrent-card-actions">
                 <button
-                  v-if="torrent.id"
+                  v-if="torrent.id && (!torrent.tv_match || torrent.tv_match.compatible)"
                   type="button"
                   class="btn btn-sm btn-primary torrent-push-trigger"
                   @click.prevent.stop="emit('push-torrent', torrent, $event.currentTarget)"
                 >
                   推送 qB
                 </button>
-                <span v-else class="subtle torrent-push-hint" title="无种子 ID，无法推送">—</span>
+                <span
+                  v-else
+                  class="subtle torrent-push-hint"
+                  :title="torrent.id ? '集数无法安全识别，请核对标题' : '无种子 ID，无法推送'"
+                  >—</span
+                >
               </div>
             </div>
           </article>
@@ -75,5 +111,5 @@ defineProps({
   mteam: { type: Object, required: true },
 });
 
-const emit = defineEmits(["select-source", "push-torrent"]);
+const emit = defineEmits(["select-source", "select-season", "push-torrent"]);
 </script>

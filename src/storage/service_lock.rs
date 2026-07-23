@@ -1,7 +1,10 @@
-use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
+use std::fs::{self, File, OpenOptions};
+
+#[cfg(unix)]
 const SERVICE_LOCK_FILE_NAME: &str = "subscription-storage.service.lock";
 
 #[derive(Debug)]

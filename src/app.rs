@@ -12,7 +12,7 @@ use crate::config::{load_normalized_file_config, ConfigManager, FileConfig, Mana
 use crate::storage::blocking::BoundedBlockingExecutor;
 use crate::storage::operation_log_retention::OperationLogRetention;
 use crate::storage::service_lock::{acquire_storage_service_lock, StorageServiceLock};
-use crate::storage::SqliteSubscriptionRepository;
+use crate::storage::{migrate_subscription_schema, SqliteSubscriptionRepository};
 use crate::subscription::execution::SubscriptionExecutionService;
 use crate::subscription::execution_effects::LatestSubscriptionExecutionEffects;
 use crate::subscription::queries::SubscriptionQueryService;
@@ -201,6 +201,7 @@ impl AppState {
         );
         let execution_effects = LatestSubscriptionExecutionEffects::try_production(
             upstream_clients.douban.clone(),
+            upstream_clients.tmdb.clone(),
             upstream_clients.mteam.clone(),
             runtime.filesystem_effect_concurrency,
         )
@@ -394,6 +395,10 @@ async fn open_latest_subscription_repository(
                 std::fs::create_dir_all(&subscription_state_dir)?;
                 let database_path = subscription_state_dir.join(SUBSCRIPTION_DATABASE_FILE_NAME);
                 let repository = if database_path.try_exists()? {
+                    migrate_subscription_schema(
+                        &database_path,
+                        SUBSCRIPTION_SQLITE_BUSY_TIMEOUT,
+                    )?;
                     SqliteSubscriptionRepository::try_new(
                         database_path,
                         SUBSCRIPTION_SQLITE_MAX_CONCURRENCY,

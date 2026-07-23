@@ -10,7 +10,7 @@ use rusqlite::{Connection, DatabaseName, OpenFlags};
 
 use super::blocking::{BlockingTaskError, BoundedBlockingExecutor};
 use crate::storage::schema_v5::{
-    initialize_latest_schema, validate_schema_contract, SCHEMA_VERSION,
+    initialize_latest_schema, migrate_previous_schema, validate_schema_contract, SCHEMA_VERSION,
 };
 use crate::subscription::ports::RepoFuture;
 use crate::subscription::repository::{RepositoryError, RepositoryResult};
@@ -25,6 +25,23 @@ const SQLITE_SIDECAR_SUFFIXES: &[&str] = &["-journal", "-wal", "-shm"];
 const FRESH_TEMP_ATTEMPTS: usize = 64;
 
 static NEXT_FRESH_TEMP: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn migrate_subscription_schema(
+    path: &Path,
+    busy_timeout: Duration,
+) -> RepositoryResult<bool> {
+    let mut connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| map_connection_error("open subscription SQLite for migration", error))?;
+    connection
+        .busy_timeout(busy_timeout)
+        .map_err(|error| map_connection_error("configure migration busy timeout", error))?;
+    migrate_previous_schema(&mut connection).map_err(|error| RepositoryError::Unavailable {
+        message: format!("migrate subscription SQLite to schema {SCHEMA_VERSION}: {error}"),
+    })
+}
 
 #[derive(Debug)]
 struct FreshTempFile {
