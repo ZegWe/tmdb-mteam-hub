@@ -26,7 +26,7 @@ use super::repository::payload::{
     stable_download_artifact_key, stable_resolved_link_artifact_key, CandidateMatchPayload,
     CandidatePayload, DownloadArtifactPayload, DownloadArtifactStatePayload, DownloadFilePayload,
     LinkArtifactPayload, LinkArtifactStatePayload, LinkDownloadRefPayload, LinkFilePayload,
-    TvDetailPayload, TvEpisodeDetailPayload, TvEpisodeIntentPayload,
+    TvDetailPayload, TvEpisodeDetailPayload, TvEpisodeIntentPayload, WantedSourcePayload,
 };
 use super::repository::{
     ClaimedSubscription, ExecutionOperation, ExecutionPayloadDelta, ExecutionScheduleDelay,
@@ -82,9 +82,29 @@ impl LatestSubscriptionExecutionEffects {
         policy: &ExecutionEffectPolicy,
     ) -> ExecutionEffectResult {
         if claimed.detail().summary().head.media_kind == SubscriptionMediaKind::Movie {
-            return ExecutionEffectResult::Finished {
-                disposition: FinishExecutionDisposition::MetaReady,
-                payload_delta: ExecutionPayloadDelta::Meta,
+            let key = &claimed.detail().summary().head.key;
+            return match crate::douban::subject_detail(
+                &self.douban,
+                &policy.douban_cookie,
+                &key.subject_id,
+            )
+            .await
+            {
+                Ok(detail) => ExecutionEffectResult::Finished {
+                    disposition: FinishExecutionDisposition::MetaReady,
+                    payload_delta: ExecutionPayloadDelta::MovieMeta {
+                        source: Box::new(movie_source_from_detail(
+                            &claimed.detail().payload().source,
+                            detail,
+                        )),
+                    },
+                },
+                Err(error) => failed(
+                    ExecutionOperation::Meta,
+                    "movie_metadata",
+                    error.to_string(),
+                    policy.system_retry_interval_secs,
+                ),
             };
         }
         if let Some(tv) = &claimed.detail().payload().tv {
@@ -859,6 +879,55 @@ fn should_try_imdb_fallback(candidates: &[CandidatePayload], subject_id: &str) -
     candidates.is_empty() && !subject_id.trim().is_empty()
 }
 
+fn movie_source_from_detail(
+    current: &WantedSourcePayload,
+    detail: crate::douban::DoubanSubjectDetail,
+) -> WantedSourcePayload {
+    let mut source = current.clone();
+    if !detail.title.trim().is_empty() {
+        source.title = detail.title.trim().to_string();
+    }
+    if !detail.poster_url.trim().is_empty() {
+        source.poster_url = detail.poster_url.trim().to_string();
+    }
+    if !detail.image.trim().is_empty() {
+        source.cover_url = detail.image.trim().to_string();
+    }
+    source.original_title = non_empty(&detail.original_title).or(source.original_title);
+    for (target, observed) in [
+        (&mut source.aka, detail.aka),
+        (&mut source.languages, detail.languages),
+        (&mut source.countries, detail.countries),
+        (&mut source.genres, detail.genres),
+        (&mut source.directors, detail.directors),
+        (&mut source.actors, detail.actors),
+    ] {
+        if !observed.is_empty() {
+            *target = observed;
+        }
+    }
+    source.date_published = non_empty(&detail.date_published).or(source.date_published);
+    source.duration = non_empty(&detail.duration).or(source.duration);
+    source.summary = non_empty(&detail.summary).or(source.summary);
+    source.rating_value = detail.rating.value.or(source.rating_value);
+    source.rating_count = detail.rating.count.or(source.rating_count);
+    source.release_year =
+        release_year_from_metadata(source.date_published.as_deref()).or(source.release_year);
+    source
+}
+
+fn release_year_from_metadata(value: Option<&str>) -> Option<u16> {
+    let value = value?;
+    value.as_bytes().windows(4).find_map(|digits| {
+        digits
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| std::str::from_utf8(digits).ok()?.parse::<u16>().ok())
+            .flatten()
+            .filter(|year| (1..=9999).contains(year))
+    })
+}
+
 fn season_number_from_title(title: &str) -> Option<u32> {
     let lower = title.to_ascii_lowercase();
     for marker in ["season ", "season.", "season_", "season-"] {
@@ -1579,5 +1648,59 @@ mod tests {
         assert_eq!(tv_series_search_title("Show Season 3"), "Show");
         assert_eq!(tv_series_search_title("剧名 第一季"), "剧名");
         assert_eq!(season_number_from_title("Show"), None);
+    }
+
+    #[test]
+    fn movie_metadata_enriches_source_without_losing_subscription_fields() {
+        let current = WantedSourcePayload {
+            title: "旧标题".to_string(),
+            release_year: Some(1999),
+            tags: vec!["电影".to_string()],
+            douban_sort_time: Some(123),
+            ..WantedSourcePayload::default()
+        };
+        let detail = crate::douban::DoubanSubjectDetail {
+            source: "douban",
+            media_type: "douban",
+            id: "1292052".to_string(),
+            subject_id: "1292052".to_string(),
+            url: "https://movie.douban.com/subject/1292052/".to_string(),
+            title: "肖申克的救赎".to_string(),
+            imdb_id: Some("tt0111161".to_string()),
+            original_title: "The Shawshank Redemption".to_string(),
+            aka: vec!["月黑高飞".to_string()],
+            languages: vec!["英语".to_string()],
+            countries: vec!["美国".to_string()],
+            image: "https://img.test/cover.jpg".to_string(),
+            poster_url: "https://img.test/poster.jpg".to_string(),
+            directors: vec!["弗兰克·德拉邦特".to_string()],
+            writers: vec!["斯蒂芬·金".to_string()],
+            actors: vec!["蒂姆·罗宾斯".to_string()],
+            genres: vec!["剧情".to_string()],
+            date_published: "1994-09-10".to_string(),
+            duration: "142分钟".to_string(),
+            summary: "希望让人自由。".to_string(),
+            rating: crate::douban::DoubanRating {
+                value: Some(9.7),
+                count: Some(3_000_000),
+                info: String::new(),
+                star_count: None,
+            },
+            user_interest: None,
+            user_rating: None,
+        };
+
+        let enriched = movie_source_from_detail(&current, detail);
+
+        assert_eq!(enriched.title, "肖申克的救赎");
+        assert_eq!(enriched.release_year, Some(1994));
+        assert_eq!(
+            enriched.original_title.as_deref(),
+            Some("The Shawshank Redemption")
+        );
+        assert_eq!(enriched.summary.as_deref(), Some("希望让人自由。"));
+        assert_eq!(enriched.rating_value, Some(9.7));
+        assert_eq!(enriched.tags, vec!["电影"]);
+        assert_eq!(enriched.douban_sort_time, Some(123));
     }
 }

@@ -745,6 +745,9 @@ impl ExecutionScheduleDelay {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ExecutionPayloadDelta {
     Meta,
+    MovieMeta {
+        source: Box<payload::WantedSourcePayload>,
+    },
     TvMeta {
         tv: payload::TvDetailPayload,
     },
@@ -764,7 +767,7 @@ pub(crate) enum ExecutionPayloadDelta {
 impl ExecutionPayloadDelta {
     pub(crate) const fn operation(&self) -> ExecutionOperation {
         match self {
-            Self::Meta | Self::TvMeta { .. } => ExecutionOperation::Meta,
+            Self::Meta | Self::MovieMeta { .. } | Self::TvMeta { .. } => ExecutionOperation::Meta,
             Self::Search { .. } => ExecutionOperation::Search,
             Self::Progress { .. } => ExecutionOperation::Progress,
             Self::Link { .. } => ExecutionOperation::Link,
@@ -774,6 +777,7 @@ impl ExecutionPayloadDelta {
     fn validate_shape(&self) -> RepositoryResult<()> {
         match self {
             Self::Meta | Self::TvMeta { .. } => Ok(()),
+            Self::MovieMeta { source } => source.validate(),
             Self::Search {
                 download_updates, ..
             }
@@ -812,6 +816,11 @@ impl ExecutionPayloadDelta {
         self.validate_shape()?;
         match self {
             Self::Meta => {}
+            Self::MovieMeta { source } => {
+                let mut merged = latest.source.clone();
+                merge_source_observation(&mut merged, source.as_ref());
+                latest.source = merged;
+            }
             Self::TvMeta { tv } => latest.tv = Some(tv.clone()),
             Self::Search {
                 candidates,

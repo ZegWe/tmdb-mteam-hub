@@ -20,6 +20,7 @@ use crate::subscription::repository::{
     FailExecutionCommand, FailExecutionResult, FinishExecutionCommand, FinishExecutionResult,
     IssueOwnerPayload, IssuePayload, ReleaseExecutionCommand, ReleaseExecutionResult,
     RepositoryError, RepositoryResult, Revision, SubscriptionDetail, SubscriptionKey,
+    SubscriptionProjection,
 };
 use crate::subscription::{
     SubscriptionAttentionTag, SubscriptionExecutionState, SubscriptionLifecycleState,
@@ -151,7 +152,12 @@ UPDATE wanted_subscription_records
        lease_until = NULL,
        attention_tags_json = ?11,
        updated_at = MAX(updated_at, ?12),
-       record_json = ?13
+       record_json = ?13,
+       title = ?14,
+       release_year = ?15,
+       poster_url = ?16,
+       category_text = ?17,
+       douban_sort_time = ?18
  WHERE account_key = ?1
    AND subject_id = ?2
    AND execution_state = 'running'
@@ -486,6 +492,7 @@ fn finish(
         &command.token().key().account_key,
         &command.token().key().subject_id,
     )?;
+    let projection = SubscriptionProjection::from_source(&payload.source)?;
     let attention_tags = terminal_attention_tags(
         &stored.detail.summary().attention_tags,
         command.disposition().waits_for_release(),
@@ -515,6 +522,14 @@ fn finish(
                 attention_tags_json,
                 now_sql,
                 record_json,
+                projection.title.as_str(),
+                projection.release_year.map(i64::from),
+                projection.poster_url.as_str(),
+                projection.category_text.as_deref(),
+                projection
+                    .douban_sort_time
+                    .map(|value| repository_integer("payload.source.douban_sort_time", value))
+                    .transpose()?,
             ],
         )
         .map_err(|error| map_write_error("consume exact successful execution attempt", error))?;
@@ -532,6 +547,7 @@ fn finish(
         false,
         &attention_tags,
         &payload,
+        &projection,
     )?;
     append_finish_audit(
         &transaction,
@@ -592,6 +608,7 @@ fn fail(
         &command.token().key().account_key,
         &command.token().key().subject_id,
     )?;
+    let projection = SubscriptionProjection::from_source(&payload.source)?;
     let attention_tags = terminal_attention_tags(
         &stored.detail.summary().attention_tags,
         false,
@@ -620,6 +637,14 @@ fn fail(
                 attention_tags_json,
                 now_sql,
                 record_json,
+                projection.title.as_str(),
+                projection.release_year.map(i64::from),
+                projection.poster_url.as_str(),
+                projection.category_text.as_deref(),
+                projection
+                    .douban_sort_time
+                    .map(|value| repository_integer("payload.source.douban_sort_time", value))
+                    .transpose()?,
             ],
         )
         .map_err(|error| map_write_error("consume exact failed execution attempt", error))?;
@@ -637,6 +662,7 @@ fn fail(
         retry_blocked,
         &attention_tags,
         &payload,
+        &projection,
     )?;
     append_fail_audit(
         &transaction,
@@ -1396,6 +1422,19 @@ fn verify_immutable_subscription_fields(
     before: &SubscriptionDetail,
     after: &SubscriptionDetail,
 ) -> RepositoryResult<()> {
+    verify_immutable_subscription_head_fields(before, after)?;
+    if before.summary().projection != after.summary().projection {
+        return Err(corrupt(
+            "execution update changed subscription projection outside terminal payload merge",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_immutable_subscription_head_fields(
+    before: &SubscriptionDetail,
+    after: &SubscriptionDetail,
+) -> RepositoryResult<()> {
     let before_head = &before.summary().head;
     let after_head = &after.summary().head;
     if before_head.key != after_head.key
@@ -1406,7 +1445,6 @@ fn verify_immutable_subscription_fields(
         || before_head.schedulable != after_head.schedulable
         || before_head.blocked_reason != after_head.blocked_reason
         || before_head.max_retries != after_head.max_retries
-        || before.summary().projection != after.summary().projection
     {
         return Err(corrupt(
             "execution update changed subscription fields outside its ownership",
@@ -1427,8 +1465,9 @@ fn verify_terminal_post_write(
     expected_retry_blocked: bool,
     expected_attention_tags: &[SubscriptionAttentionTag],
     expected_payload: &crate::subscription::repository::SubscriptionPayload,
+    expected_projection: &SubscriptionProjection,
 ) -> RepositoryResult<()> {
-    verify_immutable_subscription_fields(before, &post.detail)?;
+    verify_immutable_subscription_head_fields(before, &post.detail)?;
     let head = &post.detail.summary().head;
     if !matches!(&post.controls, ExecutionControls::Idle)
         || head.execution_state != SubscriptionExecutionState::Idle
@@ -1440,6 +1479,7 @@ fn verify_terminal_post_write(
         || head.retry_blocked != expected_retry_blocked
         || head.force_eligible_once
         || post.detail.summary().attention_tags != expected_attention_tags
+        || &post.detail.summary().projection != expected_projection
         || post.detail.payload() != expected_payload
     {
         return Err(corrupt(

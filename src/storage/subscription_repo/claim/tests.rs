@@ -2112,6 +2112,57 @@ async fn exact_finish_merges_search_delta_into_latest_poll_and_detail_revision()
 }
 
 #[tokio::test]
+async fn movie_meta_finish_updates_payload_and_projection_atomically() {
+    let fixture = fresh_fixture("movie-meta-projection").await;
+    let repository = repository(
+        &fixture.path,
+        Arc::new(FixedClock::new(NOW)),
+        Arc::new(SequenceAttemptIds::new(["attempt-movie-meta"])),
+    );
+    let token = claim_token(&repository, BASE_SUBJECT).await;
+    let source = WantedSourcePayload {
+        title: "Enriched movie title".to_string(),
+        release_year: Some(2026),
+        poster_url: "https://img.test/enriched.jpg".to_string(),
+        original_title: Some("Original movie title".to_string()),
+        summary: Some("Full metadata summary".to_string()),
+        category_text: Some("movie".to_string()),
+        tags: vec!["movie".to_string()],
+        douban_sort_time: Some(456),
+        ..WantedSourcePayload::default()
+    };
+
+    let result = repository
+        .finish(
+            FinishExecutionCommand::try_new(
+                token,
+                FinishExecutionDisposition::MetaReady,
+                ExecutionPayloadDelta::MovieMeta {
+                    source: Box::new(source.clone()),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("persist enriched movie metadata");
+
+    let detail = result.detail();
+    assert_eq!(
+        detail.summary().head.lifecycle_state,
+        SubscriptionLifecycleState::Searching
+    );
+    assert_eq!(detail.summary().projection.title, source.title);
+    assert_eq!(detail.summary().projection.release_year, Some(2026));
+    assert_eq!(detail.summary().projection.poster_url, source.poster_url);
+    assert_eq!(
+        detail.payload().source.original_title,
+        source.original_title
+    );
+    assert_eq!(detail.payload().source.summary, source.summary);
+    assert_eq!(detail.payload().source.tags, vec!["movie"]);
+}
+
+#[tokio::test]
 async fn exact_failure_consumes_attempt_force_and_persists_retry_issue_atomically() {
     let fixture = fresh_fixture("exact-failure").await;
     let connection = Connection::open(&fixture.path).expect("open exact failure fixture");
