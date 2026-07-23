@@ -24,6 +24,7 @@
     <MteamTorrentPanel
       :mteam="model.mteam"
       @select-source="emit('select-torrent-source', $event)"
+      @select-season="emit('select-torrent-season', $event)"
       @push-torrent="(torrent, trigger) => emit('push-torrent', torrent, trigger)"
     />
   </article>
@@ -49,6 +50,7 @@ const emit = defineEmits([
   "tag-suggestion",
   "load-season",
   "select-torrent-source",
+  "select-torrent-season",
   "push-torrent",
 ]);
 </script>

@@ -23,7 +23,7 @@ use crate::subscription::repository::{
 };
 use crate::subscription::{
     SubscriptionAttentionTag, SubscriptionExecutionState, SubscriptionLifecycleState,
-    SubscriptionMediaKind, INACTIVE_SUBSCRIPTION_REASON, TV_NOT_SUPPORTED_REASON,
+    SubscriptionMediaKind, INACTIVE_SUBSCRIPTION_REASON,
 };
 
 const STATE_VERSION: i64 = 1;
@@ -106,19 +106,22 @@ UPDATE wanted_subscription_records
        media_kind = ?6,
        schedulable = ?7,
        blocked_reason = ?8,
-       execution_state = ?9,
-       next_attempt_at = ?10,
-       force_eligible_once = ?11,
-       claimed_operation = ?12,
-       attempt_id = ?13,
-       lease_until = ?14,
-       title = ?15,
-       release_year = ?16,
-       poster_url = ?17,
-       category_text = ?18,
-       douban_sort_time = ?19,
-       updated_at = ?20,
-       record_json = ?21
+       lifecycle_state = ?9,
+       execution_state = ?10,
+       next_attempt_at = ?11,
+       retry_count = ?12,
+       retry_blocked = ?13,
+       force_eligible_once = ?14,
+       claimed_operation = ?15,
+       attempt_id = ?16,
+       lease_until = ?17,
+       title = ?18,
+       release_year = ?19,
+       poster_url = ?20,
+       category_text = ?21,
+       douban_sort_time = ?22,
+       updated_at = ?23,
+       record_json = ?24
  WHERE account_key = ?1
    AND subject_id = ?2
    AND revision = ?3
@@ -143,10 +146,7 @@ UPDATE wanted_subscription_records
        active = 0,
        inactive_at = ?3,
        schedulable = 0,
-       blocked_reason = CASE
-           WHEN media_kind = 'tv' THEN ?4
-           ELSE ?5
-       END,
+       blocked_reason = ?4,
        execution_state = 'idle',
        next_attempt_at = NULL,
        force_eligible_once = 0,
@@ -482,7 +482,6 @@ pub(super) fn apply_complete_snapshot(
                 command.account_key.as_str(),
                 command.token.snapshot_id.as_str(),
                 completed_at,
-                TV_NOT_SUPPORTED_REASON,
                 INACTIVE_SUBSCRIPTION_REASON,
             ],
         )
@@ -517,11 +516,7 @@ pub(super) fn apply_complete_snapshot(
                     active: false,
                     execution_state: SubscriptionExecutionState::Idle,
                     media_kind: head.media_kind,
-                    blocked_reason: Some(if head.media_kind == SubscriptionMediaKind::Tv {
-                        TV_NOT_SUPPORTED_REASON
-                    } else {
-                        INACTIVE_SUBSCRIPTION_REASON
-                    }),
+                    blocked_reason: Some(INACTIVE_SUBSCRIPTION_REASON),
                     target_title: summary.projection.title.as_str(),
                 },
             )?;
@@ -1188,25 +1183,55 @@ fn update_existing_seen(
     } else {
         SubscriptionMediaKind::Movie
     };
-    let superseded_attempt = if head.media_kind == SubscriptionMediaKind::Movie
-        && media_kind == SubscriptionMediaKind::Tv
-    {
+    let media_kind_changed = head.media_kind != media_kind;
+    let superseded_attempt = if media_kind_changed {
         existing.running_attempt()?
     } else {
         None
     };
     let mut payload = existing.detail.payload().clone();
     payload.merge_snapshot_observation(&observed.source, observed_at)?;
+    if media_kind_changed {
+        payload.issues.clear();
+        payload.candidates.clear();
+        payload.tv = None;
+        payload.artifacts = Default::default();
+    }
     payload.validate_for(account_key, &observed.subject_id)?;
     let projection = SubscriptionProjection::from_source(&payload.source)?;
+    let skipped = payload.skip_reason.is_some()
+        || summary
+            .attention_tags
+            .contains(&SubscriptionAttentionTag::Skipped);
+    let lifecycle_state = if media_kind_changed {
+        SubscriptionLifecycleState::Queued
+    } else {
+        head.lifecycle_state
+    };
+    let retry_count = if media_kind_changed {
+        0
+    } else {
+        head.retry_count
+    };
+    let retry_blocked = if media_kind_changed {
+        false
+    } else {
+        head.retry_blocked
+    };
 
     let (schedulable, blocked_reason, execution_state, next_attempt_at, force_eligible_once) =
-        if media_kind == SubscriptionMediaKind::Tv {
+        if media_kind_changed {
+            let blocked_reason = observed
+                .blocked_reason
+                .as_ref()
+                .map(BlockedReason::as_str)
+                .map(str::to_string);
+            let due = (observed.schedulable && !skipped).then_some(observed_at);
             (
-                false,
-                Some(TV_NOT_SUPPORTED_REASON.to_string()),
+                observed.schedulable,
+                blocked_reason,
                 SubscriptionExecutionState::Idle,
-                None,
+                due,
                 false,
             )
         } else if was_inactive {
@@ -1215,13 +1240,9 @@ fn update_existing_seen(
                 .as_ref()
                 .map(BlockedReason::as_str)
                 .map(str::to_string);
-            let skipped = payload.skip_reason.is_some()
-                || summary
-                    .attention_tags
-                    .contains(&SubscriptionAttentionTag::Skipped);
             let due = (observed.schedulable
-                && head.lifecycle_state != SubscriptionLifecycleState::Completed
-                && !head.retry_blocked
+                && lifecycle_state != SubscriptionLifecycleState::Completed
+                && !retry_blocked
                 && !skipped)
                 .then_some(observed_at);
             (
@@ -1243,16 +1264,15 @@ fn update_existing_seen(
                 head.force_eligible_once,
             )
         };
-    let (claimed_operation, attempt_id, lease_until) =
-        if media_kind == SubscriptionMediaKind::Tv || was_inactive {
-            (None, None, None)
-        } else {
-            (
-                existing.claimed_operation,
-                existing.attempt_id.clone(),
-                existing.lease_until,
-            )
-        };
+    let (claimed_operation, attempt_id, lease_until) = if was_inactive || media_kind_changed {
+        (None, None, None)
+    } else {
+        (
+            existing.claimed_operation,
+            existing.attempt_id.clone(),
+            existing.lease_until,
+        )
+    };
     let blocked_reason_typed = blocked_reason
         .as_deref()
         .map(BlockedReason::try_new)
@@ -1263,8 +1283,11 @@ fn update_existing_seen(
         || head.media_kind != media_kind
         || head.schedulable != schedulable
         || head.blocked_reason != blocked_reason_typed
+        || head.lifecycle_state != lifecycle_state
         || head.execution_state != execution_state
         || head.next_attempt_at != next_attempt_at
+        || head.retry_count != retry_count
+        || head.retry_blocked != retry_blocked
         || head.force_eligible_once != force_eligible_once
         || existing.claimed_operation != claimed_operation
         || existing.attempt_id != attempt_id
@@ -1288,13 +1311,13 @@ fn update_existing_seen(
         last_seen_snapshot_id: Some(snapshot_id.clone()),
         media_kind,
         schedulable,
-        blocked_reason: blocked_reason_typed,
-        lifecycle_state: head.lifecycle_state,
+        blocked_reason: blocked_reason_typed.clone(),
+        lifecycle_state,
         execution_state,
         next_attempt_at,
-        retry_count: head.retry_count,
+        retry_count,
         max_retries: head.max_retries,
-        retry_blocked: head.retry_blocked,
+        retry_blocked,
         force_eligible_once,
         updated_at,
     };
@@ -1323,10 +1346,13 @@ fn update_existing_seen(
                 media_kind.as_str(),
                 i64::from(schedulable),
                 blocked_reason,
+                lifecycle_state.as_str(),
                 execution_state_label(execution_state),
                 next_attempt_at
                     .map(|value| command_integer("next_attempt_at", value))
                     .transpose()?,
+                i64::from(retry_count),
+                i64::from(retry_blocked),
                 i64::from(force_eligible_once),
                 claimed_operation.map(ExecutionOperation::as_str),
                 attempt_id.as_ref().map(ExecutionAttemptId::as_str),
@@ -1350,13 +1376,13 @@ fn update_existing_seen(
             &existing,
             attempt,
             fence,
-            PollSupersedeReason::ParkedAsTvNotSupported,
+            PollSupersedeReason::MediaKindChanged,
             SupersedeAfter {
                 revision,
                 active: true,
                 execution_state: SubscriptionExecutionState::Idle,
-                media_kind: SubscriptionMediaKind::Tv,
-                blocked_reason: Some(TV_NOT_SUPPORTED_REASON),
+                media_kind,
+                blocked_reason: blocked_reason_typed.as_ref().map(BlockedReason::as_str),
                 target_title: projection.title.as_str(),
             },
         )?;
@@ -1399,8 +1425,7 @@ fn insert_new_seen(
         .as_ref()
         .map(BlockedReason::as_str)
         .map(str::to_string);
-    let next_attempt_at =
-        (media_kind == SubscriptionMediaKind::Movie && observed.schedulable).then_some(observed_at);
+    let next_attempt_at = observed.schedulable.then_some(observed_at);
     let head = SubscriptionHead {
         key: crate::subscription::repository::SubscriptionKey::try_new(
             account_key,
@@ -1484,14 +1509,14 @@ fn increment_revision(current: Revision) -> RepositoryResult<Revision> {
 #[derive(Debug, Clone, Copy)]
 enum PollSupersedeReason {
     MissingFromCompleteSnapshot,
-    ParkedAsTvNotSupported,
+    MediaKindChanged,
 }
 
 impl PollSupersedeReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::MissingFromCompleteSnapshot => "missing_from_complete_snapshot",
-            Self::ParkedAsTvNotSupported => "parked_as_tv_not_supported",
+            Self::MediaKindChanged => "media_kind_changed",
         }
     }
 }

@@ -11,6 +11,7 @@ pub(crate) mod effect_adapters;
     )
 )]
 pub(crate) mod effects;
+pub(crate) mod episode;
 pub(crate) mod execution;
 pub(crate) mod execution_effects;
 mod model;
@@ -43,5 +44,4 @@ pub use operation_logs::{
     NewOperationLogEntry, OperationLogEntry, OperationLogPage, OperationLogQuery,
 };
 
-pub(crate) const TV_NOT_SUPPORTED_REASON: &str = "tv_not_supported";
 pub(crate) const INACTIVE_SUBSCRIPTION_REASON: &str = "subscription_inactive";

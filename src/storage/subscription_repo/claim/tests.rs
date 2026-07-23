@@ -374,6 +374,7 @@ fn audit_rows(path: &Path) -> Vec<(String, String, String, Value)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RowControls {
     revision: i64,
+    lifecycle_state: String,
     execution_state: String,
     claimed_operation: Option<String>,
     attempt_id: Option<String>,
@@ -386,7 +387,7 @@ fn row_controls(path: &Path, subject_id: &str) -> RowControls {
     Connection::open(path)
         .expect("open claim controls fixture")
         .query_row(
-            r#"SELECT revision, execution_state, claimed_operation, attempt_id, lease_until,
+            r#"SELECT revision, lifecycle_state, execution_state, claimed_operation, attempt_id, lease_until,
                       force_eligible_once, next_attempt_at
                  FROM wanted_subscription_records
                 WHERE account_key = ?1 AND subject_id = ?2"#,
@@ -394,12 +395,13 @@ fn row_controls(path: &Path, subject_id: &str) -> RowControls {
             |row| {
                 Ok(RowControls {
                     revision: row.get(0)?,
-                    execution_state: row.get(1)?,
-                    claimed_operation: row.get(2)?,
-                    attempt_id: row.get(3)?,
-                    lease_until: row.get(4)?,
-                    force_eligible_once: row.get(5)?,
-                    next_attempt_at: row.get(6)?,
+                    lifecycle_state: row.get(1)?,
+                    execution_state: row.get(2)?,
+                    claimed_operation: row.get(3)?,
+                    attempt_id: row.get(4)?,
+                    lease_until: row.get(5)?,
+                    force_eligible_once: row.get(6)?,
+                    next_attempt_at: row.get(7)?,
                 })
             },
         )
@@ -550,9 +552,14 @@ async fn claim_due_uses_expired_then_force_then_normal_priority_and_atomic_audit
         .into_claim()
         .expect("normal candidate must remain claimable");
     assert_eq!(normal.detail().summary().head.key.subject_id, BASE_SUBJECT);
+    assert_eq!(
+        normal.detail().summary().head.lifecycle_state,
+        SubscriptionLifecycleState::Meta
+    );
     assert_eq!(attempt_ids.calls(), 3);
 
     let forced_controls = row_controls(&fixture.path, "forced");
+    assert_eq!(forced_controls.lifecycle_state, "meta");
     assert_eq!(forced_controls.execution_state, "running");
     assert_eq!(
         forced_controls.claimed_operation.as_deref(),
@@ -733,7 +740,7 @@ async fn claim_one_returns_typed_rejections_without_nonce_or_audit() {
                 ClaimOneResult::Rejected(ClaimRejection::Unschedulable { .. })
             ) | (
                 "tv",
-                ClaimOneResult::Rejected(ClaimRejection::UnsupportedMediaKind { .. })
+                ClaimOneResult::Rejected(ClaimRejection::Unschedulable { .. })
             ) | (
                 "not-due",
                 ClaimOneResult::Rejected(ClaimRejection::NotDue { .. })
@@ -2102,6 +2109,57 @@ async fn exact_finish_merges_search_delta_into_latest_poll_and_detail_revision()
             "finish_attempt",
         ]
     );
+}
+
+#[tokio::test]
+async fn movie_meta_finish_updates_payload_and_projection_atomically() {
+    let fixture = fresh_fixture("movie-meta-projection").await;
+    let repository = repository(
+        &fixture.path,
+        Arc::new(FixedClock::new(NOW)),
+        Arc::new(SequenceAttemptIds::new(["attempt-movie-meta"])),
+    );
+    let token = claim_token(&repository, BASE_SUBJECT).await;
+    let source = WantedSourcePayload {
+        title: "Enriched movie title".to_string(),
+        release_year: Some(2026),
+        poster_url: "https://img.test/enriched.jpg".to_string(),
+        original_title: Some("Original movie title".to_string()),
+        summary: Some("Full metadata summary".to_string()),
+        category_text: Some("movie".to_string()),
+        tags: vec!["movie".to_string()],
+        douban_sort_time: Some(456),
+        ..WantedSourcePayload::default()
+    };
+
+    let result = repository
+        .finish(
+            FinishExecutionCommand::try_new(
+                token,
+                FinishExecutionDisposition::MetaReady,
+                ExecutionPayloadDelta::MovieMeta {
+                    source: Box::new(source.clone()),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("persist enriched movie metadata");
+
+    let detail = result.detail();
+    assert_eq!(
+        detail.summary().head.lifecycle_state,
+        SubscriptionLifecycleState::Searching
+    );
+    assert_eq!(detail.summary().projection.title, source.title);
+    assert_eq!(detail.summary().projection.release_year, Some(2026));
+    assert_eq!(detail.summary().projection.poster_url, source.poster_url);
+    assert_eq!(
+        detail.payload().source.original_title,
+        source.original_title
+    );
+    assert_eq!(detail.payload().source.summary, source.summary);
+    assert_eq!(detail.payload().source.tags, vec!["movie"]);
 }
 
 #[tokio::test]

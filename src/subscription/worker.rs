@@ -17,7 +17,7 @@ use super::execution::{
 use super::ports::SubscriptionPollRepository;
 use super::repository::payload::WantedSourcePayload;
 use super::repository::{
-    ApplyCompleteSnapshotCommand, BeginPollCommand, BlockedReason, IncompleteSnapshotObservation,
+    ApplyCompleteSnapshotCommand, BeginPollCommand, IncompleteSnapshotObservation,
     IncompleteSnapshotReason, NewRecordPolicy, PollRetryPolicy, RecordIncompleteSnapshotCommand,
     RecordPollFailureCommand, RepositoryError, SnapshotRecord,
 };
@@ -761,6 +761,7 @@ fn execution_policy(config: &FileConfig) -> ExecutionPolicy {
         account_key: douban::auth_cache_key_fragment(&config.douban_cookie).unwrap_or_default(),
         effects: ExecutionEffectPolicy {
             douban_cookie: config.douban_cookie.clone(),
+            tmdb_api_key: config.tmdb_api_key.clone(),
             mteam_api_key: config.mteam_api_key.clone(),
             qb_servers: config
                 .qb_servers
@@ -917,18 +918,7 @@ fn snapshot_record(
         douban_return_order: Some(return_order.min(u32::MAX as usize) as u32),
         ..WantedSourcePayload::default()
     };
-    match media_kind {
-        SubscriptionMediaKind::Movie => {
-            SnapshotRecord::try_new(&item.subject_id, media_kind, true, None, source)
-        }
-        SubscriptionMediaKind::Tv => SnapshotRecord::try_new(
-            &item.subject_id,
-            media_kind,
-            false,
-            Some(BlockedReason::try_new("tv_not_supported")?),
-            source,
-        ),
-    }
+    SnapshotRecord::try_new(&item.subject_id, media_kind, true, None, source)
 }
 
 fn normalized_tags(tags: &[String]) -> Vec<String> {

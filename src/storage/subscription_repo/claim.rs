@@ -20,10 +20,10 @@ use crate::subscription::repository::{
     FailExecutionCommand, FailExecutionResult, FinishExecutionCommand, FinishExecutionResult,
     IssueOwnerPayload, IssuePayload, ReleaseExecutionCommand, ReleaseExecutionResult,
     RepositoryError, RepositoryResult, Revision, SubscriptionDetail, SubscriptionKey,
+    SubscriptionProjection,
 };
 use crate::subscription::{
     SubscriptionAttentionTag, SubscriptionExecutionState, SubscriptionLifecycleState,
-    SubscriptionMediaKind,
 };
 
 const MAX_ATTEMPT_ID_ATTEMPTS: usize = 8;
@@ -51,7 +51,6 @@ SELECT subject_id
    AND active = 1
    AND schedulable = 1
    AND blocked_reason IS NULL
-   AND media_kind = 'movie'
    AND lifecycle_state != 'completed'
    AND execution_state = 'idle'
    AND force_eligible_once = 1
@@ -67,7 +66,6 @@ SELECT subject_id
    AND active = 1
    AND schedulable = 1
    AND blocked_reason IS NULL
-   AND media_kind = 'movie'
    AND lifecycle_state != 'completed'
    AND execution_state = 'idle'
    AND force_eligible_once = 0
@@ -93,6 +91,7 @@ SELECT claimed_operation, attempt_id, lease_until
 const CLAIM_IDLE_SQL: &str = r#"
 UPDATE wanted_subscription_records
    SET revision = revision + 1,
+       lifecycle_state = CASE WHEN ?4 = 'movie_meta' THEN 'meta' ELSE lifecycle_state END,
        execution_state = 'running',
        claimed_operation = ?4,
        attempt_id = ?5,
@@ -110,6 +109,7 @@ UPDATE wanted_subscription_records
 const RECLAIM_EXPIRED_SQL: &str = r#"
 UPDATE wanted_subscription_records
    SET revision = revision + 1,
+       lifecycle_state = CASE WHEN ?4 = 'movie_meta' THEN 'meta' ELSE lifecycle_state END,
        claimed_operation = ?4,
        attempt_id = ?5,
        lease_until = ?6,
@@ -152,7 +152,12 @@ UPDATE wanted_subscription_records
        lease_until = NULL,
        attention_tags_json = ?11,
        updated_at = MAX(updated_at, ?12),
-       record_json = ?13
+       record_json = ?13,
+       title = ?14,
+       release_year = ?15,
+       poster_url = ?16,
+       category_text = ?17,
+       douban_sort_time = ?18
  WHERE account_key = ?1
    AND subject_id = ?2
    AND execution_state = 'running'
@@ -487,6 +492,7 @@ fn finish(
         &command.token().key().account_key,
         &command.token().key().subject_id,
     )?;
+    let projection = SubscriptionProjection::from_source(&payload.source)?;
     let attention_tags = terminal_attention_tags(
         &stored.detail.summary().attention_tags,
         command.disposition().waits_for_release(),
@@ -516,6 +522,14 @@ fn finish(
                 attention_tags_json,
                 now_sql,
                 record_json,
+                projection.title.as_str(),
+                projection.release_year.map(i64::from),
+                projection.poster_url.as_str(),
+                projection.category_text.as_deref(),
+                projection
+                    .douban_sort_time
+                    .map(|value| repository_integer("payload.source.douban_sort_time", value))
+                    .transpose()?,
             ],
         )
         .map_err(|error| map_write_error("consume exact successful execution attempt", error))?;
@@ -533,6 +547,7 @@ fn finish(
         false,
         &attention_tags,
         &payload,
+        &projection,
     )?;
     append_finish_audit(
         &transaction,
@@ -593,6 +608,7 @@ fn fail(
         &command.token().key().account_key,
         &command.token().key().subject_id,
     )?;
+    let projection = SubscriptionProjection::from_source(&payload.source)?;
     let attention_tags = terminal_attention_tags(
         &stored.detail.summary().attention_tags,
         false,
@@ -621,6 +637,14 @@ fn fail(
                 attention_tags_json,
                 now_sql,
                 record_json,
+                projection.title.as_str(),
+                projection.release_year.map(i64::from),
+                projection.poster_url.as_str(),
+                projection.category_text.as_deref(),
+                projection
+                    .douban_sort_time
+                    .map(|value| repository_integer("payload.source.douban_sort_time", value))
+                    .transpose()?,
             ],
         )
         .map_err(|error| map_write_error("consume exact failed execution attempt", error))?;
@@ -638,6 +662,7 @@ fn fail(
         retry_blocked,
         &attention_tags,
         &payload,
+        &projection,
     )?;
     append_fail_audit(
         &transaction,
@@ -940,13 +965,6 @@ fn classify(stored: &StoredSubscription, now: u64) -> RepositoryResult<Classific
     if !head.active {
         return Ok(Classification::Rejected(ClaimRejection::Inactive));
     }
-    if head.media_kind != SubscriptionMediaKind::Movie {
-        return Ok(Classification::Rejected(
-            ClaimRejection::UnsupportedMediaKind {
-                media_kind: head.media_kind,
-            },
-        ));
-    }
     if head.lifecycle_state == SubscriptionLifecycleState::Completed {
         return Ok(Classification::Rejected(ClaimRejection::Completed));
     }
@@ -1047,6 +1065,11 @@ fn persist_claim(
     let expected_force = head.force_eligible_once;
     let expected_updated_at = head.updated_at.max(now);
     let operation = eligibility.operation();
+    let expected_lifecycle = if operation == ExecutionOperation::Meta {
+        SubscriptionLifecycleState::Meta
+    } else {
+        head.lifecycle_state
+    };
     let previous = eligibility.previous().cloned();
     let lease_until = now
         .checked_add(lease_ttl)
@@ -1136,9 +1159,10 @@ fn persist_claim(
     if post.detail.summary().head.next_attempt_at != expected_next_attempt_at
         || post.detail.summary().head.force_eligible_once != expected_force
         || post.detail.summary().head.updated_at != expected_updated_at
+        || post.detail.summary().head.lifecycle_state != expected_lifecycle
     {
         return Err(corrupt(
-            "execution claim changed due, force, or updated-time controls unexpectedly",
+            "execution claim persisted unexpected lifecycle, due, force, or updated-time controls",
         ));
     }
     if post.detail.payload() != stored.detail.payload()
@@ -1398,6 +1422,19 @@ fn verify_immutable_subscription_fields(
     before: &SubscriptionDetail,
     after: &SubscriptionDetail,
 ) -> RepositoryResult<()> {
+    verify_immutable_subscription_head_fields(before, after)?;
+    if before.summary().projection != after.summary().projection {
+        return Err(corrupt(
+            "execution update changed subscription projection outside terminal payload merge",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_immutable_subscription_head_fields(
+    before: &SubscriptionDetail,
+    after: &SubscriptionDetail,
+) -> RepositoryResult<()> {
     let before_head = &before.summary().head;
     let after_head = &after.summary().head;
     if before_head.key != after_head.key
@@ -1408,7 +1445,6 @@ fn verify_immutable_subscription_fields(
         || before_head.schedulable != after_head.schedulable
         || before_head.blocked_reason != after_head.blocked_reason
         || before_head.max_retries != after_head.max_retries
-        || before.summary().projection != after.summary().projection
     {
         return Err(corrupt(
             "execution update changed subscription fields outside its ownership",
@@ -1429,8 +1465,9 @@ fn verify_terminal_post_write(
     expected_retry_blocked: bool,
     expected_attention_tags: &[SubscriptionAttentionTag],
     expected_payload: &crate::subscription::repository::SubscriptionPayload,
+    expected_projection: &SubscriptionProjection,
 ) -> RepositoryResult<()> {
-    verify_immutable_subscription_fields(before, &post.detail)?;
+    verify_immutable_subscription_head_fields(before, &post.detail)?;
     let head = &post.detail.summary().head;
     if !matches!(&post.controls, ExecutionControls::Idle)
         || head.execution_state != SubscriptionExecutionState::Idle
@@ -1442,6 +1479,7 @@ fn verify_terminal_post_write(
         || head.retry_blocked != expected_retry_blocked
         || head.force_eligible_once
         || post.detail.summary().attention_tags != expected_attention_tags
+        || &post.detail.summary().projection != expected_projection
         || post.detail.payload() != expected_payload
     {
         return Err(corrupt(

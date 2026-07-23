@@ -132,6 +132,132 @@ export function episodeStill(episode) {
   return "";
 }
 
+// Conservatively recognizes the coverage advertised by a TV torrent title.
+// Unknown titles are never treated as packs automatically.
+export function classifyTvTorrentTitle(title, expectedSeason = null, episodeTotal = null) {
+  const raw = String(title || "").trim();
+  const normalized = raw.toLowerCase().replace(/[–—]/g, "-");
+  const season = positiveInteger(expectedSeason);
+  const total = positiveInteger(episodeTotal);
+
+  const seasonEpisode = normalized.match(
+    /(?:^|[^a-z0-9])s(\d{1,2})[ ._-]*e(\d{1,3})(?:[ ._-]*(?:e)?(\d{1,3}))?(?=$|[^a-z0-9])/i,
+  );
+  if (seasonEpisode) {
+    return episodeCoverage(
+      Number(seasonEpisode[1]),
+      Number(seasonEpisode[2]),
+      Number(seasonEpisode[3] || seasonEpisode[2]),
+      season,
+      total,
+    );
+  }
+
+  const bareEpisode = normalized.match(
+    /(?:^|[^a-z0-9])(?:episode|ep|e)(\d{1,3})(?:[ ._-]*(?:(?:episode|ep|e)[ ._-]*)?(\d{1,3}))?(?=$|[^a-z0-9])/i,
+  );
+  if (bareEpisode) {
+    return episodeCoverage(
+      season,
+      Number(bareEpisode[1]),
+      Number(bareEpisode[2] || bareEpisode[1]),
+      season,
+      total,
+    );
+  }
+
+  const chineseEpisode = raw.match(
+    /第\s*(\d{1,3})\s*集?(?:\s*[-~至到]\s*(?:第\s*)?(\d{1,3})\s*集)?/,
+  );
+  if (chineseEpisode) {
+    return episodeCoverage(
+      season,
+      Number(chineseEpisode[1]),
+      Number(chineseEpisode[2] || chineseEpisode[1]),
+      season,
+      total,
+    );
+  }
+
+  const plainRange = season
+    ? normalized.match(/(?:^|[^a-z0-9])(\d{1,3})\s*[-~]\s*(\d{1,3})(?=$|[^a-z0-9])/)
+    : null;
+  if (plainRange) {
+    return episodeCoverage(season, Number(plainRange[1]), Number(plainRange[2]), season, total);
+  }
+
+  const seasonMarker = normalized.match(
+    /(?:^|[^a-z0-9])s(?:eason[ ._-]*)?(\d{1,2})(?=$|[^a-z0-9])/i,
+  );
+  const wordSeason = normalized.match(/season[ ._-]*(\d{1,2})(?=$|[^a-z0-9])/i);
+  const packSeason = Number(seasonMarker?.[1] || wordSeason?.[1] || season || 0) || null;
+  const packKeyword =
+    /\b(?:complete|full[ ._-]*season|season[ ._-]*pack|batch|collection)\b/i.test(normalized) ||
+    /全季|全集|合集|整季/.test(raw);
+  if (packSeason && (packKeyword || seasonMarker)) {
+    const compatible = !season || packSeason === season;
+    return {
+      kind: "season_pack",
+      seasonNumber: packSeason,
+      episodeStart: 1,
+      episodeEnd: total,
+      compatible,
+      label: "S" + pad2(packSeason) + " 整季合集",
+    };
+  }
+
+  return {
+    kind: "unknown",
+    seasonNumber: null,
+    episodeStart: null,
+    episodeEnd: null,
+    compatible: false,
+    label: "未识别集数",
+  };
+}
+
+function episodeCoverage(foundSeason, start, end, expectedSeason, total) {
+  const normalizedSeason = positiveInteger(foundSeason) || expectedSeason;
+  const normalizedStart = positiveInteger(start);
+  const normalizedEnd = positiveInteger(end);
+  if (!normalizedStart || !normalizedEnd || normalizedEnd < normalizedStart) {
+    return {
+      kind: "unknown",
+      seasonNumber: normalizedSeason,
+      episodeStart: null,
+      episodeEnd: null,
+      compatible: false,
+      label: "未识别集数",
+    };
+  }
+  const compatible =
+    (!expectedSeason || !normalizedSeason || normalizedSeason === expectedSeason) &&
+    (!total || normalizedEnd <= total);
+  const kind = normalizedEnd > normalizedStart ? "partial_pack" : "episode";
+  const seasonLabel = normalizedSeason ? "S" + pad2(normalizedSeason) : "";
+  const episodeLabel =
+    kind === "episode"
+      ? "E" + pad2(normalizedStart)
+      : "E" + pad2(normalizedStart) + "-E" + pad2(normalizedEnd);
+  return {
+    kind,
+    seasonNumber: normalizedSeason,
+    episodeStart: normalizedStart,
+    episodeEnd: normalizedEnd,
+    compatible,
+    label: (seasonLabel + episodeLabel + " " + (kind === "episode" ? "单集" : "部分合集")).trim(),
+  };
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
 export function mteamTorrentWebUrl(torrentId) {
   const id = String(torrentId ?? "").trim();
   return id ? `https://kp.m-team.cc/detail/${encodeURIComponent(id)}` : "https://kp.m-team.cc/";

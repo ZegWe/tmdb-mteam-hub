@@ -4,7 +4,7 @@ use std::fmt;
 
 use super::{
     SubscriptionAttentionTag, SubscriptionExecutionState, SubscriptionLifecycleState,
-    SubscriptionMediaKind, TV_NOT_SUPPORTED_REASON,
+    SubscriptionMediaKind,
 };
 
 pub(crate) mod payload;
@@ -510,11 +510,10 @@ impl SubscriptionHead {
         if self.execution_state == SubscriptionExecutionState::Running
             && (!self.active
                 || !self.schedulable
-                || self.media_kind != SubscriptionMediaKind::Movie
                 || self.lifecycle_state == SubscriptionLifecycleState::Completed)
         {
             return Err(RepositoryError::CorruptData {
-                message: "a running subscription must be an active schedulable non-completed movie"
+                message: "a running subscription must be active, schedulable and non-completed"
                     .to_string(),
             });
         }
@@ -533,17 +532,6 @@ impl SubscriptionHead {
             return Err(RepositoryError::CorruptData {
                 message: "force_eligible_once requires an active schedulable due record"
                     .to_string(),
-            });
-        }
-        if self.media_kind == SubscriptionMediaKind::Tv
-            && (self.schedulable
-                || self.blocked_reason.as_ref().map(BlockedReason::as_str)
-                    != Some(TV_NOT_SUPPORTED_REASON)
-                || self.execution_state != SubscriptionExecutionState::Idle
-                || self.next_attempt_at.is_some())
-        {
-            return Err(RepositoryError::CorruptData {
-                message: "TV subscriptions must remain parked as tv_not_supported".to_string(),
             });
         }
         Ok(())
@@ -709,7 +697,6 @@ impl ClaimDueResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClaimRejection {
     Inactive,
-    UnsupportedMediaKind { media_kind: SubscriptionMediaKind },
     Unschedulable { blocked_reason: BlockedReason },
     Completed,
     LiveAttempt { current: CurrentExecutionAttempt },
@@ -758,6 +745,12 @@ impl ExecutionScheduleDelay {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ExecutionPayloadDelta {
     Meta,
+    MovieMeta {
+        source: Box<payload::WantedSourcePayload>,
+    },
+    TvMeta {
+        tv: payload::TvDetailPayload,
+    },
     Search {
         candidates: Option<Vec<payload::CandidateMatchPayload>>,
         download_updates: Vec<DownloadArtifactPayload>,
@@ -774,7 +767,7 @@ pub(crate) enum ExecutionPayloadDelta {
 impl ExecutionPayloadDelta {
     pub(crate) const fn operation(&self) -> ExecutionOperation {
         match self {
-            Self::Meta => ExecutionOperation::Meta,
+            Self::Meta | Self::MovieMeta { .. } | Self::TvMeta { .. } => ExecutionOperation::Meta,
             Self::Search { .. } => ExecutionOperation::Search,
             Self::Progress { .. } => ExecutionOperation::Progress,
             Self::Link { .. } => ExecutionOperation::Link,
@@ -783,7 +776,8 @@ impl ExecutionPayloadDelta {
 
     fn validate_shape(&self) -> RepositoryResult<()> {
         match self {
-            Self::Meta => Ok(()),
+            Self::Meta | Self::TvMeta { .. } => Ok(()),
+            Self::MovieMeta { source } => source.validate(),
             Self::Search {
                 download_updates, ..
             }
@@ -822,6 +816,12 @@ impl ExecutionPayloadDelta {
         self.validate_shape()?;
         match self {
             Self::Meta => {}
+            Self::MovieMeta { source } => {
+                let mut merged = latest.source.clone();
+                merge_source_observation(&mut merged, source.as_ref());
+                latest.source = merged;
+            }
+            Self::TvMeta { tv } => latest.tv = Some(tv.clone()),
             Self::Search {
                 candidates,
                 download_updates,
@@ -846,9 +846,7 @@ impl ExecutionPayloadDelta {
     }
 }
 
-/// Successful lifecycle disposition for one movie execution operation.
-///
-/// The enum freezes the only legal state transitions while TV remains parked.
+/// Successful lifecycle disposition for one movie or TV execution operation.
 /// Delayed variants carry relative durations, never caller-authored absolute
 /// timestamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -860,6 +858,7 @@ pub(crate) enum FinishExecutionDisposition {
     ProgressDownloaded,
     LinkPendingDownload { retry_after: ExecutionScheduleDelay },
     LinkPlanned { retry_after: ExecutionScheduleDelay },
+    LinkMoreRequired,
     LinkCompleted,
 }
 
@@ -869,15 +868,18 @@ impl FinishExecutionDisposition {
             Self::MetaReady => ExecutionOperation::Meta,
             Self::SearchWaiting { .. } | Self::SearchPushed => ExecutionOperation::Search,
             Self::ProgressPending { .. } | Self::ProgressDownloaded => ExecutionOperation::Progress,
-            Self::LinkPendingDownload { .. } | Self::LinkPlanned { .. } | Self::LinkCompleted => {
-                ExecutionOperation::Link
-            }
+            Self::LinkPendingDownload { .. }
+            | Self::LinkPlanned { .. }
+            | Self::LinkMoreRequired
+            | Self::LinkCompleted => ExecutionOperation::Link,
         }
     }
 
     pub(crate) const fn next_lifecycle(&self) -> SubscriptionLifecycleState {
         match self {
-            Self::MetaReady | Self::SearchWaiting { .. } => SubscriptionLifecycleState::Searching,
+            Self::MetaReady | Self::SearchWaiting { .. } | Self::LinkMoreRequired => {
+                SubscriptionLifecycleState::Searching
+            }
             Self::SearchPushed
             | Self::ProgressPending { .. }
             | Self::LinkPendingDownload { .. } => SubscriptionLifecycleState::Downloading,
@@ -890,9 +892,10 @@ impl FinishExecutionDisposition {
 
     pub(crate) const fn next_delay(&self) -> Option<ExecutionScheduleDelay> {
         match self {
-            Self::MetaReady | Self::SearchPushed | Self::ProgressDownloaded => {
-                Some(ExecutionScheduleDelay(0))
-            }
+            Self::MetaReady
+            | Self::SearchPushed
+            | Self::ProgressDownloaded
+            | Self::LinkMoreRequired => Some(ExecutionScheduleDelay(0)),
             Self::SearchWaiting { retry_after }
             | Self::ProgressPending { retry_after }
             | Self::LinkPendingDownload { retry_after }
@@ -914,6 +917,7 @@ impl FinishExecutionDisposition {
             Self::ProgressDownloaded => "progress_downloaded",
             Self::LinkPendingDownload { .. } => "link_pending_download",
             Self::LinkPlanned { .. } => "link_planned",
+            Self::LinkMoreRequired => "link_more_required",
             Self::LinkCompleted => "link_completed",
         }
     }
@@ -1924,21 +1928,11 @@ fn validate_schedulability(
 }
 
 fn validate_snapshot_schedulability(
-    media_kind: SubscriptionMediaKind,
+    _media_kind: SubscriptionMediaKind,
     schedulable: bool,
     blocked_reason: Option<&BlockedReason>,
 ) -> RepositoryResult<()> {
-    validate_schedulability(schedulable, blocked_reason)?;
-    if media_kind == SubscriptionMediaKind::Tv
-        && (schedulable
-            || blocked_reason.map(BlockedReason::as_str) != Some(TV_NOT_SUPPORTED_REASON))
-    {
-        return Err(RepositoryError::invalid(
-            "blocked_reason",
-            "TV snapshot records must remain unschedulable as tv_not_supported",
-        ));
-    }
-    Ok(())
+    validate_schedulability(schedulable, blocked_reason)
 }
 
 fn validate_snapshot_records(
@@ -2753,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_record_hard_parks_tv_and_keeps_movie_schedulability_rules() {
+    fn snapshot_record_allows_schedulable_tv_and_keeps_general_schedulability_rules() {
         assert!(SnapshotRecord::try_new(
             "movie",
             SubscriptionMediaKind::Movie,
@@ -2770,14 +2764,16 @@ mod tests {
             source("Blocked movie"),
         )
         .is_ok());
-        assert!(SnapshotRecord::try_new(
+        let tv = SnapshotRecord::try_new(
             "tv",
             SubscriptionMediaKind::Tv,
             true,
             None,
             source("Unparked TV"),
         )
-        .is_err());
+        .unwrap();
+        assert!(tv.schedulable);
+        assert!(tv.blocked_reason.is_none());
         assert!(SnapshotRecord::try_new(
             "tv",
             SubscriptionMediaKind::Tv,
@@ -2785,21 +2781,7 @@ mod tests {
             Some(BlockedReason::try_new("unsupported").unwrap()),
             source("Wrong parking"),
         )
-        .is_err());
-
-        let parked = SnapshotRecord::try_new(
-            "tv",
-            SubscriptionMediaKind::Tv,
-            false,
-            Some(BlockedReason::try_new("tv_not_supported").unwrap()),
-            source("Parked TV"),
-        )
-        .unwrap();
-        assert!(!parked.schedulable);
-        assert_eq!(
-            parked.blocked_reason.as_ref().map(BlockedReason::as_str),
-            Some("tv_not_supported")
-        );
+        .is_ok());
     }
 
     #[test]
@@ -3096,10 +3078,7 @@ mod tests {
 
         let mut unparked_tv = head();
         unparked_tv.media_kind = SubscriptionMediaKind::Tv;
-        assert!(matches!(
-            unparked_tv.validate(),
-            Err(RepositoryError::CorruptData { .. })
-        ));
+        assert!(unparked_tv.validate().is_ok());
     }
 
     #[test]

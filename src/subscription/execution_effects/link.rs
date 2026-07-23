@@ -30,8 +30,12 @@ pub(super) fn plans(
         .release_year
         .ok_or_else(|| "subscription release year is required for link layout".to_string())?;
     let source_root = PathBuf::from(category.download_dir.trim());
-    let target_root =
-        PathBuf::from(category.link_target_dir.trim()).join(format!("{title}.{year}"));
+    let target_root = link_target_root(
+        category,
+        &title,
+        year,
+        payload.tv.as_ref().map(|tv| tv.season_number),
+    );
     if source_root.as_os_str().is_empty() || target_root.as_os_str().is_empty() {
         return Err("subscription category link paths are empty".to_string());
     }
@@ -68,6 +72,18 @@ pub(super) fn plans(
         return Err("qB file list has no safe relative files to link".to_string());
     }
     Ok(plans)
+}
+
+fn link_target_root(
+    category: &ExecutionCategory,
+    title: &str,
+    year: u16,
+    season_number: Option<u32>,
+) -> PathBuf {
+    let root = PathBuf::from(category.link_target_dir.trim()).join(format!("{title}.{year}"));
+    season_number
+        .map(|season| root.join(format!("Season {season:02}")))
+        .unwrap_or(root)
 }
 
 pub(super) fn error(status: &HardlinkFileStatus) -> Option<String> {
@@ -131,5 +147,27 @@ mod tests {
             PathBuf::from("Movie/feature.mkv")
         );
         assert_eq!(safe_title_component("电影 / A:B?"), "电影 A B");
+    }
+
+    #[test]
+    fn tv_layout_adds_a_stable_season_directory() {
+        let category = ExecutionCategory {
+            name: "TV".to_string(),
+            wanted_tag: "电视剧".to_string(),
+            qb_server_id: "qb".to_string(),
+            qb_category: "tv".to_string(),
+            qb_save_dir_name: "tv".to_string(),
+            download_dir: "D:/downloads".to_string(),
+            link_target_dir: "D:/media/TV".to_string(),
+        };
+
+        assert_eq!(
+            link_target_root(&category, "Show", 2026, Some(2)),
+            PathBuf::from("D:/media/TV/Show.2026/Season 02")
+        );
+        assert_eq!(
+            link_target_root(&category, "Movie", 2026, None),
+            PathBuf::from("D:/media/TV/Movie.2026")
+        );
     }
 }

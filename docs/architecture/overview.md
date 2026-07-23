@@ -58,8 +58,9 @@ revision。running detail CAS 会以 `ExecutionGateConflict` 拒绝 attention ta
 变化，Poll 也会在 complete missing 和 complete/incomplete movie→TV 两条清除 running attempt
 路径原子记录 supersede 审计。`SubscriptionExecutionService` 负责 bounded claim、effect dispatch 和
 exact finish/fail；worker 从持久化的 `next_poll_at` 恢复 Poll 下界，并使用可配置 batch/concurrency、
-jitter、backpressure 和 graceful cancellation 执行 movie due work。disabled 与 dry-run 都不会 claim，
-TV 仍由仓储硬性停放为 `tv_not_supported`。
+jitter、backpressure 和 graceful cancellation 执行 movie/TV due work。disabled 与 dry-run 都不会 claim。
+TV 会从 TMDB 初始化目标季与集数，按首个未覆盖集搜索 M-Team，识别单集、部分合集与整季包，
+并在每次下载完成后按实际文件覆盖继续搜索或完成订阅。
 
 旧 `WantedSubscriptionStore`、schema-v4/blob/JSON、whole-account load/save、旧 watcher/service/policy
 和 effect command stack 已全部删除；`lib.rs` 已缩至 41 行模块/启动 facade，qB、M-Team、TMDB、

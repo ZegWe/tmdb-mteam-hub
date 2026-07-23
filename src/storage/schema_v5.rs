@@ -2,7 +2,8 @@ use std::fmt;
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-pub(crate) const SCHEMA_VERSION: u32 = 5;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
+const PREVIOUS_SCHEMA_VERSION: u32 = 5;
 
 /// Canonical operation-log indexes for a freshly initialized latest-schema database.
 pub(crate) const ENSURE_OPERATION_LOG_INDEXES_SQL: &str = r#"
@@ -152,7 +153,6 @@ CREATE TABLE wanted_subscription_records (
         execution_state != 'running'
         OR (active = 1
             AND schedulable = 1
-            AND media_kind = 'movie'
             AND lifecycle_state != 'completed')
     ),
     CHECK (
@@ -182,13 +182,6 @@ CREATE TABLE wanted_subscription_records (
             AND schedulable = 1
             AND lifecycle_state != 'completed'
             AND next_attempt_at IS NOT NULL)
-    ),
-    CHECK (
-        media_kind != 'tv'
-        OR (schedulable = 0
-            AND blocked_reason = 'tv_not_supported'
-            AND execution_state = 'idle'
-            AND next_attempt_at IS NULL)
     )
 ) STRICT;
 
@@ -213,7 +206,6 @@ ON wanted_subscription_records
 WHERE active = 1
   AND schedulable = 1
   AND blocked_reason IS NULL
-  AND media_kind = 'movie'
   AND lifecycle_state != 'completed'
   AND execution_state = 'idle'
   AND force_eligible_once = 0
@@ -230,7 +222,6 @@ ON wanted_subscription_records
 WHERE active = 1
   AND schedulable = 1
   AND blocked_reason IS NULL
-  AND media_kind = 'movie'
   AND lifecycle_state != 'completed'
   AND execution_state = 'idle'
   AND force_eligible_once = 1
@@ -244,6 +235,76 @@ CREATE UNIQUE INDEX wanted_records_attempt_v5_uidx
 ON wanted_subscription_records (attempt_id)
 WHERE attempt_id IS NOT NULL;
 "#;
+
+/// Transactionally upgrades the only supported predecessor by rebuilding the
+/// constrained subscription table. Existing parked TV rows become queued and
+/// due without changing their JSON payload or artifact history.
+pub(crate) fn migrate_previous_schema(
+    connection: &mut Connection,
+) -> Result<bool, rusqlite::Error> {
+    let version = connection.query_row(
+        "SELECT value FROM subscription_schema_meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get::<_, u32>(0),
+    )?;
+    if version == SCHEMA_VERSION {
+        return Ok(false);
+    }
+    if version != PREVIOUS_SCHEMA_VERSION {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    connection.pragma_update(None, "foreign_keys", false)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "ALTER TABLE wanted_subscription_records RENAME TO wanted_subscription_records_v5_backup;",
+    )?;
+    let table_start = LATEST_SCHEMA_SQL
+        .find("CREATE TABLE wanted_subscription_records (")
+        .expect("latest schema contains wanted table");
+    let table_end = LATEST_SCHEMA_SQL[table_start..]
+        .find("CREATE TABLE operation_logs")
+        .map(|offset| table_start + offset)
+        .expect("latest schema contains operation log table after wanted table");
+    transaction.execute_batch(&LATEST_SCHEMA_SQL[table_start..table_end])?;
+    transaction.execute_batch(
+        r#"
+INSERT INTO wanted_subscription_records (
+    account_key, subject_id, revision, active, inactive_at, last_seen_snapshot_id,
+    media_kind, schedulable, blocked_reason, lifecycle_state, execution_state,
+    next_attempt_at, retry_count, max_retries, retry_blocked, force_eligible_once,
+    claimed_operation, attempt_id, lease_until, title, release_year, poster_url,
+    category_text, douban_sort_time, attention_tags_json, updated_at, record_json
+)
+SELECT account_key, subject_id, revision + CASE
+           WHEN media_kind = 'tv' AND active = 1 AND lifecycle_state != 'completed' THEN 1
+           ELSE 0
+       END,
+       active, inactive_at, last_seen_snapshot_id, media_kind,
+       CASE WHEN media_kind = 'tv' AND active = 1 AND lifecycle_state != 'completed' THEN 1 ELSE schedulable END,
+       CASE WHEN media_kind = 'tv' AND active = 1 AND lifecycle_state != 'completed' THEN NULL ELSE blocked_reason END,
+       lifecycle_state, execution_state,
+       CASE WHEN media_kind = 'tv' AND active = 1 AND lifecycle_state != 'completed'
+            THEN COALESCE(next_attempt_at, updated_at) ELSE next_attempt_at END,
+       retry_count, max_retries, retry_blocked, force_eligible_once,
+       claimed_operation, attempt_id, lease_until, title, release_year, poster_url,
+       category_text, douban_sort_time, attention_tags_json, updated_at, record_json
+  FROM wanted_subscription_records_v5_backup;
+DROP TABLE wanted_subscription_records_v5_backup;
+"#,
+    )?;
+    let indexes_start = LATEST_SCHEMA_SQL
+        .find("CREATE INDEX wanted_records_due_v5_idx")
+        .expect("latest schema contains wanted indexes");
+    transaction.execute_batch(&LATEST_SCHEMA_SQL[indexes_start..])?;
+    transaction.execute(
+        "UPDATE subscription_schema_meta SET value = ?1 WHERE key = 'schema_version'",
+        [SCHEMA_VERSION],
+    )?;
+    transaction.commit()?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    Ok(true)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaContractError {
@@ -481,7 +542,6 @@ const WANTED_RECORD_REQUIRED_SQL: &[&str] = &[
         execution_state != 'running'
         OR (active = 1
             AND schedulable = 1
-            AND media_kind = 'movie'
             AND lifecycle_state != 'completed')
     )"#,
     r#"CHECK (
@@ -511,13 +571,6 @@ const WANTED_RECORD_REQUIRED_SQL: &[&str] = &[
             AND schedulable = 1
             AND lifecycle_state != 'completed'
             AND next_attempt_at IS NOT NULL)
-    )"#,
-    r#"CHECK (
-        media_kind != 'tv'
-        OR (schedulable = 0
-            AND blocked_reason = 'tv_not_supported'
-            AND execution_state = 'idle'
-            AND next_attempt_at IS NULL)
     )"#,
 ];
 
@@ -579,7 +632,7 @@ const INDEXES: &[IndexContract] = &[
             },
         ],
         partial_predicate: Some(
-            "active = 1 and schedulable = 1 and blocked_reason is null and media_kind = 'movie' and lifecycle_state != 'completed' and execution_state = 'idle' and force_eligible_once = 0 and retry_blocked = 0 and next_attempt_at is not null",
+            "active = 1 and schedulable = 1 and blocked_reason is null and lifecycle_state != 'completed' and execution_state = 'idle' and force_eligible_once = 0 and retry_blocked = 0 and next_attempt_at is not null",
         ),
     },
     IndexContract {
@@ -631,7 +684,7 @@ const INDEXES: &[IndexContract] = &[
             },
         ],
         partial_predicate: Some(
-            "active = 1 and schedulable = 1 and blocked_reason is null and media_kind = 'movie' and lifecycle_state != 'completed' and execution_state = 'idle' and force_eligible_once = 1 and next_attempt_at is not null",
+            "active = 1 and schedulable = 1 and blocked_reason is null and lifecycle_state != 'completed' and execution_state = 'idle' and force_eligible_once = 1 and next_attempt_at is not null",
         ),
     },
     IndexContract {
@@ -1196,4 +1249,98 @@ fn normalize_sql(sql: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_unparks_active_tv_and_preserves_json_payloads() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize_latest_schema(&mut connection).unwrap();
+        connection
+            .execute(
+                "UPDATE subscription_schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                [PREVIOUS_SCHEMA_VERSION],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                r#"
+INSERT INTO subscription_meta (
+    account_key, state_version, bootstrap_completed, created_at, updated_at,
+    last_poll_attempt_at, last_poll_success_at, poll_failure_count, next_poll_at,
+    last_poll_error, poll_generation, open_poll_generation, open_snapshot_id,
+    last_incomplete_at, last_incomplete_reason, last_incomplete_fetched_pages,
+    last_incomplete_truncated, last_incomplete_end_observed, last_complete_snapshot_id
+) VALUES (
+    'account', 1, 1, 10, 20, 20, 20, 0, 30, NULL, 1, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, 'snapshot-1'
+);
+PRAGMA ignore_check_constraints = ON;
+INSERT INTO wanted_subscription_records (
+    account_key, subject_id, revision, active, inactive_at, last_seen_snapshot_id,
+    media_kind, schedulable, blocked_reason, lifecycle_state, execution_state,
+    next_attempt_at, retry_count, max_retries, retry_blocked, force_eligible_once,
+    claimed_operation, attempt_id, lease_until, title, release_year, poster_url,
+    category_text, douban_sort_time, attention_tags_json, updated_at, record_json
+) VALUES (
+    'account', 'tv-1', 7, 1, NULL, 'snapshot-1', 'tv', 0,
+    'tv_not_supported', 'queued', 'idle', NULL, 0, 3, 0, 0,
+    NULL, NULL, NULL, '测试剧集', 2026, '', '电视剧', 20,
+    '["waiting_release"]', 20,
+    '{"tv":{"season_number":2,"episode_total":6},"artifacts":{"downloads":[{"torrent_id":"fixture"}]}}'
+);
+PRAGMA ignore_check_constraints = OFF;
+"#,
+            )
+            .unwrap();
+        let before = connection
+            .query_row(
+                "SELECT CAST(attention_tags_json AS BLOB), CAST(record_json AS BLOB) FROM wanted_subscription_records WHERE subject_id = 'tv-1'",
+                [],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+
+        assert!(migrate_previous_schema(&mut connection).unwrap());
+        validate_schema_contract(&connection).unwrap();
+
+        let migrated = connection
+            .query_row(
+                r#"SELECT revision, schedulable, blocked_reason, next_attempt_at,
+                          CAST(attention_tags_json AS BLOB), CAST(record_json AS BLOB)
+                     FROM wanted_subscription_records
+                    WHERE subject_id = 'tv-1'"#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, u64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(migrated.0, 8);
+        assert!(migrated.1);
+        assert_eq!(migrated.2, None);
+        assert_eq!(migrated.3, 20);
+        assert_eq!((migrated.4, migrated.5), before);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM subscription_schema_meta WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert!(!migrate_previous_schema(&mut connection).unwrap());
+    }
 }

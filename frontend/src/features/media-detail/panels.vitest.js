@@ -127,4 +127,40 @@ describe("media-detail panels", () => {
     expect(wrapper.emitted("push-torrent")[0][1]).toBe(trigger.element);
     expect(wrapper.get(".torrent-card-link").attributes("href")).toContain("torrent-42");
   });
+
+  it("allows pushes only for TV rows recognized in the selected season", async () => {
+    const wrapper = mount(MteamTorrentPanel, {
+      props: {
+        mteam: {
+          mediaType: "tv",
+          seasons: [
+            { season_number: 1, episode_count: 8 },
+            { season_number: 2, episode_count: 10 },
+          ],
+          seasonNumber: 2,
+          sources: [{ source: "tv_season", label: "第 2 季" }],
+          activeSource: "tv_season",
+          rows: [
+            {
+              id: "safe",
+              name: "Series.S02E03-E06",
+              tv_match: { label: "S02E03-E06 部分合集", compatible: true },
+            },
+            {
+              id: "unsafe",
+              name: "Series.1080p",
+              tv_match: { label: "未识别集数", compatible: false },
+            },
+          ],
+          loading: false,
+          error: "",
+        },
+      },
+    });
+
+    expect(wrapper.findAll(".torrent-push-trigger")).toHaveLength(1);
+    expect(wrapper.findAll(".torrent-tv-match")[1].classes()).toContain("is-incompatible");
+    await wrapper.get("select").setValue("1");
+    expect(wrapper.emitted("select-season")[0]).toEqual([1]);
+  });
 });

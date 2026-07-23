@@ -29,6 +29,7 @@ pub(crate) struct ExecutionPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ExecutionEffectPolicy {
     pub(crate) douban_cookie: String,
+    pub(crate) tmdb_api_key: String,
     pub(crate) mteam_api_key: String,
     pub(crate) qb_servers: Vec<ExecutionQbServer>,
     pub(crate) categories: Vec<ExecutionCategory>,
@@ -862,6 +863,10 @@ mod tests {
             .load_detail(SubscriptionKey::try_new("account-1", "subject-2").unwrap())
             .await
             .unwrap();
+        assert_eq!(
+            detail.summary().head.lifecycle_state,
+            SubscriptionLifecycleState::Meta
+        );
         assert_eq!(detail.summary().head.retry_count, 1);
         assert_eq!(detail.payload().issues[0].message, "fixture failed");
     }

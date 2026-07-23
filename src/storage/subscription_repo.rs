@@ -313,8 +313,13 @@ impl SqliteSubscriptionRepository {
         self.executor.preflight()
     }
 
-    pub(crate) fn force_retry(&self, key: SubscriptionKey, now_unix: u64) -> RepoFuture<SubscriptionHead> {
-        self.executor.run(move |connection| force_retry(connection, key, now_unix))
+    pub(crate) fn force_retry(
+        &self,
+        key: SubscriptionKey,
+        now_unix: u64,
+    ) -> RepoFuture<SubscriptionHead> {
+        self.executor
+            .run(move |connection| force_retry(connection, key, now_unix))
     }
 }
 
@@ -380,7 +385,11 @@ fn force_retry(
                       record_json = json_remove(record_json, '$.skip_reason'),
                       updated_at = ?3
                 WHERE account_key = ?1 AND subject_id = ?2"#,
-            params![key.account_key.as_str(), key.subject_id.as_str(), i64::try_from(now_unix).unwrap_or(i64::MAX)],
+            params![
+                key.account_key.as_str(),
+                key.subject_id.as_str(),
+                i64::try_from(now_unix).unwrap_or(i64::MAX)
+            ],
         )
         .map_err(|error| map_write_error("force_retry", error))?;
     if changed == 0 {
@@ -2194,7 +2203,7 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
             unsupported_error,
             RepositoryError::UnsupportedSchema {
                 found: 4,
-                maximum_supported: 5,
+                maximum_supported: 6,
             }
         );
         assert_eq!(
@@ -2206,7 +2215,7 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
         let future = fresh_fixture("preflight-future").await;
         execute_fixture_sql(
             &future.path,
-            "UPDATE subscription_schema_meta SET value = 6 WHERE key = 'schema_version'",
+            "UPDATE subscription_schema_meta SET value = 7 WHERE key = 'schema_version'",
         )
         .await;
         let future_before = namespace_snapshot(&future);
@@ -2217,8 +2226,8 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
         assert_eq!(
             future_error,
             RepositoryError::UnsupportedSchema {
-                found: 6,
-                maximum_supported: 5,
+                found: 7,
+                maximum_supported: 6,
             }
         );
         assert_eq!(
@@ -2423,10 +2432,8 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
                    SET sql = replace(
                        sql,
                        'AND schedulable = 1
-            AND media_kind = ''movie''
             AND lifecycle_state != ''completed''',
                        'AND schedulable IN (0, 1)
-            AND media_kind = ''movie''
             AND lifecycle_state != ''completed'''
                    )
                  WHERE type = 'table' AND name = 'wanted_subscription_records';

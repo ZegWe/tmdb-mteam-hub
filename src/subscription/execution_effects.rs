@@ -26,6 +26,7 @@ use super::repository::payload::{
     stable_download_artifact_key, stable_resolved_link_artifact_key, CandidateMatchPayload,
     CandidatePayload, DownloadArtifactPayload, DownloadArtifactStatePayload, DownloadFilePayload,
     LinkArtifactPayload, LinkArtifactStatePayload, LinkDownloadRefPayload, LinkFilePayload,
+    TvDetailPayload, TvEpisodeDetailPayload, TvEpisodeIntentPayload, WantedSourcePayload,
 };
 use super::repository::{
     ClaimedSubscription, ExecutionOperation, ExecutionPayloadDelta, ExecutionScheduleDelay,
@@ -34,11 +35,15 @@ use super::repository::{
 use crate::clients::douban::DoubanClient;
 use crate::clients::mteam::MteamClient;
 use crate::clients::qbittorrent::{self, QbTorrentFile, QbTorrentInfo};
+use crate::clients::tmdb::TmdbClient;
 use crate::config::QbServerEntry;
+use crate::subscription::episode::recognize as recognize_episode;
+use crate::subscription::SubscriptionMediaKind;
 
 #[derive(Clone)]
 pub(crate) struct LatestSubscriptionExecutionEffects {
     douban: DoubanClient,
+    tmdb: TmdbClient,
     mteam: MteamClient,
     hardlinks: HardlinkEffectAdapter,
 }
@@ -46,11 +51,13 @@ pub(crate) struct LatestSubscriptionExecutionEffects {
 impl LatestSubscriptionExecutionEffects {
     pub(crate) fn try_production(
         douban: DoubanClient,
+        tmdb: TmdbClient,
         mteam: MteamClient,
         filesystem_concurrency: usize,
     ) -> Result<Self, crate::storage::blocking::BlockingExecutorConfigError> {
         Ok(Self {
             douban,
+            tmdb,
             mteam,
             hardlinks: HardlinkEffectAdapter::try_new(filesystem_concurrency)?,
         })
@@ -62,14 +69,178 @@ impl LatestSubscriptionExecutionEffects {
         policy: &ExecutionEffectPolicy,
     ) -> ExecutionEffectResult {
         match claimed.attempt().token().operation() {
-            ExecutionOperation::Meta => ExecutionEffectResult::Finished {
-                disposition: FinishExecutionDisposition::MetaReady,
-                payload_delta: ExecutionPayloadDelta::Meta,
-            },
+            ExecutionOperation::Meta => self.execute_meta(claimed, policy).await,
             ExecutionOperation::Search => self.execute_search(claimed, policy).await,
             ExecutionOperation::Progress => self.execute_progress(claimed, policy).await,
             ExecutionOperation::Link => self.execute_link(claimed, policy).await,
         }
+    }
+
+    async fn execute_meta(
+        &self,
+        claimed: &ClaimedSubscription,
+        policy: &ExecutionEffectPolicy,
+    ) -> ExecutionEffectResult {
+        if claimed.detail().summary().head.media_kind == SubscriptionMediaKind::Movie {
+            let key = &claimed.detail().summary().head.key;
+            return match crate::douban::subject_detail(
+                &self.douban,
+                &policy.douban_cookie,
+                &key.subject_id,
+            )
+            .await
+            {
+                Ok(detail) => ExecutionEffectResult::Finished {
+                    disposition: FinishExecutionDisposition::MetaReady,
+                    payload_delta: ExecutionPayloadDelta::MovieMeta {
+                        source: Box::new(movie_source_from_detail(
+                            &claimed.detail().payload().source,
+                            detail,
+                        )),
+                    },
+                },
+                Err(error) => failed(
+                    ExecutionOperation::Meta,
+                    "movie_metadata",
+                    error.to_string(),
+                    policy.system_retry_interval_secs,
+                ),
+            };
+        }
+        if let Some(tv) = &claimed.detail().payload().tv {
+            return ExecutionEffectResult::Finished {
+                disposition: FinishExecutionDisposition::MetaReady,
+                payload_delta: ExecutionPayloadDelta::TvMeta { tv: tv.clone() },
+            };
+        }
+        let retry_after = policy.system_retry_interval_secs;
+        if policy.tmdb_api_key.trim().is_empty() {
+            return failed(
+                ExecutionOperation::Meta,
+                "configuration",
+                "TMDB API credential is required to initialize TV episodes",
+                retry_after,
+            );
+        }
+        let source = &claimed.detail().payload().source;
+        let lookup_title = source
+            .original_title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(&source.title);
+        let requested_season = season_number_from_title(&source.title)
+            .or_else(|| season_number_from_title(lookup_title));
+        match self
+            .load_tv_detail(policy.tmdb_api_key.trim(), lookup_title, requested_season)
+            .await
+        {
+            Ok(tv) => ExecutionEffectResult::Finished {
+                disposition: FinishExecutionDisposition::MetaReady,
+                payload_delta: ExecutionPayloadDelta::TvMeta { tv },
+            },
+            Err(message) => failed(
+                ExecutionOperation::Meta,
+                "tv_metadata",
+                message,
+                retry_after,
+            ),
+        }
+    }
+
+    async fn load_tv_detail(
+        &self,
+        api_key: &str,
+        title: &str,
+        requested_season: Option<u32>,
+    ) -> Result<TvDetailPayload, String> {
+        let search_title = tv_series_search_title(title);
+        let response = self
+            .tmdb
+            .get_json(
+                api_key,
+                "/search/tv",
+                &[("query", &search_title), ("language", "zh-CN")],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let result = response
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|results| results.first())
+            .ok_or_else(|| format!("TMDB did not find TV metadata for {title}"))?;
+        let id = result
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "TMDB TV search result has no ID".to_string())?;
+        let detail = self
+            .tmdb
+            .get_json(api_key, &format!("/tv/{id}"), &[("language", "zh-CN")])
+            .await
+            .map_err(|error| error.to_string())?;
+        let seasons = detail
+            .get("seasons")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "TMDB TV detail has no seasons".to_string())?;
+        let season = requested_season
+            .and_then(|requested| {
+                seasons.iter().find(|season| {
+                    season
+                        .get("season_number")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(requested))
+                })
+            })
+            .or_else(|| {
+                seasons
+                    .iter()
+                    .filter(|season| {
+                        season
+                            .get("season_number")
+                            .and_then(serde_json::Value::as_u64)
+                            .is_some_and(|number| number > 0)
+                            && season
+                                .get("episode_count")
+                                .and_then(serde_json::Value::as_u64)
+                                .is_some_and(|count| count > 0)
+                    })
+                    .max_by_key(|season| {
+                        season
+                            .get("season_number")
+                            .and_then(serde_json::Value::as_u64)
+                    })
+            })
+            .ok_or_else(|| "TMDB TV detail has no regular season".to_string())?;
+        let season_number = u32::try_from(
+            season
+                .get("season_number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .map_err(|_| "TMDB season number is too large".to_string())?;
+        let episode_total = u32::try_from(
+            season
+                .get("episode_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .map_err(|_| "TMDB episode count is too large".to_string())?;
+        if season_number == 0 || episode_total == 0 {
+            return Err("TMDB selected season has no episodes".to_string());
+        }
+        Ok(TvDetailPayload {
+            season_number,
+            episode_total,
+            target_start_episode: 1,
+            target_end_episode: episode_total,
+            episodes: (1..=episode_total)
+                .map(|episode_number| TvEpisodeDetailPayload {
+                    season_number,
+                    episode_number,
+                    label: format!("S{season_number:02}E{episode_number:02}"),
+                    intent: TvEpisodeIntentPayload::Target,
+                })
+                .collect(),
+        })
     }
 
     async fn execute_search(
@@ -80,6 +251,7 @@ impl LatestSubscriptionExecutionEffects {
         let detail = claimed.detail();
         let key = &detail.summary().head.key;
         let payload = detail.payload();
+        let is_tv = detail.summary().head.media_kind == SubscriptionMediaKind::Tv;
         let retry_after = policy.search_interval_secs;
         let category = match category_for_source(&payload.source.tags, &policy.categories) {
             Ok(category) => category,
@@ -112,33 +284,75 @@ impl LatestSubscriptionExecutionEffects {
                 retry_after,
             );
         }
+        let tv_search = payload.tv.as_ref().and_then(|tv| {
+            first_uncovered_episode(payload, tv).map(|episode| {
+                let title = payload
+                    .source
+                    .original_title
+                    .as_deref()
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or(&payload.source.title);
+                format!("{title} S{:02}E{:02}", tv.season_number, episode)
+            })
+        });
+        let search_subject_id = if is_tv { "" } else { key.subject_id.as_str() };
+        let search_title = tv_search.as_deref().unwrap_or(&payload.source.title);
 
-        let (matches, selected) = if let Some((matches, selected)) = retry_selection(payload) {
-            (matches, Some(selected))
-        } else {
-            let candidates = match self
-                .search_candidates(
-                    policy.mteam_api_key.trim(),
-                    &policy.douban_cookie,
-                    &key.subject_id,
-                    &payload.source.title,
-                )
-                .await
-            {
-                Ok(candidates) => candidates,
-                Err(message) => {
-                    return failed(
-                        ExecutionOperation::Search,
-                        "mteam_search",
-                        message,
-                        policy.system_retry_interval_secs,
+        let (mut matches, mut selected) =
+            if let Some((matches, selected)) = retry_selection(payload) {
+                (matches, Some(selected))
+            } else {
+                let candidates = match self
+                    .search_candidates(
+                        policy.mteam_api_key.trim(),
+                        &policy.douban_cookie,
+                        search_subject_id,
+                        search_title,
                     )
-                }
+                    .await
+                {
+                    Ok(candidates) => candidates,
+                    Err(message) => {
+                        return failed(
+                            ExecutionOperation::Search,
+                            "mteam_search",
+                            message,
+                            policy.system_retry_interval_secs,
+                        )
+                    }
+                };
+                let matches = match_candidates(&candidates, &policy.torrent_match_rules);
+                let selected = matches.iter().find(|candidate| candidate.selected).cloned();
+                (matches, selected)
             };
-            let matches = match_candidates(&candidates, &policy.torrent_match_rules);
-            let selected = matches.iter().find(|candidate| candidate.selected).cloned();
-            (matches, selected)
-        };
+        if is_tv {
+            let Some(tv) = payload.tv.as_ref() else {
+                return failed(
+                    ExecutionOperation::Search,
+                    "tv_metadata",
+                    "TV episode metadata is missing",
+                    policy.system_retry_interval_secs,
+                );
+            };
+            let Some(cursor) = first_uncovered_episode(payload, tv) else {
+                return ExecutionEffectResult::Finished {
+                    disposition: FinishExecutionDisposition::SearchWaiting {
+                        retry_after: schedule_delay(retry_after),
+                    },
+                    payload_delta: ExecutionPayloadDelta::Search {
+                        candidates: Some(matches),
+                        download_updates: Vec::new(),
+                    },
+                };
+            };
+            selected = select_tv_candidate(
+                &mut matches,
+                tv.season_number,
+                cursor,
+                &policy.torrent_match_rules,
+                &payload.artifacts.downloads,
+            );
+        }
         let Some(selected) = selected else {
             return ExecutionEffectResult::Finished {
                 disposition: FinishExecutionDisposition::SearchWaiting {
@@ -337,7 +551,13 @@ impl LatestSubscriptionExecutionEffects {
                 )
             }
         };
-        let updated = updated_download(existing, &torrent, &files, system_now());
+        let updated = updated_download(
+            existing,
+            &torrent,
+            &files,
+            detail.payload().tv.as_ref(),
+            system_now(),
+        );
         let complete = torrent.is_complete();
         ExecutionEffectResult::Finished {
             disposition: if complete {
@@ -423,7 +643,13 @@ impl LatestSubscriptionExecutionEffects {
             }
         };
         let now = system_now();
-        let updated_download = updated_download(existing_download, &torrent, &files, now);
+        let mut updated_download = updated_download(
+            existing_download,
+            &torrent,
+            &files,
+            detail.payload().tv.as_ref(),
+            now,
+        );
         if !torrent.is_complete() {
             return ExecutionEffectResult::Finished {
                 disposition: FinishExecutionDisposition::LinkPendingDownload {
@@ -434,6 +660,26 @@ impl LatestSubscriptionExecutionEffects {
                     link_updates: Vec::new(),
                 },
             };
+        }
+
+        if let Some(tv) = detail.payload().tv.as_ref() {
+            let maps_target_episode = updated_download.files.iter().any(|file| {
+                file.season_number == Some(tv.season_number)
+                    && file.episode_number.is_some_and(|start| {
+                        let end = file.episode_end_number.unwrap_or(start);
+                        start <= tv.target_end_episode && end >= tv.target_start_episode
+                    })
+            });
+            if !maps_target_episode {
+                updated_download.state = DownloadArtifactStatePayload::Ignored;
+                return ExecutionEffectResult::Finished {
+                    disposition: FinishExecutionDisposition::LinkMoreRequired,
+                    payload_delta: ExecutionPayloadDelta::Link {
+                        download_updates: vec![updated_download],
+                        link_updates: Vec::new(),
+                    },
+                };
+            }
         }
 
         let plans = match link_plans(detail.payload(), category, existing_download, &files) {
@@ -492,16 +738,22 @@ impl LatestSubscriptionExecutionEffects {
         let files_payload = plans
             .iter()
             .zip(results.iter())
-            .map(|(plan, result)| LinkFilePayload {
-                source_path: plan.source_path.display().to_string(),
-                target_path: plan.target_path.display().to_string(),
-                size: plan.size,
-                outcome: result.outcome(),
-                season_number: None,
-                episode_number: None,
-                episode_end_number: None,
-                episode_label: None,
-                error: hardlink_error(result.status()),
+            .map(|(plan, result)| {
+                let marker = file_episode_marker(
+                    &plan.source_path.to_string_lossy(),
+                    detail.payload().tv.as_ref(),
+                );
+                LinkFilePayload {
+                    source_path: plan.source_path.display().to_string(),
+                    target_path: plan.target_path.display().to_string(),
+                    size: plan.size,
+                    outcome: result.outcome(),
+                    season_number: marker.0,
+                    episode_number: marker.1,
+                    episode_end_number: marker.2,
+                    episode_label: marker.3,
+                    error: hardlink_error(result.status()),
+                }
             })
             .collect::<Vec<_>>();
         let all_linked = files_payload
@@ -534,11 +786,19 @@ impl LatestSubscriptionExecutionEffects {
                 .map(|path| path.display().to_string()),
             checked_at: now,
             completed_at: all_linked.then_some(now),
-            files: files_payload,
+            files: files_payload.clone(),
         };
         ExecutionEffectResult::Finished {
             disposition: if all_linked {
-                FinishExecutionDisposition::LinkCompleted
+                if detail.summary().head.media_kind == SubscriptionMediaKind::Tv
+                    && detail.payload().tv.as_ref().is_some_and(|tv| {
+                        !tv_complete_after_link(detail.payload(), tv, &files_payload)
+                    })
+                {
+                    FinishExecutionDisposition::LinkMoreRequired
+                } else {
+                    FinishExecutionDisposition::LinkCompleted
+                }
             } else {
                 FinishExecutionDisposition::LinkPlanned {
                     retry_after: schedule_delay(policy.link_retry_interval_secs),
@@ -617,6 +877,208 @@ impl LatestSubscriptionExecutionEffects {
 
 fn should_try_imdb_fallback(candidates: &[CandidatePayload], subject_id: &str) -> bool {
     candidates.is_empty() && !subject_id.trim().is_empty()
+}
+
+fn movie_source_from_detail(
+    current: &WantedSourcePayload,
+    detail: crate::douban::DoubanSubjectDetail,
+) -> WantedSourcePayload {
+    let mut source = current.clone();
+    if !detail.title.trim().is_empty() {
+        source.title = detail.title.trim().to_string();
+    }
+    if !detail.poster_url.trim().is_empty() {
+        source.poster_url = detail.poster_url.trim().to_string();
+    }
+    if !detail.image.trim().is_empty() {
+        source.cover_url = detail.image.trim().to_string();
+    }
+    source.original_title = non_empty(&detail.original_title).or(source.original_title);
+    for (target, observed) in [
+        (&mut source.aka, detail.aka),
+        (&mut source.languages, detail.languages),
+        (&mut source.countries, detail.countries),
+        (&mut source.genres, detail.genres),
+        (&mut source.directors, detail.directors),
+        (&mut source.actors, detail.actors),
+    ] {
+        if !observed.is_empty() {
+            *target = observed;
+        }
+    }
+    source.date_published = non_empty(&detail.date_published).or(source.date_published);
+    source.duration = non_empty(&detail.duration).or(source.duration);
+    source.summary = non_empty(&detail.summary).or(source.summary);
+    source.rating_value = detail.rating.value.or(source.rating_value);
+    source.rating_count = detail.rating.count.or(source.rating_count);
+    source.release_year =
+        release_year_from_metadata(source.date_published.as_deref()).or(source.release_year);
+    source
+}
+
+fn release_year_from_metadata(value: Option<&str>) -> Option<u16> {
+    let value = value?;
+    value.as_bytes().windows(4).find_map(|digits| {
+        digits
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| std::str::from_utf8(digits).ok()?.parse::<u16>().ok())
+            .flatten()
+            .filter(|year| (1..=9999).contains(year))
+    })
+}
+
+fn season_number_from_title(title: &str) -> Option<u32> {
+    let lower = title.to_ascii_lowercase();
+    for marker in ["season ", "season.", "season_", "season-"] {
+        if let Some(rest) = lower.split(marker).nth(1) {
+            if let Some(value) = leading_number(rest) {
+                return Some(value);
+            }
+        }
+    }
+    let chars = title.chars().collect::<Vec<_>>();
+    for index in 0..chars.len() {
+        if chars[index] != '第' {
+            continue;
+        }
+        let Some(relative_end) = chars[index + 1..].iter().position(|value| *value == '季') else {
+            continue;
+        };
+        let end = index + 1 + relative_end;
+        let number = chars[index + 1..end].iter().collect::<String>();
+        if let Ok(value) = number.parse() {
+            return Some(value);
+        }
+        if let Some(value) = parse_chinese_number(&number) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_chinese_number(value: &str) -> Option<u32> {
+    fn digit(character: char) -> Option<u32> {
+        match character {
+            '零' | '〇' => Some(0),
+            '一' => Some(1),
+            '二' | '两' => Some(2),
+            '三' => Some(3),
+            '四' => Some(4),
+            '五' => Some(5),
+            '六' => Some(6),
+            '七' => Some(7),
+            '八' => Some(8),
+            '九' => Some(9),
+            _ => None,
+        }
+    }
+
+    let chars = value.trim().chars().collect::<Vec<_>>();
+    match chars.as_slice() {
+        [single] => digit(*single),
+        ['十', ones] => digit(*ones).map(|ones| 10 + ones),
+        [tens, '十'] => digit(*tens).map(|tens| tens * 10),
+        [tens, '十', ones] => Some(digit(*tens)? * 10 + digit(*ones)?),
+        _ => None,
+    }
+    .filter(|value| *value > 0)
+}
+
+fn tv_series_search_title(title: &str) -> String {
+    let trimmed = title.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let english = [" season ", " season.", " season_", " season-"]
+        .iter()
+        .filter_map(|marker| lower.find(marker))
+        .min();
+    let chinese = trimmed
+        .char_indices()
+        .find(|(index, character)| *character == '第' && trimmed[*index..].contains('季'))
+        .map(|(index, _)| index);
+    english
+        .into_iter()
+        .chain(chinese)
+        .min()
+        .map(|index| trimmed[..index].trim())
+        .filter(|title| !title.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn leading_number(value: &str) -> Option<u32> {
+    value
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+fn first_uncovered_episode(
+    payload: &super::repository::payload::SubscriptionPayload,
+    tv: &TvDetailPayload,
+) -> Option<u32> {
+    (tv.target_start_episode..=tv.target_end_episode).find(|episode| {
+        !payload
+            .artifacts
+            .links
+            .iter()
+            .flat_map(|link| &link.files)
+            .any(|file| {
+                file.outcome == LinkFileOutcome::Linked
+                    && file.season_number == Some(tv.season_number)
+                    && file.episode_number.is_some_and(|start| {
+                        let end = file.episode_end_number.unwrap_or(start);
+                        (start..=end).contains(episode)
+                    })
+            })
+    })
+}
+
+fn select_tv_candidate(
+    matches: &mut [CandidateMatchPayload],
+    season: u32,
+    episode: u32,
+    rules: &[super::execution::ExecutionTorrentMatchRule],
+    downloads: &[DownloadArtifactPayload],
+) -> Option<CandidateMatchPayload> {
+    let used = downloads
+        .iter()
+        .map(|download| download.torrent_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut selected_index = None;
+    let mut selected_priority = i32::MIN;
+    for (index, candidate) in matches.iter().enumerate() {
+        let eligible = !candidate.candidate.torrent_id.is_empty()
+            && !used.contains(candidate.candidate.torrent_id.as_str())
+            && (rules.is_empty() || candidate.matched_priority.is_some())
+            && recognize_episode(&candidate.candidate.title)
+                .is_some_and(|coverage| coverage.covers(season, episode));
+        if !eligible {
+            continue;
+        }
+        let priority = candidate.matched_priority.unwrap_or_default();
+        if selected_index.is_none() || priority > selected_priority {
+            selected_index = Some(index);
+            selected_priority = priority;
+        }
+    }
+    for (index, candidate) in matches.iter_mut().enumerate() {
+        candidate.selected = Some(index) == selected_index;
+        if candidate.selected {
+            candidate.excluded_reason = None;
+        } else if used.contains(candidate.candidate.torrent_id.as_str()) {
+            candidate.excluded_reason =
+                Some("torrent was already pushed for this TV subscription".to_string());
+        } else if recognize_episode(&candidate.candidate.title)
+            .is_none_or(|coverage| !coverage.covers(season, episode))
+        {
+            candidate.excluded_reason =
+                Some(format!("torrent does not cover S{season:02}E{episode:02}"));
+        }
+    }
+    selected_index.map(|index| matches[index].clone())
 }
 
 impl SubscriptionExecutionEffects for LatestSubscriptionExecutionEffects {
@@ -740,6 +1202,9 @@ fn retry_selection(
     payload: &super::repository::payload::SubscriptionPayload,
 ) -> Option<(Vec<CandidateMatchPayload>, CandidateMatchPayload)> {
     let artifact = current_download(payload)?;
+    if !matches!(artifact.state, DownloadArtifactStatePayload::Failed) {
+        return None;
+    }
     let selected = payload
         .candidates
         .iter()
@@ -823,6 +1288,7 @@ fn updated_download(
     existing: &DownloadArtifactPayload,
     torrent: &QbTorrentInfo,
     files: &[QbTorrentFile],
+    tv: Option<&TvDetailPayload>,
     now: u64,
 ) -> DownloadArtifactPayload {
     let complete = torrent.is_complete();
@@ -839,20 +1305,73 @@ fn updated_download(
     updated.total_size = Some(torrent.size);
     updated.files = files
         .iter()
-        .map(|file| DownloadFilePayload {
-            name: file.name.clone(),
-            size: file.size,
-            progress: file.progress.clamp(0.0, 1.0),
-            priority: file.priority,
-            season_number: None,
-            episode_number: None,
-            episode_end_number: None,
-            episode_label: None,
+        .map(|file| {
+            let marker = file_episode_marker(&file.name, tv);
+            DownloadFilePayload {
+                name: file.name.clone(),
+                size: file.size,
+                progress: file.progress.clamp(0.0, 1.0),
+                priority: file.priority,
+                season_number: marker.0,
+                episode_number: marker.1,
+                episode_end_number: marker.2,
+                episode_label: marker.3,
+            }
         })
         .collect();
     updated.checked_at = Some(now);
     updated.completed_at = complete.then_some(now).or(existing.completed_at);
     updated
+}
+
+fn file_episode_marker(
+    name: &str,
+    tv: Option<&TvDetailPayload>,
+) -> (Option<u32>, Option<u32>, Option<u32>, Option<String>) {
+    if !is_video_file(name) {
+        return (None, None, None, None);
+    }
+    let Some(coverage) = recognize_episode(name) else {
+        return (None, None, None, None);
+    };
+    let (mut season, episode, end) = coverage.parts();
+    if season.is_none() {
+        season = tv.map(|tv| tv.season_number);
+    }
+    (season, episode, end, Some(coverage.label()))
+}
+
+fn is_video_file(name: &str) -> bool {
+    let extension = std::path::Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "mkv" | "mp4" | "avi" | "ts" | "m2ts" | "mov" | "wmv" | "webm" | "mpg" | "mpeg"
+    )
+}
+
+fn tv_complete_after_link(
+    payload: &super::repository::payload::SubscriptionPayload,
+    tv: &TvDetailPayload,
+    current: &[LinkFilePayload],
+) -> bool {
+    (tv.target_start_episode..=tv.target_end_episode).all(|episode| {
+        payload
+            .artifacts
+            .links
+            .iter()
+            .flat_map(|link| &link.files)
+            .chain(current)
+            .any(|file| {
+                file.outcome == LinkFileOutcome::Linked
+                    && file.season_number == Some(tv.season_number)
+                    && file.episode_number.is_some_and(|start| {
+                        (start..=file.episode_end_number.unwrap_or(start)).contains(&episode)
+                    })
+            })
+    })
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -870,6 +1389,57 @@ fn system_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate_match(id: &str, title: &str) -> CandidateMatchPayload {
+        CandidateMatchPayload {
+            candidate: candidate(id, title, 10),
+            selected: false,
+            matched_rule_name: None,
+            matched_priority: None,
+            matched_keywords: Vec::new(),
+            excluded_reason: None,
+            rule_evaluations: Vec::new(),
+        }
+    }
+
+    fn tv_detail() -> TvDetailPayload {
+        TvDetailPayload {
+            season_number: 2,
+            episode_total: 6,
+            target_start_episode: 1,
+            target_end_episode: 6,
+            episodes: Vec::new(),
+        }
+    }
+
+    fn linked_file(start: u32, end: Option<u32>) -> LinkFilePayload {
+        LinkFilePayload {
+            source_path: format!("S02E{start:02}.mkv"),
+            target_path: format!("Season 02/S02E{start:02}.mkv"),
+            size: 1,
+            outcome: LinkFileOutcome::Linked,
+            season_number: Some(2),
+            episode_number: Some(start),
+            episode_end_number: end,
+            episode_label: None,
+            error: None,
+        }
+    }
+
+    fn link_artifact(files: Vec<LinkFilePayload>) -> LinkArtifactPayload {
+        LinkArtifactPayload {
+            idempotency_key: "link:v1:test".to_string(),
+            download: LinkDownloadRefPayload {
+                artifact_id: "download:v1:test".to_string(),
+            },
+            state: LinkArtifactStatePayload::Completed,
+            source_path: None,
+            target_dir: None,
+            checked_at: 1,
+            completed_at: Some(1),
+            files,
+        }
+    }
 
     fn candidate(id: &str, title: &str, seeders: u64) -> CandidatePayload {
         CandidatePayload {
@@ -950,5 +1520,187 @@ mod tests {
             "1292052"
         ));
         assert!(!should_try_imdb_fallback(&[], "  "));
+    }
+
+    #[test]
+    fn tv_candidate_selection_requires_cursor_coverage_and_skips_used_torrents() {
+        let mut matches = vec![
+            candidate_match("wrong-season", "Show.S01E03.1080p"),
+            candidate_match("used", "Show.S02E03.1080p"),
+            candidate_match("range", "Show.S02E01-E04.1080p"),
+            candidate_match("pack", "Show.S02.Complete.1080p"),
+        ];
+        let downloads = vec![DownloadArtifactPayload {
+            idempotency_key: "download:v1:used".to_string(),
+            torrent_id: "used".to_string(),
+            torrent_title: "Show.S02E03.1080p".to_string(),
+            qb_server_id: "qb".to_string(),
+            qb_server_name: None,
+            qb_category: "tv".to_string(),
+            qb_save_dir_name: "/downloads".to_string(),
+            qb_identifier: None,
+            qb_hash: None,
+            qb_name: None,
+            qb_state: None,
+            torrent_download_url: None,
+            mteam_torrent_url: None,
+            state: DownloadArtifactStatePayload::Downloaded,
+            progress: Some(1.0),
+            total_size: None,
+            files: Vec::new(),
+            pushed_at: Some(1),
+            checked_at: Some(1),
+            completed_at: Some(1),
+        }];
+
+        let selected = select_tv_candidate(&mut matches, 2, 3, &[], &downloads).unwrap();
+
+        assert_eq!(selected.candidate.torrent_id, "range");
+        assert_eq!(
+            matches
+                .iter()
+                .filter(|candidate| candidate.selected)
+                .count(),
+            1
+        );
+        assert!(matches[0]
+            .excluded_reason
+            .as_deref()
+            .unwrap()
+            .contains("does not cover"));
+        assert!(matches[1]
+            .excluded_reason
+            .as_deref()
+            .unwrap()
+            .contains("already pushed"));
+
+        let mut pack_only = vec![candidate_match("pack", "Show.S02.Complete.1080p")];
+        assert_eq!(
+            select_tv_candidate(&mut pack_only, 2, 6, &[], &[])
+                .unwrap()
+                .candidate
+                .torrent_id,
+            "pack"
+        );
+
+        let mut prioritized = vec![
+            candidate_match("low", "Show.S02E03.1080p"),
+            candidate_match("high", "Show.S02E03.2160p"),
+        ];
+        prioritized[0].matched_priority = Some(1);
+        prioritized[1].matched_priority = Some(10);
+        let rules = vec![super::super::execution::ExecutionTorrentMatchRule {
+            name: "quality".to_string(),
+            priority: 10,
+            mode: super::super::execution::ExecutionTorrentRuleMatchMode::Any,
+            title_keywords: vec!["Show".to_string()],
+            resolution_keywords: Vec::new(),
+            source_keywords: Vec::new(),
+        }];
+        assert_eq!(
+            select_tv_candidate(&mut prioritized, 2, 3, &rules, &[])
+                .unwrap()
+                .candidate
+                .torrent_id,
+            "high"
+        );
+    }
+
+    #[test]
+    fn tv_episode_progress_uses_linked_single_and_partial_coverage() {
+        let tv = tv_detail();
+        let mut payload = super::super::repository::payload::SubscriptionPayload::default();
+        payload.artifacts.links = vec![link_artifact(vec![linked_file(1, Some(4))])];
+
+        assert_eq!(first_uncovered_episode(&payload, &tv), Some(5));
+        assert!(!tv_complete_after_link(&payload, &tv, &[]));
+        assert!(tv_complete_after_link(
+            &payload,
+            &tv,
+            &[linked_file(5, Some(6))]
+        ));
+    }
+
+    #[test]
+    fn file_episode_markers_apply_selected_season_to_seasonless_names() {
+        let tv = tv_detail();
+        assert_eq!(
+            file_episode_marker("Show.[03-06].mkv", Some(&tv)),
+            (Some(2), Some(3), Some(6), Some("E03-E06".to_string()))
+        );
+        assert_eq!(file_episode_marker("Show.S03E01.mkv", Some(&tv)).0, Some(3));
+        assert_eq!(
+            file_episode_marker("poster.jpg", Some(&tv)),
+            (None, None, None, None)
+        );
+        assert_eq!(
+            file_episode_marker("Show.S02E03.srt", Some(&tv)),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn season_number_parser_handles_english_and_chinese_titles() {
+        assert_eq!(season_number_from_title("Show Season 3"), Some(3));
+        assert_eq!(season_number_from_title("剧名 第2季"), Some(2));
+        assert_eq!(season_number_from_title("剧名 第一季"), Some(1));
+        assert_eq!(season_number_from_title("剧名 第十二季"), Some(12));
+        assert_eq!(tv_series_search_title("Show Season 3"), "Show");
+        assert_eq!(tv_series_search_title("剧名 第一季"), "剧名");
+        assert_eq!(season_number_from_title("Show"), None);
+    }
+
+    #[test]
+    fn movie_metadata_enriches_source_without_losing_subscription_fields() {
+        let current = WantedSourcePayload {
+            title: "旧标题".to_string(),
+            release_year: Some(1999),
+            tags: vec!["电影".to_string()],
+            douban_sort_time: Some(123),
+            ..WantedSourcePayload::default()
+        };
+        let detail = crate::douban::DoubanSubjectDetail {
+            source: "douban",
+            media_type: "douban",
+            id: "1292052".to_string(),
+            subject_id: "1292052".to_string(),
+            url: "https://movie.douban.com/subject/1292052/".to_string(),
+            title: "肖申克的救赎".to_string(),
+            imdb_id: Some("tt0111161".to_string()),
+            original_title: "The Shawshank Redemption".to_string(),
+            aka: vec!["月黑高飞".to_string()],
+            languages: vec!["英语".to_string()],
+            countries: vec!["美国".to_string()],
+            image: "https://img.test/cover.jpg".to_string(),
+            poster_url: "https://img.test/poster.jpg".to_string(),
+            directors: vec!["弗兰克·德拉邦特".to_string()],
+            writers: vec!["斯蒂芬·金".to_string()],
+            actors: vec!["蒂姆·罗宾斯".to_string()],
+            genres: vec!["剧情".to_string()],
+            date_published: "1994-09-10".to_string(),
+            duration: "142分钟".to_string(),
+            summary: "希望让人自由。".to_string(),
+            rating: crate::douban::DoubanRating {
+                value: Some(9.7),
+                count: Some(3_000_000),
+                info: String::new(),
+                star_count: None,
+            },
+            user_interest: None,
+            user_rating: None,
+        };
+
+        let enriched = movie_source_from_detail(&current, detail);
+
+        assert_eq!(enriched.title, "肖申克的救赎");
+        assert_eq!(enriched.release_year, Some(1994));
+        assert_eq!(
+            enriched.original_title.as_deref(),
+            Some("The Shawshank Redemption")
+        );
+        assert_eq!(enriched.summary.as_deref(), Some("希望让人自由。"));
+        assert_eq!(enriched.rating_value, Some(9.7));
+        assert_eq!(enriched.tags, vec!["电影"]);
+        assert_eq!(enriched.douban_sort_time, Some(123));
     }
 }

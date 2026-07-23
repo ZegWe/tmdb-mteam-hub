@@ -5,4 +5,5 @@ pub(crate) mod service_lock;
 mod sqlite;
 mod subscription_repo;
 
+pub(crate) use sqlite::migrate_subscription_schema;
 pub(crate) use subscription_repo::SqliteSubscriptionRepository;

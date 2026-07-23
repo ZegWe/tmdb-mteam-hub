@@ -55,6 +55,18 @@ describe("subscription domain display", () => {
     expect(inactive.explanation).toContain("仅保留历史记录");
 
     const tvRecord = {
+      subject_id: "tv-active",
+      active: true,
+      media_kind: "tv",
+      schedulable: true,
+      blocked_reason: null,
+      lifecycle_state: "searching",
+    };
+    const tv = subscriptionCapabilities(tvRecord);
+    expect(tv.badges.map((badge) => badge.text)).toEqual(["可调度"]);
+    expect(tv.explanation).toContain("TV订阅当前可由后台任务调度");
+
+    const legacyTvRecord = {
       subject_id: "tv-1",
       active: true,
       media_kind: "tv",
@@ -62,9 +74,9 @@ describe("subscription domain display", () => {
       blocked_reason: "tv_not_supported",
       lifecycle_state: "downloading",
     };
-    const tv = subscriptionCapabilities(tvRecord);
-    expect(tv.badges.map((badge) => badge.text)).toEqual(["TV 未开放", "不可调度"]);
-    expect(tv.explanation).toContain("不会执行搜索、下载或硬链接");
+    const legacyTv = subscriptionCapabilities(legacyTvRecord);
+    expect(legacyTv.badges.map((badge) => badge.text)).toEqual(["TV 未开放", "不可调度"]);
+    expect(legacyTv.explanation).toContain("不会执行搜索、下载或硬链接");
 
     const blocked = subscriptionCapabilities({
       subject_id: "blocked-1",
