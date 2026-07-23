@@ -90,6 +90,7 @@ SELECT claimed_operation, attempt_id, lease_until
 const CLAIM_IDLE_SQL: &str = r#"
 UPDATE wanted_subscription_records
    SET revision = revision + 1,
+       lifecycle_state = CASE WHEN ?4 = 'movie_meta' THEN 'meta' ELSE lifecycle_state END,
        execution_state = 'running',
        claimed_operation = ?4,
        attempt_id = ?5,
@@ -107,6 +108,7 @@ UPDATE wanted_subscription_records
 const RECLAIM_EXPIRED_SQL: &str = r#"
 UPDATE wanted_subscription_records
    SET revision = revision + 1,
+       lifecycle_state = CASE WHEN ?4 = 'movie_meta' THEN 'meta' ELSE lifecycle_state END,
        claimed_operation = ?4,
        attempt_id = ?5,
        lease_until = ?6,
@@ -1037,6 +1039,11 @@ fn persist_claim(
     let expected_force = head.force_eligible_once;
     let expected_updated_at = head.updated_at.max(now);
     let operation = eligibility.operation();
+    let expected_lifecycle = if operation == ExecutionOperation::Meta {
+        SubscriptionLifecycleState::Meta
+    } else {
+        head.lifecycle_state
+    };
     let previous = eligibility.previous().cloned();
     let lease_until = now
         .checked_add(lease_ttl)
@@ -1126,9 +1133,10 @@ fn persist_claim(
     if post.detail.summary().head.next_attempt_at != expected_next_attempt_at
         || post.detail.summary().head.force_eligible_once != expected_force
         || post.detail.summary().head.updated_at != expected_updated_at
+        || post.detail.summary().head.lifecycle_state != expected_lifecycle
     {
         return Err(corrupt(
-            "execution claim changed due, force, or updated-time controls unexpectedly",
+            "execution claim persisted unexpected lifecycle, due, force, or updated-time controls",
         ));
     }
     if post.detail.payload() != stored.detail.payload()

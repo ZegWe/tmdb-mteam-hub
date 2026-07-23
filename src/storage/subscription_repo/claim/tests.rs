@@ -374,6 +374,7 @@ fn audit_rows(path: &Path) -> Vec<(String, String, String, Value)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RowControls {
     revision: i64,
+    lifecycle_state: String,
     execution_state: String,
     claimed_operation: Option<String>,
     attempt_id: Option<String>,
@@ -386,7 +387,7 @@ fn row_controls(path: &Path, subject_id: &str) -> RowControls {
     Connection::open(path)
         .expect("open claim controls fixture")
         .query_row(
-            r#"SELECT revision, execution_state, claimed_operation, attempt_id, lease_until,
+            r#"SELECT revision, lifecycle_state, execution_state, claimed_operation, attempt_id, lease_until,
                       force_eligible_once, next_attempt_at
                  FROM wanted_subscription_records
                 WHERE account_key = ?1 AND subject_id = ?2"#,
@@ -394,12 +395,13 @@ fn row_controls(path: &Path, subject_id: &str) -> RowControls {
             |row| {
                 Ok(RowControls {
                     revision: row.get(0)?,
-                    execution_state: row.get(1)?,
-                    claimed_operation: row.get(2)?,
-                    attempt_id: row.get(3)?,
-                    lease_until: row.get(4)?,
-                    force_eligible_once: row.get(5)?,
-                    next_attempt_at: row.get(6)?,
+                    lifecycle_state: row.get(1)?,
+                    execution_state: row.get(2)?,
+                    claimed_operation: row.get(3)?,
+                    attempt_id: row.get(4)?,
+                    lease_until: row.get(5)?,
+                    force_eligible_once: row.get(6)?,
+                    next_attempt_at: row.get(7)?,
                 })
             },
         )
@@ -550,9 +552,14 @@ async fn claim_due_uses_expired_then_force_then_normal_priority_and_atomic_audit
         .into_claim()
         .expect("normal candidate must remain claimable");
     assert_eq!(normal.detail().summary().head.key.subject_id, BASE_SUBJECT);
+    assert_eq!(
+        normal.detail().summary().head.lifecycle_state,
+        SubscriptionLifecycleState::Meta
+    );
     assert_eq!(attempt_ids.calls(), 3);
 
     let forced_controls = row_controls(&fixture.path, "forced");
+    assert_eq!(forced_controls.lifecycle_state, "meta");
     assert_eq!(forced_controls.execution_state, "running");
     assert_eq!(
         forced_controls.claimed_operation.as_deref(),

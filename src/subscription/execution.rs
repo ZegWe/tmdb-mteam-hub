@@ -863,6 +863,10 @@ mod tests {
             .load_detail(SubscriptionKey::try_new("account-1", "subject-2").unwrap())
             .await
             .unwrap();
+        assert_eq!(
+            detail.summary().head.lifecycle_state,
+            SubscriptionLifecycleState::Meta
+        );
         assert_eq!(detail.summary().head.retry_count, 1);
         assert_eq!(detail.payload().issues[0].message, "fixture failed");
     }
