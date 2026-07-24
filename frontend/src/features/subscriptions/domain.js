@@ -234,6 +234,7 @@ export function subscriptionDetailRows(record) {
       ? record.observation
       : {};
   const capabilities = subscriptionCapabilities(record);
+  const tv = record?.tv;
   return [
     row("豆瓣 ID", record.subject_id),
     row("分类文本", record.category_text),
@@ -250,6 +251,9 @@ export function subscriptionDetailRows(record) {
     row("简介", source.synopsis),
     row("豆瓣时间", source.douban_date),
     row("上映年份", record.release_year),
+    row("季数", tv ? tv.season_number : null),
+    row("总集数", tv?.episode_total),
+    row("目标范围", tv ? `${tv.target_start_episode} – ${tv.target_end_episode}` : null),
     row("订阅活动", capabilities.active ? "活跃" : "已停用"),
     row("媒体能力", capabilities.mediaKind === "tv" ? "TV 自动化" : "电影自动化"),
     row("调度能力", capabilities.schedulable ? "可调度" : "不可调度"),

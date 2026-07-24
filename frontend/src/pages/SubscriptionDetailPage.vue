@@ -57,7 +57,11 @@ let activeDetailId = "";
 
 const selectedDetail = computed(() => {
   const record = selectedSubscription.value;
-  return record && subscriptionStore.hasFreshDetail(record.subject_id) ? record : null;
+  if (!record) return null;
+  // Show cached detail records even while a background summary refresh is
+  // in progress. Collapsing to a spinner erases scroll position and makes
+  // reading the subscription page frustrating during auto-refresh.
+  return record;
 });
 const detailLoading = computed(
   () =>
