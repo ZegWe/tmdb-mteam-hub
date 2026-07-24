@@ -368,23 +368,15 @@
   user-select: none;
   font-size: 0.82rem;
   list-style: none;
+  transition: background 0.15s ease;
+}
+
+.subscription-task-panel:not([open]) > .subscription-task-summary:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .subscription-task-summary::-webkit-details-marker {
   display: none;
-}
-
-.subscription-task-summary::before {
-  content: "▸";
-  display: inline-block;
-  width: 1rem;
-  font-size: 0.72rem;
-  color: var(--muted);
-  transition: transform 0.15s ease;
-}
-
-.subscription-task-panel[open] > .subscription-task-summary::before {
-  transform: rotate(90deg);
 }
 
 .subscription-task-episode {
