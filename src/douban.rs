@@ -158,6 +158,15 @@ pub struct DoubanSubjectDetail {
     pub user_interest: Option<DoubanInterest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_rating: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episodes_count: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DoubanTvSeason {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) year: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -605,6 +614,31 @@ pub async fn subject_detail(
     Ok(detail)
 }
 
+pub(crate) async fn tv_seasons(
+    client: &DoubanClient,
+    cookie_header: &str,
+    subject_id: &str,
+) -> Result<Vec<DoubanTvSeason>, DoubanError> {
+    let cookie = normalize_cookie_header(cookie_header);
+    let url_str = format!("{REXXAR_MOVIE_URL_PREFIX}{subject_id}/seasons");
+    let url = Url::parse(&url_str)
+        .map_err(|e| DoubanError::upstream(format!("构造豆瓣 TV seasons URL 失败: {e}")))?;
+    let referer = format!("{REXXAR_MOVIE_REFERER_PREFIX}{subject_id}/");
+    let data = fetch_rexxar_json(client, url, &cookie, &referer).await?;
+    let entries = data
+        .as_array()
+        .ok_or_else(|| DoubanError::upstream("豆瓣 TV seasons 响应不是数组"))?;
+    entries
+        .iter()
+        .map(|entry| {
+            let id = value_to_string(entry.get("id")).unwrap_or_default();
+            let title = value_to_string(entry.get("title")).unwrap_or_default();
+            let year = value_to_string(entry.get("year"));
+            Ok(DoubanTvSeason { id, title, year })
+        })
+        .collect()
+}
+
 async fn fetch_rexxar_subject(
     client: &DoubanClient,
     subject_id: &str,
@@ -721,6 +755,10 @@ fn subject_detail_from_rexxar_json(
         .unwrap_or_default();
     let rating = rating_from_value(data.get("rating"));
     let (user_interest, user_rating) = rexxar_user_interest(data.get("interest"));
+    let episodes_count = data
+        .get("episodes_count")
+        .and_then(|value| value.as_u64())
+        .and_then(|count| u32::try_from(count).ok());
     Ok(DoubanSubjectDetail {
         source: "douban",
         media_type: "douban",
@@ -750,6 +788,7 @@ fn subject_detail_from_rexxar_json(
         rating,
         user_interest,
         user_rating,
+        episodes_count,
     })
 }
 
@@ -2184,5 +2223,57 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "count" && value == "20"));
         assert!(!pairs.iter().any(|(key, _)| key == "type"));
+    }
+
+    #[test]
+    fn subject_detail_parses_episodes_count_for_tv() {
+        let data = json!({
+            "id": "35467152",
+            "title": "测试剧集 第一季",
+            "original_title": "Test Series S1",
+            "aka": [],
+            "url": "https://movie.douban.com/subject/35467152/",
+            "cover_url": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p1.jpg",
+            "directors": [{"name": "导演"}],
+            "actors": [],
+            "genres": ["剧情"],
+            "pubdate": ["2024-01-01"],
+            "durations": ["45分钟"],
+            "intro": "简介",
+            "rating": {"count": 1000, "star_count": 4.0, "value": 8.1},
+            "languages": ["汉语普通话"],
+            "countries": ["中国大陆"],
+            "is_tv": true,
+            "episodes_count": 8
+        });
+
+        let detail = subject_detail_from_rexxar_json("35467152", &data).expect("rexxar tv detail");
+        assert_eq!(detail.episodes_count, Some(8));
+        assert_eq!(detail.title, "测试剧集 第一季");
+    }
+
+    #[test]
+    fn subject_detail_has_none_episodes_count_for_movie() {
+        let data = json!({
+            "id": "1292052",
+            "title": "肖申克的救赎",
+            "original_title": "The Shawshank Redemption",
+            "imdb_id": "tt0111161",
+            "url": "https://movie.douban.com/subject/1292052/",
+            "cover_url": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p480747492.jpg",
+            "directors": [{"name": "弗兰克·德拉邦特"}],
+            "actors": [{"name": "蒂姆·罗宾斯"}],
+            "genres": ["剧情"],
+            "pubdate": ["1994-09-10"],
+            "durations": ["142分钟"],
+            "intro": "剧情简介",
+            "rating": {"count": 3300949, "star_count": 5.0, "value": 9.7},
+            "languages": ["英语"],
+            "countries": ["美国"]
+        });
+
+        let detail = subject_detail_from_rexxar_json("1292052", &data).expect("rexxar movie detail");
+        assert_eq!(detail.episodes_count, None);
+        assert_eq!(detail.title, "肖申克的救赎");
     }
 }
