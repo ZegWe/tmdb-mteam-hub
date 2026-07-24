@@ -34,6 +34,7 @@ use super::repository::{
 };
 use crate::clients::douban::DoubanClient;
 use crate::clients::mteam::MteamClient;
+use crate::douban::DoubanSubjectDetail;
 use crate::clients::qbittorrent::{self, QbTorrentFile, QbTorrentInfo};
 use crate::clients::tmdb::TmdbClient;
 use crate::config::QbServerEntry;
@@ -107,22 +108,50 @@ impl LatestSubscriptionExecutionEffects {
                 ),
             };
         }
-        if let Some(tv) = &claimed.detail().payload().tv {
-            return ExecutionEffectResult::Finished {
-                disposition: FinishExecutionDisposition::MetaReady,
-                payload_delta: ExecutionPayloadDelta::TvMeta { tv: tv.clone() },
-            };
-        }
+        let source = &claimed.detail().payload().source;
+        let key = &claimed.detail().summary().head.key;
         let retry_after = policy.system_retry_interval_secs;
+
+        let douban_result = crate::douban::subject_detail(
+            &self.douban,
+            &policy.douban_cookie,
+            &key.subject_id,
+        )
+        .await;
+
+        let enriched_source = match douban_result.as_ref().ok() {
+            Some(detail) => Some(Box::new(tv_source_from_detail(source, detail))),
+            None => None,
+        };
+
+        if let Ok(ref detail) = douban_result {
+            if let Some(episodes_count) = detail.episodes_count.filter(|&n| n > 0) {
+                let season_number = resolve_tv_season_number(
+                    &self.douban,
+                    &policy.douban_cookie,
+                    &key.subject_id,
+                    &source.title,
+                )
+                .await;
+                let tv = tv_detail_from_douban(episodes_count, season_number);
+                return ExecutionEffectResult::Finished {
+                    disposition: FinishExecutionDisposition::MetaReady,
+                    payload_delta: ExecutionPayloadDelta::TvMeta {
+                        tv,
+                        source: enriched_source,
+                    },
+                };
+            }
+        }
+
         if policy.tmdb_api_key.trim().is_empty() {
             return failed(
                 ExecutionOperation::Meta,
                 "configuration",
-                "TMDB API credential is required to initialize TV episodes",
+                "TMDB API credential is required when Douban TV data is insufficient",
                 retry_after,
             );
         }
-        let source = &claimed.detail().payload().source;
         let lookup_title = source
             .original_title
             .as_deref()
@@ -136,7 +165,10 @@ impl LatestSubscriptionExecutionEffects {
         {
             Ok(tv) => ExecutionEffectResult::Finished {
                 disposition: FinishExecutionDisposition::MetaReady,
-                payload_delta: ExecutionPayloadDelta::TvMeta { tv },
+                payload_delta: ExecutionPayloadDelta::TvMeta {
+                    tv,
+                    source: enriched_source,
+                },
             },
             Err(message) => failed(
                 ExecutionOperation::Meta,
@@ -916,6 +948,88 @@ fn movie_source_from_detail(
     source
 }
 
+fn tv_source_from_detail(
+    current: &WantedSourcePayload,
+    detail: &DoubanSubjectDetail,
+) -> WantedSourcePayload {
+    let mut source = current.clone();
+    if !detail.title.trim().is_empty() {
+        source.title = detail.title.trim().to_string();
+    }
+    if !detail.poster_url.trim().is_empty() {
+        source.poster_url = detail.poster_url.trim().to_string();
+    }
+    if !detail.image.trim().is_empty() {
+        source.cover_url = detail.image.trim().to_string();
+    }
+    source.original_title = non_empty(&detail.original_title).or(source.original_title);
+    for (target, observed) in [
+        (&mut source.aka, &detail.aka),
+        (&mut source.languages, &detail.languages),
+        (&mut source.countries, &detail.countries),
+        (&mut source.genres, &detail.genres),
+        (&mut source.directors, &detail.directors),
+        (&mut source.actors, &detail.actors),
+    ] {
+        if !observed.is_empty() {
+            target.clone_from(observed);
+        }
+    }
+    source.date_published = non_empty(&detail.date_published).or(source.date_published);
+    source.duration = non_empty(&detail.duration).or(source.duration);
+    source.summary = non_empty(&detail.summary).or(source.summary);
+    source.rating_value = detail.rating.value.or(source.rating_value);
+    source.rating_count = detail.rating.count.or(source.rating_count);
+    source.release_year =
+        release_year_from_metadata(source.date_published.as_deref()).or(source.release_year);
+    source
+}
+
+fn tv_detail_from_douban(episodes_count: u32, season_number: u32) -> TvDetailPayload {
+    TvDetailPayload {
+        season_number,
+        episode_total: episodes_count,
+        target_start_episode: 1,
+        target_end_episode: episodes_count,
+        episodes: (1..=episodes_count)
+            .map(|episode_number| TvEpisodeDetailPayload {
+                season_number,
+                episode_number,
+                label: format!("S{season_number:02}E{episode_number:02}"),
+                intent: TvEpisodeIntentPayload::Target,
+            })
+            .collect(),
+    }
+}
+
+async fn resolve_tv_season_number(
+    douban: &DoubanClient,
+    cookie_header: &str,
+    subject_id: &str,
+    source_title: &str,
+) -> u32 {
+    if let Ok(seasons) = crate::douban::tv_seasons(douban, cookie_header, subject_id).await {
+        if !seasons.is_empty() {
+            if let Some(season) = seasons.iter().find(|s| s.id == subject_id) {
+                if let Some(parsed) = season_number_from_title(&season.title) {
+                    return parsed;
+                }
+            }
+            if seasons.len() > 1 {
+                if let Some(requested) = season_number_from_title(source_title) {
+                    if seasons
+                        .iter()
+                        .any(|s| season_number_from_title(&s.title) == Some(requested))
+                    {
+                        return requested;
+                    }
+                }
+            }
+        }
+    }
+    season_number_from_title(source_title).unwrap_or(1)
+}
+
 fn release_year_from_metadata(value: Option<&str>) -> Option<u16> {
     let value = value?;
     value.as_bytes().windows(4).find_map(|digits| {
@@ -976,10 +1090,11 @@ fn parse_chinese_number(value: &str) -> Option<u32> {
 
     let chars = value.trim().chars().collect::<Vec<_>>();
     match chars.as_slice() {
-        [single] => digit(*single),
+        ['十'] => Some(10),
         ['十', ones] => digit(*ones).map(|ones| 10 + ones),
         [tens, '十'] => digit(*tens).map(|tens| tens * 10),
         [tens, '十', ones] => Some(digit(*tens)? * 10 + digit(*ones)?),
+        [single] => digit(*single),
         _ => None,
     }
     .filter(|value| *value > 0)
@@ -1688,6 +1803,7 @@ mod tests {
             },
             user_interest: None,
             user_rating: None,
+            episodes_count: None,
         };
 
         let enriched = movie_source_from_detail(&current, detail);
@@ -1702,5 +1818,91 @@ mod tests {
         assert_eq!(enriched.rating_value, Some(9.7));
         assert_eq!(enriched.tags, vec!["电影"]);
         assert_eq!(enriched.douban_sort_time, Some(123));
+    }
+
+    #[test]
+    fn tv_metadata_enriches_source_without_losing_subscription_fields() {
+        let current = WantedSourcePayload {
+            title: "旧标题".to_string(),
+            release_year: None,
+            tags: vec!["电视剧".to_string()],
+            douban_sort_time: Some(456),
+            ..WantedSourcePayload::default()
+        };
+        let detail = crate::douban::DoubanSubjectDetail {
+            source: "douban",
+            media_type: "douban",
+            id: "35467152".to_string(),
+            subject_id: "35467152".to_string(),
+            url: "https://movie.douban.com/subject/35467152/".to_string(),
+            title: "测试剧集 第一季".to_string(),
+            imdb_id: None,
+            original_title: String::new(),
+            aka: Vec::new(),
+            languages: vec!["汉语普通话".to_string()],
+            countries: vec!["中国大陆".to_string()],
+            image: "https://img.test/cover.jpg".to_string(),
+            poster_url: "https://img.test/poster.jpg".to_string(),
+            directors: vec!["导演".to_string()],
+            writers: Vec::new(),
+            actors: Vec::new(),
+            genres: vec!["剧情".to_string()],
+            date_published: "2024-01-01".to_string(),
+            duration: "45分钟".to_string(),
+            summary: "简介".to_string(),
+            rating: crate::douban::DoubanRating {
+                value: Some(8.1),
+                count: Some(1000),
+                info: String::new(),
+                star_count: None,
+            },
+            user_interest: None,
+            user_rating: None,
+            episodes_count: Some(8),
+        };
+
+        let enriched = tv_source_from_detail(&current, &detail);
+
+        assert_eq!(enriched.title, "测试剧集 第一季");
+        assert_eq!(enriched.release_year, Some(2024));
+        assert_eq!(enriched.genres, vec!["剧情"]);
+        assert_eq!(enriched.rating_value, Some(8.1));
+        assert_eq!(enriched.tags, vec!["电视剧"]);
+        assert_eq!(enriched.douban_sort_time, Some(456));
+    }
+
+    #[test]
+    fn tv_detail_from_douban_builds_correct_payload() {
+        let tv = tv_detail_from_douban(8, 1);
+
+        assert_eq!(tv.season_number, 1);
+        assert_eq!(tv.episode_total, 8);
+        assert_eq!(tv.target_start_episode, 1);
+        assert_eq!(tv.target_end_episode, 8);
+        assert_eq!(tv.episodes.len(), 8);
+        assert_eq!(tv.episodes[0].label, "S01E01");
+        assert_eq!(tv.episodes[0].season_number, 1);
+        assert_eq!(tv.episodes[0].episode_number, 1);
+        assert_eq!(tv.episodes[7].label, "S01E08");
+    }
+
+    #[test]
+    fn tv_detail_from_douban_handles_different_season() {
+        let tv = tv_detail_from_douban(6, 2);
+
+        assert_eq!(tv.season_number, 2);
+        assert_eq!(tv.episode_total, 6);
+        assert_eq!(tv.episodes[0].label, "S02E01");
+    }
+
+    #[test]
+    fn season_number_from_title_parses_tv_titles() {
+        assert_eq!(season_number_from_title("测试剧集 第一季"), Some(1));
+        assert_eq!(season_number_from_title("测试剧集 第二季"), Some(2));
+        assert_eq!(season_number_from_title("测试剧集 第十季"), Some(10));
+        assert_eq!(season_number_from_title("测试剧集 第十二季"), Some(12));
+        assert_eq!(season_number_from_title("Show Season 1"), Some(1));
+        assert_eq!(season_number_from_title("Show Season.3"), Some(3));
+        assert_eq!(season_number_from_title("测试剧集"), None);
     }
 }

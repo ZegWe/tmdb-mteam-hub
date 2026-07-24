@@ -750,6 +750,7 @@ pub(crate) enum ExecutionPayloadDelta {
     },
     TvMeta {
         tv: payload::TvDetailPayload,
+        source: Option<Box<payload::WantedSourcePayload>>,
     },
     Search {
         candidates: Option<Vec<payload::CandidateMatchPayload>>,
@@ -821,7 +822,14 @@ impl ExecutionPayloadDelta {
                 merge_source_observation(&mut merged, source.as_ref());
                 latest.source = merged;
             }
-            Self::TvMeta { tv } => latest.tv = Some(tv.clone()),
+            Self::TvMeta { tv, source } => {
+                if let Some(source) = source {
+                    let mut merged = latest.source.clone();
+                    merge_source_observation(&mut merged, source.as_ref());
+                    latest.source = merged;
+                }
+                latest.tv = Some(tv.clone());
+            }
             Self::Search {
                 candidates,
                 download_updates,
