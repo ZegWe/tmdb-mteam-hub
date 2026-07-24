@@ -75,32 +75,7 @@
         </div>
       </article>
     </section>
-    <section
-      v-if="candidates.length"
-      class="subscription-detail-section subscription-candidate-list"
-    >
-      <h4>候选种子</h4>
-      <article
-        v-for="candidate in candidates"
-        :key="candidate.torrent_id"
-        class="subscription-file-row"
-      >
-        <div class="subscription-file-main">
-          <span class="subscription-file-name">{{ candidate.title || candidate.torrent_id }}</span>
-          <span v-if="candidate.subtitle" class="subscription-file-note">{{
-            candidate.subtitle
-          }}</span>
-          <span v-if="candidate.excluded_reason" class="subscription-file-note">{{
-            candidate.excluded_reason
-          }}</span>
-        </div>
-        <span class="subscription-file-status">{{
-          candidate.selected ? "已选择" : candidate.source || "候选"
-        }}</span>
-      </article>
-    </section>
     <DownloadTaskList :record="selectedSubscription" />
-    <LinkResult :record="selectedSubscription" />
   </article>
 </template>
 
@@ -108,7 +83,6 @@
 import { computed } from "vue";
 import { formatUnixSeconds } from "../shared/lib/formatters.js";
 import DownloadTaskList from "../features/subscriptions/DownloadTaskList.vue";
-import LinkResult from "../features/subscriptions/LinkResult.vue";
 import LifecycleGraph from "../features/subscriptions/LifecycleGraph.vue";
 import {
   subscriptionCapabilities,
@@ -126,11 +100,6 @@ defineEmits(["retry"]);
 const subscriptionCapability = computed(() => subscriptionCapabilities(props.selectedSubscription));
 const issues = computed(() =>
   Array.isArray(props.selectedSubscription?.issues) ? props.selectedSubscription.issues : [],
-);
-const candidates = computed(() =>
-  Array.isArray(props.selectedSubscription?.candidates)
-    ? props.selectedSubscription.candidates
-    : [],
 );
 
 function issueOwnerText(issue) {

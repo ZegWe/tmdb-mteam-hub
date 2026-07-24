@@ -329,6 +329,99 @@ export function downloadArtifactRows(download) {
   ].filter(Boolean);
 }
 
+export function downloadEpisodeLabel(download) {
+  const files = Array.isArray(download?.files) ? download.files : [];
+  const episodes = files
+    .filter((f) => Number.isInteger(f?.episode_number) || f?.episode_label)
+    .map((f) => ({
+      season: f.season_number,
+      episode: f.episode_number,
+    }));
+
+  if (!episodes.length) return "";
+
+  const bySeason = new Map();
+  for (const ep of episodes) {
+    const s = ep.season ?? 0;
+    if (!bySeason.has(s)) bySeason.set(s, []);
+    bySeason.get(s).push(ep.episode);
+  }
+
+  const parts = [];
+  for (const [season, epNums] of bySeason) {
+    const sorted = [...new Set(epNums.filter((n) => Number.isInteger(n)))].sort((a, b) => a - b);
+    if (!sorted.length) continue;
+    const range = formatEpisodeRange(sorted);
+    const prefix = season > 0 ? `S${String(season).padStart(2, "0")}` : "";
+    parts.push(prefix ? `${prefix}${range}` : range);
+  }
+
+  return parts.join(" / ");
+}
+
+function formatEpisodeRange(nums) {
+  if (nums.length === 1) return `E${String(nums[0]).padStart(2, "0")}`;
+  const min = nums[0];
+  const max = nums[nums.length - 1];
+  if (max - min + 1 === nums.length && nums.every((n, i) => n === min + i)) {
+    return `E${String(min).padStart(2, "0")}-E${String(max).padStart(2, "0")}`;
+  }
+  return nums.map((n) => `E${String(n).padStart(2, "0")}`).join(",");
+}
+
+export function matchLinksToDownloads(downloads, links) {
+  const downloadList = Array.isArray(downloads) ? downloads : [];
+  const linkList = Array.isArray(links) ? links : [];
+  const usedLinkIds = new Set();
+
+  const tasks = downloadList.map((download, index) => {
+    const matchedLinks = linkList.filter(
+      (link) => link.download_artifact_id === download.id,
+    );
+    for (const link of matchedLinks) usedLinkIds.add(link.id || link.key);
+
+    const downloadFiles = (Array.isArray(download?.files) ? download.files : []).map((file) => ({
+      ...file,
+      status: file.progress != null ? "" : download.state,
+    }));
+
+    const linkFiles = matchedLinks.flatMap((link) =>
+      (Array.isArray(link?.files) ? link.files : []).map((file) => ({
+        ...file,
+        status: file.outcome || link.state,
+      })),
+    );
+
+    return {
+      key: download.id || `${download.torrent_id || "download"}-${index}`,
+      label: download.qb_name || download.torrent_title || download.id || String(index + 1),
+      state: download.state,
+      episodeLabel: downloadEpisodeLabel(download),
+      downloadRows: downloadArtifactRows(download),
+      matchedLinks: matchedLinks.map((link, linkIndex) => ({
+        key: link.id || `link-${linkIndex}`,
+        label: link.target_dir || link.id || String(linkIndex + 1),
+        rows: linkArtifactRows(link),
+      })),
+      allFiles: [...downloadFiles, ...linkFiles],
+    };
+  });
+
+  const orphanLinks = linkList
+    .filter((link) => !usedLinkIds.has(link.id || link.key))
+    .map((link, index) => ({
+      key: link.id || `orphan-link-${index}`,
+      label: link.target_dir || link.id || String(index + 1),
+      rows: linkArtifactRows(link),
+      files: (Array.isArray(link?.files) ? link.files : []).map((file) => ({
+        ...file,
+        status: file.outcome || link.state,
+      })),
+    }));
+
+  return { tasks, orphanLinks };
+}
+
 export function linkArtifactRows(link) {
   return [
     row("链接状态", pushStatusLabel(link.state)),
