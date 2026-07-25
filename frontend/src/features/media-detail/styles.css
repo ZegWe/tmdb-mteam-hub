@@ -118,7 +118,7 @@ a.tag:hover {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
-  background: var(--bg);
+  background-color: var(--bg);
 }
 
 .douban-rating-select select:disabled {
@@ -140,7 +140,7 @@ a.tag:hover {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
-  background: var(--bg);
+  background-color: var(--bg);
 }
 
 .douban-tag-input select {
