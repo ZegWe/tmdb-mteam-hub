@@ -114,6 +114,9 @@ a.tag:hover {
 
 .douban-rating-select select {
   min-width: 5.5rem;
+  height: auto;
+  min-height: auto;
+  line-height: 1.5;
   padding: 0.42rem 2rem 0.42rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -136,6 +139,7 @@ a.tag:hover {
 .douban-tag-input input,
 .douban-tag-input select {
   width: 100%;
+  height: auto;
   padding: 0.44rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -144,6 +148,8 @@ a.tag:hover {
 }
 
 .douban-tag-input select {
+  min-height: auto;
+  line-height: 1.5;
   padding-right: 2rem;
 }
 
