@@ -24,10 +24,7 @@
 <script setup>
 import { computed } from "vue";
 import { itemImageUrl } from "../../shared/media/images.js";
-import {
-  subscriptionCardSubtitle,
-  subscriptionDisplayStatus,
-} from "./domain.js";
+import { subscriptionCardSubtitle, subscriptionDisplayStatus } from "./domain.js";
 
 const transparentPixel =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";

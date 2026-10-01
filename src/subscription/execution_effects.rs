@@ -8,7 +8,8 @@ mod mteam;
 
 use self::link::{error as hardlink_error, plans as link_plans};
 use self::mteam::{
-    append_candidates, candidates_from_response, match_candidates, search_body as mteam_search_body,
+    append_candidates, candidates_from_response, match_candidates, matches_movie_keyword,
+    search_body as mteam_search_body,
 };
 
 use super::effect_adapters::{
@@ -34,10 +35,10 @@ use super::repository::{
 };
 use crate::clients::douban::DoubanClient;
 use crate::clients::mteam::MteamClient;
-use crate::douban::DoubanSubjectDetail;
 use crate::clients::qbittorrent::{self, QbTorrentFile, QbTorrentInfo};
 use crate::clients::tmdb::TmdbClient;
 use crate::config::QbServerEntry;
+use crate::douban::DoubanSubjectDetail;
 use crate::subscription::episode::recognize as recognize_episode;
 use crate::subscription::SubscriptionMediaKind;
 
@@ -112,17 +113,14 @@ impl LatestSubscriptionExecutionEffects {
         let key = &claimed.detail().summary().head.key;
         let retry_after = policy.system_retry_interval_secs;
 
-        let douban_result = crate::douban::subject_detail(
-            &self.douban,
-            &policy.douban_cookie,
-            &key.subject_id,
-        )
-        .await;
+        let douban_result =
+            crate::douban::subject_detail(&self.douban, &policy.douban_cookie, &key.subject_id)
+                .await;
 
-        let enriched_source = match douban_result.as_ref().ok() {
-            Some(detail) => Some(Box::new(tv_source_from_detail(source, detail))),
-            None => None,
-        };
+        let enriched_source = douban_result
+            .as_ref()
+            .ok()
+            .map(|detail| Box::new(tv_source_from_detail(source, detail)));
 
         if let Ok(ref detail) = douban_result {
             if let Some(episodes_count) = detail.episodes_count.filter(|&n| n > 0) {
@@ -340,6 +338,7 @@ impl LatestSubscriptionExecutionEffects {
                         &policy.douban_cookie,
                         search_subject_id,
                         search_title,
+                        (!is_tv).then_some(&payload.source),
                     )
                     .await
                 {
@@ -849,6 +848,7 @@ impl LatestSubscriptionExecutionEffects {
         douban_cookie: &str,
         subject_id: &str,
         title: &str,
+        movie_source: Option<&WantedSourcePayload>,
     ) -> Result<Vec<CandidatePayload>, String> {
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
@@ -884,17 +884,19 @@ impl LatestSubscriptionExecutionEffects {
                 }
             }
         }
-        if !title.trim().is_empty() {
+        if (movie_source.is_none() || candidates.is_empty()) && !title.trim().is_empty() {
             let response = self
                 .mteam
                 .search(api_key, &mteam_search_body("keyword", title.trim()))
                 .await
                 .map_err(|error| error.to_string())?;
-            append_candidates(
-                &mut candidates,
-                &mut seen,
-                candidates_from_response(&response, "keyword", title),
-            );
+            let keyword_candidates = candidates_from_response(&response, "keyword", title)
+                .into_iter()
+                .filter(|candidate| {
+                    movie_source.is_none_or(|source| matches_movie_keyword(candidate, source))
+                })
+                .collect();
+            append_candidates(&mut candidates, &mut seen, keyword_candidates);
         }
         candidates.sort_by(|left, right| {
             right
@@ -943,8 +945,9 @@ fn movie_source_from_detail(
     source.summary = non_empty(&detail.summary).or(source.summary);
     source.rating_value = detail.rating.value.or(source.rating_value);
     source.rating_count = detail.rating.count.or(source.rating_count);
-    source.release_year =
-        release_year_from_metadata(source.date_published.as_deref()).or(source.release_year);
+    source.release_year = source
+        .release_year
+        .or_else(|| release_year_from_metadata(source.date_published.as_deref()));
     source
 }
 
@@ -1503,6 +1506,11 @@ fn system_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{routing::post, Json, Router};
+    use serde_json::{json, Value};
+
     use super::*;
 
     fn candidate_match(id: &str, title: &str) -> CandidateMatchPayload {
@@ -1637,6 +1645,123 @@ mod tests {
         assert!(!should_try_imdb_fallback(&[], "  "));
     }
 
+    #[tokio::test]
+    async fn movie_search_keeps_precise_results_and_rejects_unrelated_keyword_fallbacks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().route(
+            "/api/torrent/search",
+            post({
+                let calls = calls.clone();
+                move |Json(body): Json<Value>| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().unwrap().push(body.clone());
+                        let expected = json!({
+                            "id": "862947",
+                            "name": "The Terminator 1984 2160p UHD HK",
+                            "smallDescr": "终结者",
+                            "status": { "seeders": "102" }
+                        });
+                        let items = if body.get("douban").is_some() {
+                            vec![
+                                json!({
+                                    "id": "718259",
+                                    "name": "The Terminator 1984 1080p BluRay",
+                                    "status": { "seeders": "723" }
+                                }),
+                                expected,
+                            ]
+                        } else {
+                            vec![
+                                json!({
+                                    "id": "213970",
+                                    "name": "Independence Day 1996 Extended BluRay 2160p x265",
+                                    "smallDescr": "独立日/ID4星际终结者/天煞-地球反击战",
+                                    "status": { "seeders": "165" }
+                                }),
+                                expected,
+                            ]
+                        };
+                        Json(json!({ "data": { "data": items } }))
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mteam = MteamClient::with_http_client(
+            base_url,
+            crate::clients::http::PolicyClient::with_builder(
+                crate::clients::http::MTEAM_POLICY,
+                |builder| builder.no_proxy(),
+            )
+            .unwrap(),
+        );
+        let effects = LatestSubscriptionExecutionEffects::try_production(
+            DoubanClient::new().unwrap(),
+            TmdbClient::new().unwrap(),
+            mteam,
+            1,
+        )
+        .unwrap();
+        let source = WantedSourcePayload {
+            title: "终结者".to_string(),
+            original_title: Some("The Terminator".to_string()),
+            release_year: Some(1984),
+            ..WantedSourcePayload::default()
+        };
+        let precise = effects
+            .search_candidates("fixture", "", "1300656", "终结者", Some(&source))
+            .await
+            .unwrap();
+        assert_eq!(precise.len(), 2);
+        assert!(precise.iter().all(|candidate| candidate.source == "douban"));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        let rules = [super::super::execution::ExecutionTorrentMatchRule {
+            name: "4k".to_string(),
+            priority: 999,
+            mode: super::super::execution::ExecutionTorrentRuleMatchMode::Any,
+            title_keywords: vec!["2160p".to_string()],
+            resolution_keywords: Vec::new(),
+            source_keywords: Vec::new(),
+        }];
+        let matches = match_candidates(&precise, &rules);
+        assert_eq!(
+            matches
+                .iter()
+                .find(|candidate| candidate.selected)
+                .unwrap()
+                .candidate
+                .torrent_id,
+            "862947"
+        );
+
+        let fallback = effects
+            .search_candidates("fixture", "", "", "终结者", Some(&source))
+            .await
+            .unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].torrent_id, "862947");
+        assert_eq!(fallback[0].source, "keyword");
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(
+                calls[0]["douban"],
+                "https://movie.douban.com/subject/1300656/"
+            );
+            assert_eq!(calls[1]["keyword"], "终结者");
+        }
+        let general = effects
+            .search_candidates("fixture", "", "1300656", "终结者", None)
+            .await
+            .unwrap();
+        assert_eq!(general.len(), 3);
+        assert_eq!(calls.lock().unwrap().len(), 4);
+        server.abort();
+    }
+
     #[test]
     fn tv_candidate_selection_requires_cursor_coverage_and_skips_used_torrents() {
         let mut matches = vec![
@@ -1769,12 +1894,12 @@ mod tests {
     fn movie_metadata_enriches_source_without_losing_subscription_fields() {
         let current = WantedSourcePayload {
             title: "旧标题".to_string(),
-            release_year: Some(1999),
+            release_year: None,
             tags: vec!["电影".to_string()],
             douban_sort_time: Some(123),
             ..WantedSourcePayload::default()
         };
-        let detail = crate::douban::DoubanSubjectDetail {
+        let detail = || crate::douban::DoubanSubjectDetail {
             source: "douban",
             media_type: "douban",
             id: "1292052".to_string(),
@@ -1806,7 +1931,7 @@ mod tests {
             episodes_count: None,
         };
 
-        let enriched = movie_source_from_detail(&current, detail);
+        let enriched = movie_source_from_detail(&current, detail());
 
         assert_eq!(enriched.title, "肖申克的救赎");
         assert_eq!(enriched.release_year, Some(1994));
@@ -1818,6 +1943,22 @@ mod tests {
         assert_eq!(enriched.rating_value, Some(9.7));
         assert_eq!(enriched.tags, vec!["电影"]);
         assert_eq!(enriched.douban_sort_time, Some(123));
+
+        let terminator = WantedSourcePayload {
+            title: "终结者".to_string(),
+            release_year: Some(1984),
+            ..WantedSourcePayload::default()
+        };
+        let regional_release = crate::douban::DoubanSubjectDetail {
+            title: "终结者".to_string(),
+            original_title: "The Terminator".to_string(),
+            date_published: "1992-06(中国大陆)".to_string(),
+            ..detail()
+        };
+        assert_eq!(
+            movie_source_from_detail(&terminator, regional_release).release_year,
+            Some(1984)
+        );
     }
 
     #[test]

@@ -36,6 +36,49 @@ mod tests {
     }
 
     #[test]
+    fn subscription_retry_contract_documents_summary_and_rejection_cases() {
+        let document: Value = serde_json::from_str(OPENAPI_DOCUMENT).expect("parse OpenAPI JSON");
+        let operation = &document["paths"]["/api/subscriptions/wanted/{id}/retry"]["post"];
+        let parameter = &operation["parameters"][0];
+        assert_eq!(parameter["name"], "id");
+        assert_eq!(parameter["in"], "path");
+        assert_eq!(parameter["required"], true);
+        assert_eq!(parameter["schema"]["type"], "string");
+        assert_eq!(parameter["schema"]["minLength"], 1);
+        assert_eq!(parameter["schema"]["maxLength"], 256);
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/SubscriptionSummaryDto"
+        );
+        for status in ["400", "404", "409"] {
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ApiErrorDto"
+            );
+        }
+        for (status, response) in [
+            ("401", "ManagementUnauthorized"),
+            ("405", "MethodNotAllowed"),
+            ("500", "InternalError"),
+            ("503", "ServiceUnavailable"),
+        ] {
+            assert_eq!(
+                operation["responses"][status]["$ref"],
+                format!("#/components/responses/{response}")
+            );
+        }
+        let examples = &operation["responses"]["409"]["content"]["application/json"]["examples"];
+        for (name, code) in [
+            ("running", "subscription_execution_running"),
+            ("inactive", "subscription_not_schedulable"),
+            ("blocked", "subscription_not_schedulable"),
+            ("completedTv", "subscription_rerun_unsupported"),
+        ] {
+            assert_eq!(examples[name]["value"]["code"], code);
+        }
+    }
+
+    #[test]
     fn backend_openapi_contract_matches_the_stable_subscription_vocabulary() {
         let document: Value = serde_json::from_str(OPENAPI_DOCUMENT).expect("parse OpenAPI JSON");
         assert_eq!(document["openapi"], "3.1.0");

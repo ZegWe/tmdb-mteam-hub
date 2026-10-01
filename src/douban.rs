@@ -166,7 +166,6 @@ pub struct DoubanSubjectDetail {
 pub(crate) struct DoubanTvSeason {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) year: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -633,8 +632,7 @@ pub(crate) async fn tv_seasons(
         .map(|entry| {
             let id = value_to_string(entry.get("id")).unwrap_or_default();
             let title = value_to_string(entry.get("title")).unwrap_or_default();
-            let year = value_to_string(entry.get("year"));
-            Ok(DoubanTvSeason { id, title, year })
+            Ok(DoubanTvSeason { id, title })
         })
         .collect()
 }
@@ -2272,7 +2270,8 @@ mod tests {
             "countries": ["美国"]
         });
 
-        let detail = subject_detail_from_rexxar_json("1292052", &data).expect("rexxar movie detail");
+        let detail =
+            subject_detail_from_rexxar_json("1292052", &data).expect("rexxar movie detail");
         assert_eq!(detail.episodes_count, None);
         assert_eq!(detail.title, "肖申克的救赎");
     }

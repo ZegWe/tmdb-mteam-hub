@@ -79,11 +79,14 @@ const canLogout = computed(
   () => authenticated.value && authStatus.value?.token_configured === true,
 );
 
-provide(AUTH_CONTEXT_KEY, Object.freeze({
-  canLogout,
-  logoutLoading,
-  logout,
-}));
+provide(
+  AUTH_CONTEXT_KEY,
+  Object.freeze({
+    canLogout,
+    logoutLoading,
+    logout,
+  }),
+);
 
 onMounted(() => {
   globalThis.addEventListener?.(AUTH_SESSION_CHANGED_EVENT, handleAuthSessionChanged);
