@@ -366,36 +366,144 @@ fn get(connection: &Connection, key: SubscriptionKey) -> RepositoryResult<Subscr
 }
 
 fn force_retry(
-    connection: &Connection,
+    connection: &mut Connection,
     key: SubscriptionKey,
     now_unix: u64,
 ) -> RepositoryResult<SubscriptionHead> {
-    let changed = connection
+    let now_sql = command_integer("force_retry.now", now_unix)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_write_error("begin force retry", error))?;
+    let current = load_detail(&transaction, key.clone())?;
+    let head = &current.summary().head;
+    if head.execution_state == SubscriptionExecutionState::Running {
+        return Err(RepositoryError::ExecutionGateConflict { key });
+    }
+    if !head.active || !head.schedulable || head.blocked_reason.is_some() {
+        return Err(RepositoryError::InvalidInput {
+            field: "force_retry",
+            message: "subscription is inactive or blocked".to_string(),
+        });
+    }
+    if head.lifecycle_state == SubscriptionLifecycleState::Completed
+        && head.media_kind == SubscriptionMediaKind::Tv
+    {
+        return Err(RepositoryError::InvalidInput {
+            field: "force_retry.completed_tv",
+            message: "completed TV subscriptions cannot be rerun".to_string(),
+        });
+    }
+    let revision_sql = command_integer("force_retry.revision", head.revision.value())?;
+    if revision_sql == i64::MAX {
+        return Err(RepositoryError::InvalidInput {
+            field: "force_retry.revision",
+            message: "revision cannot be incremented beyond SQLite INTEGER range".to_string(),
+        });
+    }
+
+    // A completed movie must be searched again. Retain effect identities and link
+    // history, but retire its old downloads so progress/link cannot reuse them.
+    let restart_movie = head.lifecycle_state == SubscriptionLifecycleState::Completed;
+    let lifecycle_state = if restart_movie {
+        SubscriptionLifecycleState::Queued
+    } else {
+        head.lifecycle_state
+    };
+    let mut payload = current.payload().clone();
+    payload.skip_reason = None;
+    let mut attention_tags = current.summary().attention_tags.clone();
+    let mut superseded_torrent_ids = Vec::new();
+    if restart_movie {
+        payload.candidates.clear();
+        payload.issues.clear();
+        attention_tags.clear();
+        for download in &mut payload.artifacts.downloads {
+            use crate::subscription::repository::payload::DownloadArtifactStatePayload;
+            if !matches!(
+                download.state,
+                DownloadArtifactStatePayload::Ignored | DownloadArtifactStatePayload::Superseded
+            ) {
+                download.state = DownloadArtifactStatePayload::Superseded;
+                superseded_torrent_ids.push(download.torrent_id.clone());
+            }
+        }
+    } else {
+        attention_tags.retain(|tag| {
+            !matches!(
+                tag,
+                SubscriptionAttentionTag::Skipped | SubscriptionAttentionTag::RetryBlocked
+            )
+        });
+    }
+    payload.validate_for(&key.account_key, &key.subject_id)?;
+    let record_json =
+        serde_json::to_string(&payload).map_err(|error| RepositoryError::Internal {
+            message: format!("encode force retry payload: {error}"),
+        })?;
+    let attention_tags_json =
+        serde_json::to_string(&attention_tags).map_err(|error| RepositoryError::Internal {
+            message: format!("encode force retry attention tags: {error}"),
+        })?;
+    let changed = transaction
         .execute(
             r#"UPDATE wanted_subscription_records
                   SET revision = revision + 1,
                       next_attempt_at = ?3,
+                      lifecycle_state = ?4,
+                      retry_count = 0,
                       retry_blocked = 0,
                       force_eligible_once = 1,
-                      attention_tags_json = (
-                          SELECT json_group_array(tag.value)
-                            FROM json_each(attention_tags_json) AS tag
-                           WHERE tag.value NOT IN ('skipped', 'retry_blocked')
-                      ),
-                      record_json = json_remove(record_json, '$.skip_reason'),
-                      updated_at = ?3
+                      attention_tags_json = ?5,
+                      record_json = ?6,
+                      updated_at = MAX(updated_at, ?3)
                 WHERE account_key = ?1 AND subject_id = ?2"#,
             params![
                 key.account_key.as_str(),
                 key.subject_id.as_str(),
-                i64::try_from(now_unix).unwrap_or(i64::MAX)
+                now_sql,
+                lifecycle_state.as_str(),
+                attention_tags_json,
+                record_json,
             ],
         )
         .map_err(|error| map_write_error("force_retry", error))?;
-    if changed == 0 {
-        return Err(RepositoryError::NotFound { key });
+    if changed != 1 {
+        return Err(RepositoryError::Internal {
+            message: format!("force retry changed {changed} rows for a composite primary key"),
+        });
     }
-    get(connection, key)
+    let result = get(&transaction, key.clone())?;
+    execution_audit::append_execution_audit(
+        &transaction,
+        execution_audit::ExecutionAuditEntry {
+            account_key: key.account_key,
+            created_at: now_unix,
+            action: if restart_movie {
+                "rerun_subscription"
+            } else {
+                "retry_subscription"
+            },
+            target_id: key.subject_id,
+            target_title: current.summary().projection.title.clone(),
+            summary: if restart_movie {
+                "requeued a completed movie for metadata and torrent search"
+            } else {
+                "scheduled a retry of the current subscription stage"
+            },
+            related: serde_json::json!({
+                "schema_version": 1,
+                "previous_lifecycle_state": head.lifecycle_state.as_str(),
+                "lifecycle_state": lifecycle_state.as_str(),
+                "previous_retry_count": head.retry_count,
+                "row_revision": result.revision.value(),
+                "superseded_torrent_ids": superseded_torrent_ids,
+            }),
+        },
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| map_write_error("commit force retry", error))?;
+    Ok(result)
 }
 
 fn load_detail(
@@ -1443,6 +1551,264 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
             .expect("list fresh summaries");
         assert_eq!(page.items.len(), 2);
         assert!(page.next_cursor.is_none());
+    }
+
+    async fn seed_retry_artifacts(
+        repository: &SqliteSubscriptionRepository,
+        subject_id: &str,
+        source_path: &Path,
+        target_path: &Path,
+    ) -> SubscriptionDetail {
+        use crate::subscription::repository::payload::{
+            stable_download_artifact_key, stable_resolved_link_artifact_key,
+        };
+
+        let current = repository.load_detail(key(subject_id)).await.unwrap();
+        let download_key = stable_download_artifact_key(ACCOUNT, subject_id, "213970");
+        let link_key = stable_resolved_link_artifact_key(ACCOUNT, subject_id, &download_key);
+        let mut payload = current.payload().clone();
+        payload.skip_reason = Some("old retry gate".to_string());
+        payload.issues = vec![IssuePayload {
+            owner: IssueOwnerPayload::Parent,
+            operation: Some("movie_link".to_string()),
+            error_type: Some("old_failure".to_string()),
+            message: "previous link failure".to_string(),
+            occurred_at: Some(SEED_AT),
+        }];
+        payload.candidates = serde_json::from_value(serde_json::json!([{
+            "candidate": {"torrent_id": "213970", "title": "Independence Day 1996"},
+            "selected": true,
+        }]))
+        .unwrap();
+        payload.artifacts = serde_json::from_value(serde_json::json!({
+            "downloads": [{
+                "idempotency_key": download_key,
+                "torrent_id": "213970",
+                "torrent_title": "Independence Day 1996",
+                "qb_server_id": "qb-main",
+                "qb_category": "movies",
+                "qb_save_dir_name": "/downloads/movies",
+                "qb_hash": "0123456789abcdef0123456789abcdef01234567",
+                "state": "downloaded",
+            }],
+            "links": [{
+                "idempotency_key": link_key,
+                "download": {"artifact_id": download_key},
+                "state": "completed",
+                "checked_at": SEED_AT,
+                "files": [{
+                    "source_path": source_path.to_string_lossy(),
+                    "target_path": target_path.to_string_lossy(),
+                    "size": 3,
+                    "outcome": "linked",
+                }],
+            }],
+        }))
+        .unwrap();
+        repository
+            .update_detail(
+                UpdateSubscriptionDetailCommand::try_new(
+                    key(subject_id),
+                    current.summary().head.revision,
+                    SEED_AT + 1,
+                    vec![
+                        SubscriptionAttentionTag::Skipped,
+                        SubscriptionAttentionTag::Failed,
+                    ],
+                    payload,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        repository.load_detail(key(subject_id)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn force_retry_requeues_completed_movie_and_retires_old_match_without_effects() {
+        use crate::subscription::repository::payload::DownloadArtifactStatePayload;
+
+        let fixture = fresh_fixture("force-retry-completed").await;
+        let repository = make_repository(&fixture.path);
+        let source_path = fixture.root.join("old-download.mkv");
+        let target_path = fixture.root.join("old-library-link.mkv");
+        fs::write(&source_path, b"old").unwrap();
+        fs::hard_link(&source_path, &target_path).unwrap();
+        let before =
+            seed_retry_artifacts(&repository, "rows-movie-002", &source_path, &target_path).await;
+        let connection = Connection::open(&fixture.path).unwrap();
+        let neighbors = unrelated_storage_snapshot(&connection, ACCOUNT, "rows-movie-002");
+        drop(connection);
+
+        let head = repository
+            .force_retry(key("rows-movie-002"), SEED_AT + 2)
+            .await
+            .expect("a completed movie must restart without violating due constraints");
+        assert_eq!(head.lifecycle_state, SubscriptionLifecycleState::Queued);
+        assert_eq!(head.execution_state, SubscriptionExecutionState::Idle);
+        assert_eq!(head.next_attempt_at, Some(SEED_AT + 2));
+        assert!(head.force_eligible_once);
+        assert_eq!(
+            head.revision.value(),
+            before.summary().head.revision.value() + 1
+        );
+        let after = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        assert_eq!(after.payload().source, before.payload().source);
+        assert_eq!(after.payload().observation, before.payload().observation);
+        assert!(after.summary().attention_tags.is_empty());
+        assert!(after.payload().candidates.is_empty());
+        assert!(after.payload().issues.is_empty());
+        assert!(after.payload().skip_reason.is_none());
+        let mut expected_downloads = before.payload().artifacts.downloads.clone();
+        expected_downloads[0].state = DownloadArtifactStatePayload::Superseded;
+        assert_eq!(after.payload().artifacts.downloads, expected_downloads);
+        assert_eq!(
+            after.payload().artifacts.links,
+            before.payload().artifacts.links
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), b"old");
+        assert_eq!(fs::read(&target_path).unwrap(), b"old");
+        let connection = Connection::open(&fixture.path).unwrap();
+        assert_eq!(
+            unrelated_storage_snapshot(&connection, ACCOUNT, "rows-movie-002"),
+            neighbors,
+        );
+        let related: String = connection
+            .query_row(
+                "SELECT related_json FROM operation_logs WHERE action = 'rerun_subscription'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let related: serde_json::Value = serde_json::from_str(&related).unwrap();
+        assert_eq!(related["previous_lifecycle_state"], "completed");
+        assert_eq!(
+            related["superseded_torrent_ids"],
+            serde_json::json!(["213970"])
+        );
+    }
+
+    #[tokio::test]
+    async fn force_retry_clears_exhausted_count_and_keeps_incomplete_stage_recovery() {
+        let fixture = fresh_fixture("force-retry-exhausted").await;
+        let repository = make_repository(&fixture.path);
+        let before = seed_retry_artifacts(
+            &repository,
+            "rows-movie-001",
+            &fixture.root.join("source.mkv"),
+            &fixture.root.join("target.mkv"),
+        )
+        .await;
+        let connection = Connection::open(&fixture.path).unwrap();
+        connection
+            .execute(
+                "UPDATE wanted_subscription_records
+                    SET lifecycle_state = 'linking', retry_count = 3, retry_blocked = 1,
+                        next_attempt_at = NULL, attention_tags_json = '[\"skipped\",\"failed\",\"retry_blocked\"]'
+                  WHERE account_key = ?1 AND subject_id = 'rows-movie-001'",
+                [ACCOUNT],
+            )
+            .unwrap();
+        drop(connection);
+
+        let head = repository
+            .force_retry(key("rows-movie-001"), SEED_AT + 2)
+            .await
+            .expect("reset retry count together with its constrained retry gate");
+        assert_eq!(head.lifecycle_state, SubscriptionLifecycleState::Linking);
+        assert_eq!(head.retry_count, 0);
+        assert!(!head.retry_blocked);
+        assert!(head.force_eligible_once);
+        let after = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        assert_eq!(after.payload().artifacts, before.payload().artifacts);
+        assert_eq!(after.payload().candidates, before.payload().candidates);
+        assert_eq!(after.payload().issues, before.payload().issues);
+        assert!(after.payload().skip_reason.is_none());
+        assert_eq!(
+            after.summary().attention_tags,
+            [SubscriptionAttentionTag::Failed]
+        );
+    }
+
+    #[tokio::test]
+    async fn force_retry_rejects_running_inactive_blocked_and_completed_tv_without_writes() {
+        let running = fresh_fixture("force-retry-running").await;
+        let repository = make_repository(&running.path);
+        seed_running_attempt(&repository, "[]", None, false).await;
+        let before = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        assert!(matches!(
+            repository
+                .force_retry(key("rows-movie-001"), SEED_AT + 2)
+                .await,
+            Err(RepositoryError::ExecutionGateConflict { .. })
+        ));
+        assert_eq!(
+            repository.load_detail(key("rows-movie-001")).await.unwrap(),
+            before
+        );
+
+        for (label, sql, expected_field) in [
+            (
+                "inactive",
+                "UPDATE wanted_subscription_records SET active = 0, inactive_at = 1800000000,
+                    schedulable = 0, blocked_reason = 'source_missing', next_attempt_at = NULL
+                  WHERE subject_id = 'rows-movie-002'",
+                "force_retry",
+            ),
+            (
+                "blocked",
+                "UPDATE wanted_subscription_records SET schedulable = 0,
+                    blocked_reason = 'unsupported', next_attempt_at = NULL
+                  WHERE subject_id = 'rows-movie-002'",
+                "force_retry",
+            ),
+            (
+                "completed-tv",
+                "UPDATE wanted_subscription_records SET media_kind = 'tv'
+                  WHERE subject_id = 'rows-movie-002'",
+                "force_retry.completed_tv",
+            ),
+        ] {
+            let fixture = fresh_fixture(label).await;
+            execute_fixture_sql(&fixture.path, sql).await;
+            let repository = make_repository(&fixture.path);
+            let before = repository.load_detail(key("rows-movie-002")).await.unwrap();
+            assert!(matches!(
+                repository.force_retry(key("rows-movie-002"), SEED_AT + 2).await,
+                Err(RepositoryError::InvalidInput { field, .. }) if field == expected_field
+            ));
+            assert_eq!(
+                repository.load_detail(key("rows-movie-002")).await.unwrap(),
+                before
+            );
+            let connection = Connection::open(&fixture.path).unwrap();
+            let log_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM operation_logs", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(log_count, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn force_retry_audit_failure_rolls_back_subscription_reset() {
+        let fixture = fresh_fixture("force-retry-audit-rollback").await;
+        let repository = make_repository(&fixture.path);
+        let before = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        execute_fixture_sql(
+            &fixture.path,
+            "CREATE TRIGGER reject_retry_audit BEFORE INSERT ON operation_logs
+                WHEN NEW.action = 'rerun_subscription'
+                BEGIN SELECT RAISE(ABORT, 'reject retry audit'); END;",
+        )
+        .await;
+        assert!(repository
+            .force_retry(key("rows-movie-002"), SEED_AT + 2)
+            .await
+            .is_err());
+        assert_eq!(
+            repository.load_detail(key("rows-movie-002")).await.unwrap(),
+            before
+        );
     }
 
     #[tokio::test]

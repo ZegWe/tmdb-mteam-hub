@@ -510,10 +510,7 @@ export function pollWantedSubscriptions({ client = defaultApiClient, ...requestO
  * @param {SubscriptionRequestOptions} [options]
  * @returns {Promise<import("../contracts.js").SubscriptionSummaryDto>}
  */
-export async function retrySubscription(
-  id,
-  { client = defaultApiClient, ...requestOptions } = {},
-) {
+export async function retrySubscription(id, { client = defaultApiClient, ...requestOptions } = {}) {
   const subjectId = requestedSubscriptionId(id);
   const signal = requestOptions.signal;
   throwIfAborted(signal);

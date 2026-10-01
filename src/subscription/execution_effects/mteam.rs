@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::super::execution::{ExecutionTorrentMatchRule, ExecutionTorrentRuleMatchMode};
 use super::super::repository::payload::{
-    CandidateMatchPayload, CandidatePayload, CandidateRuleEvaluationPayload,
+    CandidateMatchPayload, CandidatePayload, CandidateRuleEvaluationPayload, WantedSourcePayload,
 };
 
 const SEARCH_PAGE_SIZE: u32 = 100;
@@ -229,11 +229,7 @@ fn evaluate_rule(
     rule: &ExecutionTorrentMatchRule,
 ) -> CandidateRuleEvaluationPayload {
     let checks = rule_checks(rule);
-    let searchable = format!(
-        "{}\n{}\n{}\n{}",
-        candidate.title, candidate.subtitle, candidate.source, candidate.search_query
-    )
-    .to_lowercase();
+    let searchable = format!("{}\n{}", candidate.title, candidate.subtitle).to_lowercase();
     let mut matched_keywords = Vec::new();
     let mut missing_keywords = Vec::new();
     for (label, value) in checks {
@@ -261,6 +257,57 @@ fn evaluate_rule(
         missing_keywords,
         excluded_reason: (!matched).then(|| "rule keywords did not match".to_string()),
     }
+}
+
+pub(super) fn matches_movie_keyword(
+    candidate: &CandidatePayload,
+    source: &WantedSourcePayload,
+) -> bool {
+    let title = normalized_title(&candidate.title);
+    let subtitle = normalized_title(&candidate.subtitle);
+    let title_matches = source
+        .title
+        .split('/')
+        .chain(source.original_title.as_deref())
+        .chain(source.aka.iter().flat_map(|alias| alias.split('/')))
+        .map(normalized_title)
+        .filter(|alias| !alias.is_empty())
+        .any(|alias| {
+            contains_complete_title(&title, &alias) || contains_complete_title(&subtitle, &alias)
+        });
+    title_matches
+        && source.release_year.is_none_or(|year| {
+            let year = year.to_string();
+            title
+                .split_whitespace()
+                .chain(subtitle.split_whitespace())
+                .any(|word| word == year)
+        })
+}
+
+fn normalized_title(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contains_complete_title(value: &str, title: &str) -> bool {
+    value.match_indices(title).any(|(start, _)| {
+        let end = start + title.len();
+        (start == 0 || value.as_bytes()[start - 1] == b' ')
+            && (end == value.len() || value.as_bytes()[end] == b' ')
+    })
 }
 
 fn rule_checks(rule: &ExecutionTorrentMatchRule) -> Vec<(String, String)> {
@@ -353,6 +400,79 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(selected.candidate.torrent_id, "2");
         assert_eq!(selected.matched_rule_name.as_deref(), Some("2160p"));
+    }
+
+    #[test]
+    fn keyword_movie_identity_requires_a_complete_title_and_release_year() {
+        let source = WantedSourcePayload {
+            title: "终结者".to_string(),
+            original_title: Some("The Terminator".to_string()),
+            release_year: Some(1984),
+            ..WantedSourcePayload::default()
+        };
+        let mut unrelated = candidate(
+            "213970",
+            "Independence Day 1996 Extended BluRay 2160p x265",
+            165,
+        );
+        unrelated.subtitle = "独立日/ID4星际终结者/天煞-地球反击战".to_string();
+        unrelated.source = "keyword".to_string();
+        unrelated.search_query = "终结者".to_string();
+        let expected = candidate("862947", "The.Terminator.1984.2160p.UHD.HK", 102);
+        assert!(!matches_movie_keyword(&unrelated, &source));
+        assert!(matches_movie_keyword(&expected, &source));
+        assert!(!matches_movie_keyword(
+            &candidate("remake", "The Terminator 1992 2160p", 500),
+            &source,
+        ));
+        assert!(!matches_movie_keyword(
+            &candidate("unknown-year", "The Terminator 2160p", 500),
+            &source,
+        ));
+
+        let no_year = WantedSourcePayload {
+            release_year: None,
+            ..source
+        };
+        assert!(!matches_movie_keyword(&unrelated, &no_year));
+        let localized = CandidatePayload {
+            subtitle: "[终结者][1984][英语]".to_string(),
+            ..candidate("localized", "Release 2160p", 1)
+        };
+        assert!(matches_movie_keyword(&localized, &no_year));
+
+        let combined_aliases = WantedSourcePayload {
+            title: "The Terminator / 终结者".to_string(),
+            aka: vec!["未来战士 / 魔鬼终结者".to_string()],
+            release_year: Some(1984),
+            ..WantedSourcePayload::default()
+        };
+        assert!(matches_movie_keyword(&localized, &combined_aliases));
+        assert!(matches_movie_keyword(
+            &candidate("alias", "[未来战士][1984][1080p]", 1),
+            &combined_aliases,
+        ));
+    }
+
+    #[test]
+    fn rule_keywords_do_not_match_search_query_or_search_source() {
+        let mut unrelated = candidate("213970", "Independence Day 1996 1080p", 165);
+        unrelated.source = "keyword".to_string();
+        unrelated.search_query = "The Terminator 2160p".to_string();
+        let matches = match_candidates(
+            &[unrelated],
+            &[ExecutionTorrentMatchRule {
+                name: "metadata only".to_string(),
+                priority: 999,
+                mode: ExecutionTorrentRuleMatchMode::Any,
+                title_keywords: vec!["The Terminator".to_string()],
+                resolution_keywords: vec!["2160p".to_string()],
+                source_keywords: vec!["keyword".to_string()],
+            }],
+        );
+        assert!(!matches[0].selected);
+        assert!(matches[0].matched_keywords.is_empty());
+        assert_eq!(matches[0].rule_evaluations[0].missing_keywords.len(), 3);
     }
 
     #[test]

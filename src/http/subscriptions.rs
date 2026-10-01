@@ -61,21 +61,7 @@ async fn retry_subscription(
         .subscription_repository
         .force_retry(key, now)
         .await
-        .map_err(|error| {
-            use crate::subscription::repository::RepositoryError;
-            match error {
-                RepositoryError::NotFound { .. } => ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "subscription_not_found",
-                    "subscription not found",
-                ),
-                _ => ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    "internal server error",
-                ),
-            }
-        })?;
+        .map_err(retry_repository_error)?;
     let command =
         GetSubscription::try_new(account_key, subject_id).map_err(|_| invalid_subscription_id())?;
     let detail = state
@@ -129,4 +115,99 @@ fn invalid_subscription_id() -> ApiError {
         "invalid_subscription_id",
         "subscription id is invalid",
     )
+}
+
+fn retry_repository_error(error: crate::subscription::repository::RepositoryError) -> ApiError {
+    use crate::subscription::repository::RepositoryError;
+
+    match error {
+        RepositoryError::NotFound { .. } => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "subscription_not_found",
+            "subscription not found",
+        ),
+        RepositoryError::ExecutionGateConflict { .. } => ApiError::new(
+            StatusCode::CONFLICT,
+            "subscription_execution_running",
+            "subscription is running; retry after the current attempt finishes",
+        ),
+        RepositoryError::InvalidInput {
+            field: "force_retry.completed_tv",
+            ..
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "subscription_rerun_unsupported",
+            "completed TV subscriptions cannot be rerun",
+        ),
+        RepositoryError::InvalidInput {
+            field: "force_retry",
+            ..
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "subscription_not_schedulable",
+            "subscription is inactive or blocked and cannot be rerun",
+        ),
+        RepositoryError::Unavailable { .. } => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "subscription_store_unavailable",
+            "subscription store is temporarily unavailable",
+        ),
+        error => {
+            tracing::error!(error = %error, "failed to rerun subscription");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal server error",
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    use super::retry_repository_error;
+    use crate::subscription::repository::{RepositoryError, SubscriptionKey};
+
+    #[test]
+    fn retry_errors_distinguish_busy_and_blocked_subscriptions_from_storage_failures() {
+        let key = SubscriptionKey::try_new("account", "subject").unwrap();
+        for (error, status) in [
+            (
+                RepositoryError::NotFound { key: key.clone() },
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                RepositoryError::ExecutionGateConflict { key },
+                StatusCode::CONFLICT,
+            ),
+            (
+                RepositoryError::InvalidInput {
+                    field: "force_retry",
+                    message: "blocked".to_string(),
+                },
+                StatusCode::CONFLICT,
+            ),
+            (
+                RepositoryError::InvalidInput {
+                    field: "force_retry.completed_tv",
+                    message: "completed TV".to_string(),
+                },
+                StatusCode::CONFLICT,
+            ),
+            (
+                RepositoryError::Unavailable {
+                    message: "busy database".to_string(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            assert_eq!(
+                retry_repository_error(error).into_response().status(),
+                status
+            );
+        }
+    }
 }

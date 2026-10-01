@@ -122,9 +122,7 @@ describe("DownloadTaskList", () => {
     expect(body.text()).toContain("下载任务download-1");
 
     // Files from both download and link
-    const fileNames = body
-      .findAll(".subscription-file-name")
-      .map((node) => node.text());
+    const fileNames = body.findAll(".subscription-file-name").map((node) => node.text());
     expect(fileNames).toContain("S01E01.mkv");
     expect(fileNames).toContain("S01E02.mkv");
     expect(fileNames).toContain("/library/剧集/S01E01.mkv");
@@ -140,9 +138,7 @@ describe("DownloadTaskList", () => {
               id: "link-orphan",
               state: "completed",
               target_dir: "/library/独立",
-              files: [
-                { target_path: "/library/独立/file.mkv", outcome: "linked" },
-              ],
+              files: [{ target_path: "/library/独立/file.mkv", outcome: "linked" }],
             },
           ],
         }),

@@ -1385,6 +1385,113 @@
         }
       }
     },
+    "/api/subscriptions/wanted/{id}/retry": {
+      "post": {
+        "summary": "Retry a subscription or rerun a completed movie",
+        "description": "For a completed movie, reset the subscription to queued for metadata refresh and a new torrent search, clear prior candidates and issues, and mark previous active downloads superseded. For an incomplete movie or TV subscription, retry the current lifecycle stage and preserve its recovery payload. Both operations clear the skip gate and retry count, schedule an immediate forced attempt, and record an audit entry atomically. Download identities and link history are retained; existing qBittorrent tasks and filesystem links are preserved. Running, inactive, blocked, and completed TV subscriptions are rejected with 409.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Subscription subject ID, up to 256 UTF-8 bytes. Must be nonempty, trimmed, and contain no control characters, slash, or backslash; dot and double-dot are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription summary after scheduling the retry or rerun",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummaryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid subscription subject ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "invalid_subscription_id",
+                  "message": "subscription id is invalid"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "404": {
+            "description": "Subscription not found for the current account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "subscription_not_found",
+                  "message": "subscription not found"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "Subscription is running, inactive, blocked, or a completed TV subscription whose rerun is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "examples": {
+                  "running": {
+                    "value": {
+                      "code": "subscription_execution_running",
+                      "message": "subscription is running; retry after the current attempt finishes"
+                    }
+                  },
+                  "inactive": {
+                    "value": {
+                      "code": "subscription_not_schedulable",
+                      "message": "subscription is inactive or blocked and cannot be rerun"
+                    }
+                  },
+                  "blocked": {
+                    "value": {
+                      "code": "subscription_not_schedulable",
+                      "message": "subscription is inactive or blocked and cannot be rerun"
+                    }
+                  },
+                  "completedTv": {
+                    "value": {
+                      "code": "subscription_rerun_unsupported",
+                      "message": "completed TV subscriptions cannot be rerun"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/api/subscriptions/wanted/poll": {
       "post": {
         "responses": {

@@ -134,11 +134,21 @@ export function subscriptionDisplayStatus(record) {
 export function subscriptionProgress(record) {
   const downloads = Array.isArray(record?.downloads) ? record.downloads : [];
   for (let index = downloads.length - 1; index >= 0; index -= 1) {
-    const progress = Number(downloads[index]?.progress);
-    if (Number.isFinite(progress)) return Math.max(0, Math.min(1, progress));
+    const download = downloads[index];
+    if (isRetiredDownload(download)) continue;
+    if (download?.progress != null) {
+      const progress = Number(download.progress);
+      if (Number.isFinite(progress)) return Math.max(0, Math.min(1, progress));
+    }
+    break;
   }
   if (subscriptionLifecycleKey(record) === "completed") return 1;
   return null;
+}
+
+function isRetiredDownload(download) {
+  const state = normalizedStatus(download?.state);
+  return state === "superseded" || state === "ignored";
 }
 
 export function subscriptionLifecycleNodes(record) {
@@ -318,7 +328,12 @@ export function downloadArtifactRows(download) {
     row("qB", download.qb_server_name || download.qb_server_id),
     row("分类", download.qb_category),
     row("保存目录", download.qb_save_dir_name),
-    row("qB 状态", download.qb_state || pushStatusLabel(download.state)),
+    row(
+      isRetiredDownload(download) ? "订阅任务状态" : "qB 状态",
+      isRetiredDownload(download)
+        ? pushStatusLabel(download.state)
+        : download.qb_state || pushStatusLabel(download.state),
+    ),
     row("qB hash", download.qb_hash),
     row("qB 名称", download.qb_name),
     row("文件", files.length ? `${completedFiles}/${files.length}` : ""),
@@ -375,9 +390,7 @@ export function matchLinksToDownloads(downloads, links) {
   const usedLinkIds = new Set();
 
   const tasks = downloadList.map((download, index) => {
-    const matchedLinks = linkList.filter(
-      (link) => link.download_artifact_id === download.id,
-    );
+    const matchedLinks = linkList.filter((link) => link.download_artifact_id === download.id);
     for (const link of matchedLinks) usedLinkIds.add(link.id || link.key);
 
     const downloadFiles = (Array.isArray(download?.files) ? download.files : []).map((file) => ({
