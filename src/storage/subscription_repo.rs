@@ -401,11 +401,11 @@ fn force_retry(
         });
     }
 
-    // A completed movie must be searched again. Retain effect identities and link
-    // history, but retire its old downloads so progress/link cannot reuse them.
-    let restart_movie = head.lifecycle_state == SubscriptionLifecycleState::Completed;
+    // A movie rerun always restarts torrent search. Retain effect identities and
+    // link history, but retire old downloads so progress/link cannot reuse them.
+    let restart_movie = head.media_kind == SubscriptionMediaKind::Movie;
     let lifecycle_state = if restart_movie {
-        SubscriptionLifecycleState::Queued
+        SubscriptionLifecycleState::Searching
     } else {
         head.lifecycle_state
     };
@@ -486,7 +486,7 @@ fn force_retry(
             target_id: key.subject_id,
             target_title: current.summary().projection.title.clone(),
             summary: if restart_movie {
-                "requeued a completed movie for metadata and torrent search"
+                "restarted movie torrent search"
             } else {
                 "scheduled a retry of the current subscription stage"
             },
@@ -1625,7 +1625,7 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
     }
 
     #[tokio::test]
-    async fn force_retry_requeues_completed_movie_and_retires_old_match_without_effects() {
+    async fn force_retry_restarts_completed_movie_search_and_retires_old_match_without_effects() {
         use crate::subscription::repository::payload::DownloadArtifactStatePayload;
 
         let fixture = fresh_fixture("force-retry-completed").await;
@@ -1643,8 +1643,8 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
         let head = repository
             .force_retry(key("rows-movie-002"), SEED_AT + 2)
             .await
-            .expect("a completed movie must restart without violating due constraints");
-        assert_eq!(head.lifecycle_state, SubscriptionLifecycleState::Queued);
+            .expect("a completed movie must restart search without violating due constraints");
+        assert_eq!(head.lifecycle_state, SubscriptionLifecycleState::Searching);
         assert_eq!(head.execution_state, SubscriptionExecutionState::Idle);
         assert_eq!(head.next_attempt_at, Some(SEED_AT + 2));
         assert!(head.force_eligible_once);
@@ -1689,7 +1689,7 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
     }
 
     #[tokio::test]
-    async fn force_retry_clears_exhausted_count_and_keeps_incomplete_stage_recovery() {
+    async fn force_retry_clears_exhausted_count_and_keeps_unfinished_tv_stage_recovery() {
         let fixture = fresh_fixture("force-retry-exhausted").await;
         let repository = make_repository(&fixture.path);
         let before = seed_retry_artifacts(
@@ -1703,7 +1703,7 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
         connection
             .execute(
                 "UPDATE wanted_subscription_records
-                    SET lifecycle_state = 'linking', retry_count = 3, retry_blocked = 1,
+                    SET media_kind = 'tv', lifecycle_state = 'linking', retry_count = 3, retry_blocked = 1,
                         next_attempt_at = NULL, attention_tags_json = '[\"skipped\",\"failed\",\"retry_blocked\"]'
                   WHERE account_key = ?1 AND subject_id = 'rows-movie-001'",
                 [ACCOUNT],
@@ -1728,6 +1728,174 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
             after.summary().attention_tags,
             [SubscriptionAttentionTag::Failed]
         );
+    }
+
+    #[tokio::test]
+    async fn force_retry_restarts_search_from_every_idle_movie_lifecycle() {
+        use crate::subscription::repository::payload::DownloadArtifactStatePayload;
+
+        for lifecycle in [
+            "queued",
+            "meta",
+            "searching",
+            "downloading",
+            "linking",
+            "completed",
+        ] {
+            let fixture = fresh_fixture(&format!("force-retry-movie-{lifecycle}")).await;
+            let repository = make_repository(&fixture.path);
+            let before = seed_retry_artifacts(
+                &repository,
+                "rows-movie-001",
+                &fixture.root.join("source.mkv"),
+                &fixture.root.join("target.mkv"),
+            )
+            .await;
+            let connection = Connection::open(&fixture.path).unwrap();
+            connection
+                .execute(
+                    "UPDATE wanted_subscription_records SET lifecycle_state = ?2,
+                        next_attempt_at = CASE WHEN ?2 = 'completed' THEN NULL ELSE ?3 END
+                      WHERE account_key = ?1 AND subject_id = 'rows-movie-001'",
+                    params![ACCOUNT, lifecycle, SEED_AT as i64],
+                )
+                .unwrap();
+            let neighbors = unrelated_storage_snapshot(&connection, ACCOUNT, "rows-movie-001");
+            drop(connection);
+
+            let head = repository
+                .force_retry(key("rows-movie-001"), SEED_AT + 2)
+                .await
+                .unwrap();
+            assert_eq!(
+                head.lifecycle_state,
+                SubscriptionLifecycleState::Searching,
+                "{lifecycle}"
+            );
+            assert_eq!(head.execution_state, SubscriptionExecutionState::Idle);
+            assert_eq!(head.next_attempt_at, Some(SEED_AT + 2));
+            assert!(head.force_eligible_once);
+            let after = repository.load_detail(key("rows-movie-001")).await.unwrap();
+            assert_eq!(after.payload().source, before.payload().source);
+            assert_eq!(after.payload().observation, before.payload().observation);
+            assert!(after.payload().candidates.is_empty());
+            assert!(after.payload().issues.is_empty());
+            assert!(after.payload().skip_reason.is_none());
+            assert!(after.summary().attention_tags.is_empty());
+            let mut expected_downloads = before.payload().artifacts.downloads.clone();
+            expected_downloads[0].state = DownloadArtifactStatePayload::Superseded;
+            assert_eq!(after.payload().artifacts.downloads, expected_downloads);
+            assert_eq!(
+                after.payload().artifacts.links,
+                before.payload().artifacts.links
+            );
+
+            let connection = Connection::open(&fixture.path).unwrap();
+            assert_eq!(
+                unrelated_storage_snapshot(&connection, ACCOUNT, "rows-movie-001"),
+                neighbors
+            );
+            let (action, summary): (String, String) = connection
+                .query_row("SELECT action, summary FROM operation_logs", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(action, "rerun_subscription");
+            assert_eq!(summary, "restarted movie torrent search");
+        }
+    }
+
+    #[tokio::test]
+    async fn force_retry_missing_retry_blocked_movie_is_claimed_for_search() {
+        use crate::subscription::ports::SubscriptionExecutionRepository;
+        use crate::subscription::repository::payload::DownloadArtifactStatePayload;
+        use crate::subscription::repository::{
+            ClaimOneCommand, ClaimOneResult, ExecutionOperation,
+        };
+
+        let fixture = fresh_fixture("force-retry-missing-movie").await;
+        let repository = make_repository(&fixture.path);
+        let current = seed_retry_artifacts(
+            &repository,
+            "rows-movie-001",
+            &fixture.root.join("source.mkv"),
+            &fixture.root.join("target.mkv"),
+        )
+        .await;
+        let mut payload = current.payload().clone();
+        payload.artifacts.downloads[0].state = DownloadArtifactStatePayload::Missing;
+        payload.artifacts.downloads[0].qb_hash = None;
+        repository
+            .update_detail(
+                UpdateSubscriptionDetailCommand::try_new(
+                    key("rows-movie-001"),
+                    current.summary().head.revision,
+                    SEED_AT + 1,
+                    current.summary().attention_tags.clone(),
+                    payload,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let connection = Connection::open(&fixture.path).unwrap();
+        connection
+            .execute(
+                "UPDATE wanted_subscription_records SET lifecycle_state = 'downloading',
+                retry_count = 3, retry_blocked = 1, next_attempt_at = NULL,
+                attention_tags_json = '[\"skipped\",\"failed\",\"retry_blocked\"]'
+              WHERE account_key = ?1 AND subject_id = 'rows-movie-001'",
+                [ACCOUNT],
+            )
+            .unwrap();
+        drop(connection);
+        let before = repository.load_detail(key("rows-movie-001")).await.unwrap();
+
+        let head = repository
+            .force_retry(key("rows-movie-001"), SEED_AT + 2)
+            .await
+            .unwrap();
+        assert_eq!(head.lifecycle_state, SubscriptionLifecycleState::Searching);
+        assert_eq!(head.retry_count, 0);
+        assert!(!head.retry_blocked);
+        assert!(head.force_eligible_once);
+        assert_eq!(head.next_attempt_at, Some(SEED_AT + 2));
+        let after = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        assert!(after.payload().candidates.is_empty());
+        assert!(after.payload().issues.is_empty());
+        assert!(after.summary().attention_tags.is_empty());
+        assert!(after.payload().skip_reason.is_none());
+        let mut expected_downloads = before.payload().artifacts.downloads.clone();
+        expected_downloads[0].state = DownloadArtifactStatePayload::Superseded;
+        assert_eq!(after.payload().artifacts.downloads, expected_downloads);
+        assert_eq!(
+            after.payload().artifacts.links,
+            before.payload().artifacts.links
+        );
+
+        let claim = repository
+            .claim_one(ClaimOneCommand::try_new(key("rows-movie-001"), 120).unwrap())
+            .await
+            .unwrap();
+        let ClaimOneResult::Claimed(claimed) = claim else {
+            panic!("rerun movie must be eligible for search")
+        };
+        assert_eq!(
+            claimed.attempt().token().operation(),
+            ExecutionOperation::Search
+        );
+        assert_eq!(
+            claimed.detail().summary().head.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert!(claimed.detail().payload().candidates.is_empty());
+        assert!(claimed
+            .detail()
+            .payload()
+            .artifacts
+            .downloads
+            .iter()
+            .all(|download| download.state == DownloadArtifactStatePayload::Superseded));
     }
 
     #[tokio::test]

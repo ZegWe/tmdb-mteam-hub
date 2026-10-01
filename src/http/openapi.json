@@ -1387,8 +1387,8 @@
     },
     "/api/subscriptions/wanted/{id}/retry": {
       "post": {
-        "summary": "Retry a subscription or rerun a completed movie",
-        "description": "For a completed movie, reset the subscription to queued for metadata refresh and a new torrent search, clear prior candidates and issues, and mark previous active downloads superseded. For an incomplete movie or TV subscription, retry the current lifecycle stage and preserve its recovery payload. Both operations clear the skip gate and retry count, schedule an immediate forced attempt, and record an audit entry atomically. Download identities and link history are retained; existing qBittorrent tasks and filesystem links are preserved. Running, inactive, blocked, and completed TV subscriptions are rejected with 409.",
+        "summary": "Rerun a movie from torrent search or retry an incomplete TV subscription",
+        "description": "For any eligible movie subscription, reset the lifecycle to searching using the existing source metadata, clear prior candidates and issues, and mark previous active downloads superseded. An incomplete TV subscription retries its current lifecycle stage and preserves its recovery payload. Both operations clear the skip gate and retry count, schedule an immediate forced attempt, and record an audit entry atomically. Download identities and link history are retained so existing qBittorrent tasks can be reconciled during the new search. Running, inactive, blocked, and completed TV subscriptions are rejected with 409.",
         "parameters": [
           {
             "name": "id",

@@ -202,15 +202,27 @@ function isRequestAbort(error) {
 }
 
 async function retrySubscription(subjectId) {
+  if (retryLoading.value) return;
+  retryLoading.value = true;
   notifications.clearError();
+  let submitted = false;
   try {
-    await retrySubscriptionApi(subjectId);
+    const summary = await retrySubscriptionApi(subjectId);
+    submitted = true;
     await subscriptionStore.loadDetail(subjectId, { force: true });
-    notifications.showToast("已重置订阅任务，将在下次调度时重新处理", "ok");
+    notifications.showToast(
+      summary.media_kind === "movie"
+        ? "已从搜种子阶段重新开始，将在下次调度时重新处理"
+        : "已重新安排当前阶段，将在下次调度时重试",
+      "ok",
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    notifications.showError(`重跑失败：${message}`);
-    notifications.showToast(`重跑失败：${message}`, "err");
+    const failure = submitted ? `重跑已提交，刷新失败：${message}` : `重跑失败：${message}`;
+    notifications.showError(failure);
+    notifications.showToast(failure, "err");
+  } finally {
+    retryLoading.value = false;
   }
 }
 
