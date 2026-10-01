@@ -181,6 +181,34 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function retryPageFetch(summary, retryResponse, refreshResponse) {
+  let detailRequests = 0;
+  return vi.fn(async (input, init = {}) => {
+    const path = String(input);
+    const method = String(init.method || "GET").toUpperCase();
+    if (path === "/api/config") return jsonResponse(configSnapshot());
+    if (path === "/api/subscriptions/wanted?limit=100" && method === "GET") {
+      return jsonResponse(subscriptionState(summary));
+    }
+    if (path === "/api/subscriptions/wanted/subject-7" && method === "GET") {
+      detailRequests += 1;
+      return detailRequests === 1
+        ? jsonResponse(nestedSubscriptionDetail("subject-7", { summary }))
+        : refreshResponse();
+    }
+    if (path === "/api/subscriptions/wanted/subject-7/retry" && method === "POST") {
+      return retryResponse();
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+}
+
+function retryPostCalls(fetchMock) {
+  return fetchMock.mock.calls.filter(
+    ([input, init]) => String(input).endsWith("/retry") && init.method === "POST",
+  );
+}
+
 function createTestRouter() {
   return createRouter({
     history: createMemoryHistory(),
@@ -745,6 +773,121 @@ describe("subscription lazy route pages", () => {
       "/api/subscriptions/wanted?limit=100",
       "/api/subscriptions/wanted/subject-7",
     ]);
+  });
+
+  it("reruns a retry-blocked movie once and stays busy until the refreshed detail arrives", async () => {
+    const summary = subscriptionRecord({
+      lifecycle_state: "downloading",
+      retry_count: 3,
+      retry_blocked: true,
+      attention_tags: ["retry_blocked"],
+    });
+    const restarted = {
+      ...summary,
+      revision: 2,
+      lifecycle_state: "searching",
+      retry_count: 0,
+      retry_blocked: false,
+      attention_tags: [],
+    };
+    const pendingRetry = deferred();
+    const pendingRefresh = deferred();
+    const fetchMock = retryPageFetch(
+      summary,
+      () => pendingRetry.promise,
+      () => pendingRefresh.promise,
+    );
+    const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+    const button = () => wrapper.get(".subscription-detail-actions button");
+    expect(button().element.disabled).toBe(false);
+
+    await button().trigger("click");
+    wrapper.findComponent({ name: "SubscriptionDetailView" }).vm.$emit("retry", "subject-7");
+    await flushPromises();
+    expect(retryPostCalls(fetchMock)).toHaveLength(1);
+    expect(button().element.disabled).toBe(true);
+    expect(button().text()).toBe("重跑中…");
+
+    pendingRetry.resolve(jsonResponse(restarted));
+    await flushPromises();
+    expect(button().element.disabled).toBe(true);
+    wrapper.findComponent({ name: "SubscriptionDetailView" }).vm.$emit("retry", "subject-7");
+    expect(retryPostCalls(fetchMock)).toHaveLength(1);
+
+    pendingRefresh.resolve(
+      jsonResponse(nestedSubscriptionDetail("subject-7", { summary: restarted })),
+    );
+    await flushPromises();
+    expect(button().element.disabled).toBe(false);
+    expect(wrapper.get("#toast").text()).toBe("已从搜种子阶段重新开始，将在下次调度时重新处理");
+    expect(wrapper.get(".subscription-detail .subscription-status").text()).toBe("搜索中");
+  });
+
+  it("reenables rerun after a rejected POST and allows another attempt", async () => {
+    const summary = subscriptionRecord();
+    const restarted = { ...summary, revision: 2, lifecycle_state: "searching" };
+    let attempts = 0;
+    const fetchMock = retryPageFetch(
+      summary,
+      () => {
+        attempts += 1;
+        return attempts === 1
+          ? jsonError(409, { code: "subscription_execution_running", message: "订阅任务正在运行" })
+          : jsonResponse(restarted);
+      },
+      () => jsonResponse(nestedSubscriptionDetail("subject-7", { summary: restarted })),
+    );
+    const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+    const button = () => wrapper.get(".subscription-detail-actions button");
+    await button().trigger("click");
+    await flushPromises();
+    expect(button().element.disabled).toBe(false);
+    expect(wrapper.get("#err").text()).toBe("重跑失败：订阅任务正在运行");
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/subject-7")),
+    ).toHaveLength(1);
+
+    await button().trigger("click");
+    await flushPromises();
+    expect(retryPostCalls(fetchMock)).toHaveLength(2);
+    expect(wrapper.find("#err").exists()).toBe(false);
+    expect(wrapper.get("#toast").text()).toContain("已从搜种子阶段重新开始");
+  });
+
+  it("reports a detail refresh error as an accepted rerun without resubmitting the POST", async () => {
+    const summary = subscriptionRecord();
+    const restarted = { ...summary, revision: 2, lifecycle_state: "searching" };
+    const fetchMock = retryPageFetch(
+      summary,
+      () => jsonResponse(restarted),
+      () => jsonError(503, { message: "暂时无法读取订阅详情" }),
+    );
+    const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+    await wrapper.get(".subscription-detail-actions button").trigger("click");
+    await flushPromises();
+
+    expect(retryPostCalls(fetchMock)).toHaveLength(1);
+    expect(wrapper.get("#err").text()).toBe("重跑已提交，刷新失败：暂时无法读取订阅详情");
+    expect(wrapper.get("#toast").text()).toBe("重跑已提交，刷新失败：暂时无法读取订阅详情");
+    expect(wrapper.text()).not.toContain("重跑失败");
+    expect(wrapper.get(".subscription-detail-actions button").element.disabled).toBe(false);
+  });
+
+  it("describes a TV retry as retrying its current stage", async () => {
+    const summary = subscriptionRecord({ media_kind: "tv", lifecycle_state: "downloading" });
+    const restarted = { ...summary, revision: 2 };
+    const fetchMock = retryPageFetch(
+      summary,
+      () => jsonResponse(restarted),
+      () => jsonResponse(nestedSubscriptionDetail("subject-7", { summary: restarted })),
+    );
+    const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+    await wrapper.get(".subscription-detail-actions button").trigger("click");
+    await flushPromises();
+
+    expect(retryPostCalls(fetchMock)).toHaveLength(1);
+    expect(wrapper.get("#toast").text()).toBe("已重新安排当前阶段，将在下次调度时重试");
+    expect(wrapper.get("#toast").text()).not.toContain("搜种子");
   });
 
   it("shows inactive, TV, and ordinary movie with simplified cards and detail retry button", async () => {
