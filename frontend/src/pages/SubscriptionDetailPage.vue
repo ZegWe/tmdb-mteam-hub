@@ -21,7 +21,9 @@
         v-else-if="selectedDetail"
         :selected-subscription="selectedDetail"
         :retrying="retryLoading"
+        :confirming="confirmLoading"
         @retry="retrySubscription"
+        @confirm-candidate="confirmCandidate"
       />
     </div>
   </section>
@@ -35,7 +37,10 @@ import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notificati
 import SubscriptionDetailView from "../components/SubscriptionDetailView.vue";
 import SubscriptionWatcherBanner from "../features/subscriptions/SubscriptionWatcherBanner.vue";
 import { SUBSCRIPTION_CONTEXT_KEY } from "../features/subscriptions/context.js";
-import { retrySubscription as retrySubscriptionApi } from "../shared/api/endpoints/subscriptions.js";
+import {
+  retrySubscription as retrySubscriptionApi,
+  confirmSubscriptionCandidate,
+} from "../shared/api/endpoints/subscriptions.js";
 
 const subscriptionContext = inject(SUBSCRIPTION_CONTEXT_KEY, null);
 if (!subscriptionContext) {
@@ -65,6 +70,7 @@ const detailLoading = computed(
     (activeDetailId ? subscriptionStore.isDetailLoading(activeDetailId) : false),
 );
 const retryLoading = ref(false);
+const confirmLoading = ref(false);
 
 onMounted(() => {
   mounted = true;
@@ -207,6 +213,23 @@ async function retrySubscription(subjectId) {
     const message = error instanceof Error ? error.message : String(error);
     notifications.showError(`重跑失败：${message}`);
     notifications.showToast(`重跑失败：${message}`, "err");
+  }
+}
+
+async function confirmCandidate(torrentId) {
+  const detail = selectedDetail.value;
+  if (!detail || confirmLoading.value) return;
+  confirmLoading.value = true;
+  notifications.clearError();
+  try {
+    await confirmSubscriptionCandidate(detail.subject_id, torrentId, detail.revision);
+    await subscriptionStore.loadDetail(detail.subject_id, { force: true });
+    notifications.showToast("已确认所选种子，将在下次调度时下载", "ok");
+  } catch (error) {
+    notifications.showError(`选中失败：${error instanceof Error ? error.message : String(error)}`);
+    await subscriptionStore.loadDetail(detail.subject_id, { force: true }).catch(() => {});
+  } finally {
+    confirmLoading.value = false;
   }
 }
 

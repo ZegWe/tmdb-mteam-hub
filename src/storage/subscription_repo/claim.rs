@@ -493,12 +493,20 @@ fn finish(
         &command.token().key().subject_id,
     )?;
     let projection = SubscriptionProjection::from_source(&payload.source)?;
-    let attention_tags = terminal_attention_tags(
+    let mut attention_tags = terminal_attention_tags(
         &stored.detail.summary().attention_tags,
         command.disposition().waits_for_release(),
         false,
         false,
     );
+    if command.disposition().waits_for_release()
+        && payload.candidates.iter().any(|candidate| {
+            !candidate.download_authorized() && !candidate.candidate.torrent_id.is_empty()
+        })
+    {
+        attention_tags.retain(|tag| *tag != SubscriptionAttentionTag::WaitingRelease);
+        attention_tags.push(SubscriptionAttentionTag::NeedsConfirmation);
+    }
     let next_attempt_at = schedule_from_repository_now(now, command.disposition().next_delay())?;
     let next_attempt_at_sql = next_attempt_at
         .map(|value| repository_integer("next execution attempt", value))
@@ -1329,6 +1337,7 @@ fn terminal_attention_tags(
             !matches!(
                 tag,
                 SubscriptionAttentionTag::WaitingRelease
+                    | SubscriptionAttentionTag::NeedsConfirmation
                     | SubscriptionAttentionTag::Failed
                     | SubscriptionAttentionTag::RetryBlocked
                     | SubscriptionAttentionTag::NeedsReconciliation

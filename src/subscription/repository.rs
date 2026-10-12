@@ -1760,7 +1760,7 @@ pub(crate) enum RepositoryError {
 }
 
 impl RepositoryError {
-    fn invalid(field: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(field: &'static str, message: impl Into<String>) -> Self {
         Self::InvalidInput {
             field,
             message: message.into(),
@@ -2983,6 +2983,7 @@ mod tests {
     fn movie_detail_rejects_tv_payload() {
         let mut payload = payload("Canonical title");
         payload.tv = Some(TvDetailPayload {
+            localized_title: String::new(),
             season_number: 1,
             episode_total: 1,
             target_start_episode: 1,

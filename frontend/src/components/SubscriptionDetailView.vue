@@ -80,6 +80,9 @@
       class="subscription-detail-section subscription-candidate-list"
     >
       <h4>候选种子</h4>
+      <p v-if="needsConfirmation" class="hint" role="note">
+        仅按名字找到的种子不会自动下载。请核对剧名、年份和季集数，再选中需要下载的种子。
+      </p>
       <article
         v-for="candidate in candidates"
         :key="candidate.torrent_id"
@@ -94,9 +97,26 @@
             candidate.excluded_reason
           }}</span>
         </div>
-        <span class="subscription-file-status">{{
-          candidate.selected ? "已选择" : candidate.source || "候选"
-        }}</span>
+        <div class="flex items-center gap-2">
+          <span class="subscription-file-status">{{
+            candidate.user_confirmed
+              ? "已手动确认"
+              : candidate.source === "keyword"
+                ? "名字匹配 · 待确认"
+                : candidate.selected
+                  ? "已选择"
+                  : candidate.source || "候选"
+          }}</span>
+          <button
+            v-if="canConfirm(candidate)"
+            type="button"
+            class="btn btn-primary btn-sm"
+            :disabled="confirming || retrying || selectedSubscription.execution_state === 'running'"
+            @click="$emit('confirm-candidate', candidate.torrent_id)"
+          >
+            {{ confirming ? "提交中…" : "选中并下载" }}
+          </button>
+        </div>
       </article>
     </section>
     <DownloadTaskList :record="selectedSubscription" />
@@ -119,9 +139,10 @@ import {
 const props = defineProps({
   selectedSubscription: { type: Object, required: true },
   retrying: { type: Boolean, default: false },
+  confirming: { type: Boolean, default: false },
 });
 
-defineEmits(["retry"]);
+defineEmits(["retry", "confirm-candidate"]);
 
 const subscriptionCapability = computed(() => subscriptionCapabilities(props.selectedSubscription));
 const issues = computed(() =>
@@ -132,6 +153,23 @@ const candidates = computed(() =>
     ? props.selectedSubscription.candidates
     : [],
 );
+const needsConfirmation = computed(() =>
+  candidates.value.some((candidate) => candidate.source === "keyword" && !candidate.user_confirmed),
+);
+
+function canConfirm(candidate) {
+  return (
+    candidate.torrent_id &&
+    !candidate.user_confirmed &&
+    props.selectedSubscription.lifecycle_state === "searching" &&
+    subscriptionCapability.value.schedulable &&
+    !(props.selectedSubscription.downloads || []).some(
+      (download) =>
+        download.torrent_id === candidate.torrent_id &&
+        !["failed", "ignored", "superseded"].includes(download.state),
+    )
+  );
+}
 
 function issueOwnerText(issue) {
   if (issue.owner === "download_artifact") return `下载任务 ${issue.artifact_id || ""}`.trim();

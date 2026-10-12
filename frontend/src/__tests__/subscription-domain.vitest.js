@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  downloadArtifactRows,
+  pushStatusLabel,
   subscriptionAttentionKey,
   subscriptionCardSubtitle,
   subscriptionCapabilities,
@@ -8,10 +10,56 @@ import {
   subscriptionLifecycleKey,
   subscriptionLifecycleNodes,
   subscriptionPollToast,
+  subscriptionProgress,
   subscriptionSummary,
 } from "../features/subscriptions/domain.js";
 
 describe("subscription domain display", () => {
+  it("shows progress only for the latest current download after a rerun", () => {
+    const history = [
+      { state: "superseded", progress: 1 },
+      { state: "ignored", progress: 1 },
+    ];
+    expect(subscriptionProgress({ lifecycle_state: "searching", downloads: history })).toBeNull();
+    expect(
+      subscriptionProgress({
+        lifecycle_state: "downloading",
+        downloads: [
+          ...history,
+          { state: "downloading", progress: 0.25 },
+          { state: "superseded", progress: 1 },
+        ],
+      }),
+    ).toBe(0.25);
+    expect(
+      subscriptionProgress({
+        lifecycle_state: "downloading",
+        downloads: [
+          { state: "downloaded", progress: 1 },
+          { state: "pushed", progress: null },
+        ],
+      }),
+    ).toBeNull();
+    expect(subscriptionProgress({ lifecycle_state: "completed", downloads: history })).toBe(1);
+  });
+
+  it("keeps retired download status visible even when qB reports the old task complete", () => {
+    for (const [state, label] of [
+      ["superseded", "已替代"],
+      ["ignored", "已忽略"],
+    ]) {
+      expect(pushStatusLabel(state)).toBe(label);
+      expect(downloadArtifactRows({ state, qb_state: "seeding" })).toContainEqual({
+        label: "订阅任务状态",
+        value: label,
+      });
+    }
+    expect(downloadArtifactRows({ state: "downloading", qb_state: "stalledDL" })).toContainEqual({
+      label: "qB 状态",
+      value: "stalledDL",
+    });
+  });
+
   it("uses explicit lifecycle and attention fields", () => {
     const record = {
       subject_id: "semantic-state",

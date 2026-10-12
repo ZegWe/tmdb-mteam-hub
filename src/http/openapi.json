@@ -1385,6 +1385,113 @@
         }
       }
     },
+    "/api/subscriptions/wanted/{id}/retry": {
+      "post": {
+        "summary": "Retry a subscription or rerun a completed movie",
+        "description": "For a completed movie, reset the subscription to queued for metadata refresh and a new torrent search, clear prior candidates and issues, and mark previous active downloads superseded. For an incomplete movie or TV subscription, retry the current lifecycle stage and preserve its recovery payload. Both operations clear the skip gate and retry count, schedule an immediate forced attempt, and record an audit entry atomically. Download identities and link history are retained; existing qBittorrent tasks and filesystem links are preserved. Running, inactive, blocked, and completed TV subscriptions are rejected with 409.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Subscription subject ID, up to 256 UTF-8 bytes. Must be nonempty, trimmed, and contain no control characters, slash, or backslash; dot and double-dot are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription summary after scheduling the retry or rerun",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummaryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid subscription subject ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "invalid_subscription_id",
+                  "message": "subscription id is invalid"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "404": {
+            "description": "Subscription not found for the current account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "subscription_not_found",
+                  "message": "subscription not found"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "Subscription is running, inactive, blocked, or a completed TV subscription whose rerun is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "examples": {
+                  "running": {
+                    "value": {
+                      "code": "subscription_execution_running",
+                      "message": "subscription is running; retry after the current attempt finishes"
+                    }
+                  },
+                  "inactive": {
+                    "value": {
+                      "code": "subscription_not_schedulable",
+                      "message": "subscription is inactive or blocked and cannot be rerun"
+                    }
+                  },
+                  "blocked": {
+                    "value": {
+                      "code": "subscription_not_schedulable",
+                      "message": "subscription is inactive or blocked and cannot be rerun"
+                    }
+                  },
+                  "completedTv": {
+                    "value": {
+                      "code": "subscription_rerun_unsupported",
+                      "message": "completed TV subscriptions cannot be rerun"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/api/subscriptions/wanted/poll": {
       "post": {
         "responses": {
@@ -1439,6 +1546,98 @@
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/subscriptions/wanted/{id}/candidates/confirm": {
+      "post": {
+        "summary": "确认订阅候选种子并安排下载",
+        "description": "仅确认当前候选列表中的一个种子。按名字搜索的种子不会自动下载；用户确认后仍校验 TV 季集覆盖。expected_revision 用于拒绝过期选择，运行中或非搜索阶段的订阅返回 409。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Subscription subject ID, up to 256 UTF-8 bytes. Must be nonempty, trimmed, and contain no control characters, slash, or backslash; dot and double-dot are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription summary after scheduling the retry or rerun",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummaryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid subscription subject ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "invalid_subscription_id",
+                  "message": "subscription id is invalid"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "404": {
+            "description": "Subscription not found for the current account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "subscription_not_found",
+                  "message": "subscription not found"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "候选已变化、订阅正在执行、种子已下载或当前不可选择",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "operationId": "confirmSubscriptionCandidate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmSubscriptionCandidateRequest"
+              }
+            }
           }
         }
       }
@@ -1498,18 +1697,26 @@
       "HealthStatusDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["status"],
+        "required": [
+          "status"
+        ],
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ok"]
+            "enum": [
+              "ok"
+            ]
           }
         }
       },
       "AuthStatusDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["authenticated", "token_configured", "bootstrap_allowed"],
+        "required": [
+          "authenticated",
+          "token_configured",
+          "bootstrap_allowed"
+        ],
         "properties": {
           "authenticated": {
             "type": "boolean"
@@ -1525,7 +1732,9 @@
       "AuthLoginRequestDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["token"],
+        "required": [
+          "token"
+        ],
         "properties": {
           "token": {
             "type": "string"
@@ -1535,7 +1744,14 @@
       "RedactedQbServerDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name", "base_url", "username", "insecure_tls", "has_password"],
+        "required": [
+          "id",
+          "name",
+          "base_url",
+          "username",
+          "insecure_tls",
+          "has_password"
+        ],
         "properties": {
           "id": {
             "type": "string"
@@ -1650,7 +1866,10 @@
       },
       "TorrentRuleMatchMode": {
         "type": "string",
-        "enum": ["all", "any"]
+        "enum": [
+          "all",
+          "any"
+        ]
       },
       "TorrentMatchRuleDto": {
         "type": "object",
@@ -1775,7 +1994,9 @@
       "QbServerPatchDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["base_url"],
+        "required": [
+          "base_url"
+        ],
         "properties": {
           "id": {
             "type": "string"
@@ -1803,7 +2024,9 @@
       "ConfigUpdateDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["expected_revision"],
+        "required": [
+          "expected_revision"
+        ],
         "properties": {
           "expected_revision": {
             "type": "integer",
@@ -1879,7 +2102,9 @@
       "QbTestRequestDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["server_id"],
+        "required": [
+          "server_id"
+        ],
         "properties": {
           "server_id": {
             "type": "string"
@@ -1889,7 +2114,10 @@
       "QbTestResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ok", "version"],
+        "required": [
+          "ok",
+          "version"
+        ],
         "properties": {
           "ok": {
             "type": "boolean"
@@ -1902,7 +2130,10 @@
       "QbPushMteamRequestDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["server_id", "torrent_id"],
+        "required": [
+          "server_id",
+          "torrent_id"
+        ],
         "properties": {
           "server_id": {
             "type": "string"
@@ -1921,7 +2152,9 @@
       "QbPushMteamResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ok"],
+        "required": [
+          "ok"
+        ],
         "properties": {
           "ok": {
             "type": "boolean"
@@ -1991,28 +2224,55 @@
       },
       "SubscriptionMediaKind": {
         "type": "string",
-        "enum": ["movie", "tv"]
+        "enum": [
+          "movie",
+          "tv"
+        ]
       },
       "SubscriptionLifecycleState": {
         "type": "string",
-        "enum": ["queued", "meta", "searching", "downloading", "linking", "completed"]
+        "enum": [
+          "queued",
+          "meta",
+          "searching",
+          "downloading",
+          "linking",
+          "completed"
+        ]
       },
       "SubscriptionExecutionState": {
         "type": "string",
-        "enum": ["idle", "running"]
+        "enum": [
+          "idle",
+          "running"
+        ]
       },
       "SubscriptionAttentionTag": {
         "type": "string",
-        "enum": ["waiting_release", "failed", "retry_blocked", "skipped", "needs_reconciliation"]
+        "enum": [
+          "waiting_release",
+          "failed",
+          "retry_blocked",
+          "skipped",
+          "needs_reconciliation",
+          "needs_confirmation"
+        ]
       },
       "MteamSearchSource": {
         "type": "string",
-        "enum": ["imdb", "douban", "keyword"]
+        "enum": [
+          "imdb",
+          "douban",
+          "keyword"
+        ]
       },
       "MteamTorrentDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
           "id": {
             "type": "string"
@@ -2043,7 +2303,11 @@
       "MteamSearchResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "page", "page_size"],
+        "required": [
+          "items",
+          "page",
+          "page_size"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -2064,7 +2328,10 @@
       },
       "TmdbMediaKind": {
         "type": "string",
-        "enum": ["movie", "tv"]
+        "enum": [
+          "movie",
+          "tv"
+        ]
       },
       "TmdbSearchItemDto": {
         "type": "object",
@@ -2098,38 +2365,67 @@
             "type": "string"
           },
           "poster_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "release_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "first_air_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "vote_average": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           }
         }
       },
       "NamedMediaValueDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name", "english_name", "code"],
+        "required": [
+          "id",
+          "name",
+          "english_name",
+          "code"
+        ],
         "properties": {
           "id": {
-            "type": ["integer", "null"]
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "name": {
             "type": "string"
           },
           "english_name": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "code": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2152,17 +2448,29 @@
             "type": "string"
           },
           "episode_count": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "air_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2218,41 +2526,77 @@
             "type": "string"
           },
           "tagline": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "backdrop_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "backdrop_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "release_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "first_air_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "last_air_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "runtime": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "status": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "vote_average": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "vote_count": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "genres": {
@@ -2280,20 +2624,35 @@
             }
           },
           "imdb_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "douban_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "douban_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "number_of_seasons": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "number_of_episodes": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_run_time": {
@@ -2309,7 +2668,10 @@
             }
           },
           "series_type": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "seasons": {
             "type": "array",
@@ -2335,7 +2697,10 @@
         ],
         "properties": {
           "id": {
-            "type": ["integer", "null"]
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "episode_number": {
             "type": "integer"
@@ -2347,20 +2712,35 @@
             "type": "string"
           },
           "air_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "still_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "still_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "runtime": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "vote_average": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           }
         }
       },
@@ -2379,7 +2759,10 @@
         ],
         "properties": {
           "id": {
-            "type": ["integer", "null"]
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "season_number": {
             "type": "integer"
@@ -2391,13 +2774,22 @@
             "type": "string"
           },
           "air_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "poster_url": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "episodes": {
             "type": "array",
@@ -2446,11 +2838,17 @@
             "type": "boolean"
           },
           "inactive_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "last_seen_snapshot_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "media_kind": {
             "$ref": "#/components/schemas/SubscriptionMediaKind"
@@ -2459,7 +2857,10 @@
             "type": "boolean"
           },
           "blocked_reason": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "lifecycle_state": {
             "$ref": "#/components/schemas/SubscriptionLifecycleState"
@@ -2468,7 +2869,10 @@
             "$ref": "#/components/schemas/SubscriptionExecutionState"
           },
           "next_attempt_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "retry_count": {
@@ -2493,7 +2897,10 @@
             "type": "string"
           },
           "release_year": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 9999
           },
@@ -2501,10 +2908,16 @@
             "type": "string"
           },
           "category_text": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "douban_sort_time": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "attention_tags": {
@@ -2518,7 +2931,10 @@
       "SubscriptionSummaryPageDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "next_cursor"],
+        "required": [
+          "items",
+          "next_cursor"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -2527,7 +2943,10 @@
             }
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2557,7 +2976,10 @@
             "type": "string"
           },
           "original_title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "aka": {
             "type": "array",
@@ -2596,19 +3018,34 @@
             }
           },
           "date_published": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "duration": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "synopsis": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "rating_value": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "rating_count": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "tags": {
@@ -2618,10 +3055,16 @@
             }
           },
           "douban_date": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "douban_return_order": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           }
         }
@@ -2629,7 +3072,11 @@
       "SubscriptionObservationDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["created_at", "first_seen_at", "last_seen_at"],
+        "required": [
+          "created_at",
+          "first_seen_at",
+          "last_seen_at"
+        ],
         "properties": {
           "created_at": {
             "type": "integer",
@@ -2662,34 +3109,66 @@
         "properties": {
           "owner": {
             "type": "string",
-            "enum": ["subscription", "download_artifact", "link_artifact", "tv_lane", "tv_episode"]
+            "enum": [
+              "subscription",
+              "download_artifact",
+              "link_artifact",
+              "tv_lane",
+              "tv_episode"
+            ]
           },
           "artifact_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "lane": {
-            "type": ["string", "null"],
-            "enum": ["search", "progress", "link", null]
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "search",
+              "progress",
+              "link",
+              null
+            ]
           },
           "season_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "operation": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "error_type": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "message": {
             "type": "string"
           },
           "occurred_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           }
         }
@@ -2710,7 +3189,8 @@
           "matched_rule_name",
           "matched_priority",
           "matched_keywords",
-          "excluded_reason"
+          "excluded_reason",
+          "user_confirmed"
         ],
         "properties": {
           "torrent_id": {
@@ -2726,27 +3206,45 @@
             "type": "string"
           },
           "size": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "seeders": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "leechers": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "uploaded_at": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "selected": {
             "type": "boolean"
           },
           "matched_rule_name": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "matched_priority": {
-            "type": ["integer", "null"]
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "matched_keywords": {
             "type": "array",
@@ -2755,14 +3253,26 @@
             }
           },
           "excluded_reason": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_confirmed": {
+            "type": "boolean",
+            "description": "用户显式确认这个种子；名字搜索结果必须确认后才下载。"
           }
         }
       },
       "SubscriptionTvEpisodeDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["season_number", "episode_number", "label", "intent"],
+        "required": [
+          "season_number",
+          "episode_number",
+          "label",
+          "intent"
+        ],
         "properties": {
           "season_number": {
             "type": "integer",
@@ -2777,7 +3287,10 @@
           },
           "intent": {
             "type": "string",
-            "enum": ["target", "skipped"]
+            "enum": [
+              "target",
+              "skipped"
+            ]
           }
         }
       },
@@ -2841,19 +3354,31 @@
             "minimum": 0
           },
           "season_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_end_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_label": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2893,7 +3418,10 @@
             "type": "string"
           },
           "qb_server_name": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "qb_category": {
             "type": "string"
@@ -2902,13 +3430,22 @@
             "type": "string"
           },
           "qb_hash": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "qb_name": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "qb_state": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "state": {
             "type": "string",
@@ -2923,11 +3460,17 @@
             ]
           },
           "progress": {
-            "type": ["number", "null"],
+            "type": [
+              "number",
+              "null"
+            ],
             "minimum": 0
           },
           "total_size": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "files": {
@@ -2937,15 +3480,24 @@
             }
           },
           "pushed_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "checked_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "completed_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           }
         }
@@ -2977,25 +3529,46 @@
           },
           "outcome": {
             "type": "string",
-            "enum": ["pending", "linked", "failed", "missing", "conflict"]
+            "enum": [
+              "pending",
+              "linked",
+              "failed",
+              "missing",
+              "conflict"
+            ]
           },
           "season_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_end_number": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "episode_label": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3021,20 +3594,34 @@
           },
           "state": {
             "type": "string",
-            "enum": ["planned", "partial", "completed", "failed"]
+            "enum": [
+              "planned",
+              "partial",
+              "completed",
+              "failed"
+            ]
           },
           "source_path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "target_dir": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "checked_at": {
             "type": "integer",
             "minimum": 0
           },
           "completed_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "files": {
@@ -3076,7 +3663,10 @@
             }
           },
           "skip_reason": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "candidates": {
             "type": "array",
@@ -3141,10 +3731,16 @@
             "type": "string"
           },
           "target_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "target_title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -3153,7 +3749,10 @@
             "type": "string"
           },
           "error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "related": {
             "$ref": "#/components/schemas/OperationLogRelatedDto"
@@ -3163,7 +3762,10 @@
       "OperationLogRelatedFieldDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["key", "value"],
+        "required": [
+          "key",
+          "value"
+        ],
         "properties": {
           "key": {
             "type": "string"
@@ -3203,7 +3805,10 @@
             }
           },
           "excluded_reason": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3224,18 +3829,30 @@
             "type": "string"
           },
           "seeders": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "leechers": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "size": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "uploaded_at": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "matched_keywords": {
             "type": "array",
@@ -3254,7 +3871,10 @@
       "OperationLogRelatedDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["fields", "torrent_matches"],
+        "required": [
+          "fields",
+          "torrent_matches"
+        ],
         "properties": {
           "fields": {
             "type": "array",
@@ -3273,7 +3893,13 @@
       "OperationLogPageDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "page", "page_size", "total", "has_more"],
+        "required": [
+          "items",
+          "page",
+          "page_size",
+          "total",
+          "has_more"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -3298,7 +3924,10 @@
       "TmdbSearchResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["movies", "tv"],
+        "required": [
+          "movies",
+          "tv"
+        ],
         "properties": {
           "movies": {
             "type": "array",
@@ -3317,20 +3946,34 @@
       "DoubanRatingDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["value", "count", "info", "star_count"],
+        "required": [
+          "value",
+          "count",
+          "info",
+          "star_count"
+        ],
         "properties": {
           "value": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "count": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "info": {
             "type": "string"
           },
           "star_count": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           }
         }
       },
@@ -3388,14 +4031,22 @@
             "$ref": "#/components/schemas/DoubanRatingDto"
           },
           "vote_average": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           }
         }
       },
       "DoubanSearchResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "page", "page_size", "has_more"],
+        "required": [
+          "items",
+          "page",
+          "page_size",
+          "has_more"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -3527,7 +4178,10 @@
           },
           "user_interest": {
             "type": "string",
-            "enum": ["wish", "collect"]
+            "enum": [
+              "wish",
+              "collect"
+            ]
           },
           "user_rating": {
             "type": "integer",
@@ -3539,14 +4193,22 @@
       "DoubanInterestRequestDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["interest"],
+        "required": [
+          "interest"
+        ],
         "properties": {
           "interest": {
             "type": "string",
-            "enum": ["wish", "collect"]
+            "enum": [
+              "wish",
+              "collect"
+            ]
           },
           "rating": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 5
           },
@@ -3558,17 +4220,28 @@
       "DoubanInterestResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ok", "interest", "rating", "tags"],
+        "required": [
+          "ok",
+          "interest",
+          "rating",
+          "tags"
+        ],
         "properties": {
           "ok": {
             "type": "boolean"
           },
           "interest": {
             "type": "string",
-            "enum": ["wish", "collect"]
+            "enum": [
+              "wish",
+              "collect"
+            ]
           },
           "rating": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 5
           },
@@ -3579,7 +4252,10 @@
       },
       "DoubanSnapshotCompleteness": {
         "type": "string",
-        "enum": ["complete", "partial"]
+        "enum": [
+          "complete",
+          "partial"
+        ]
       },
       "DoubanLibraryItemDto": {
         "type": "object",
@@ -3637,7 +4313,10 @@
           },
           "status": {
             "type": "string",
-            "enum": ["wish", "collect"]
+            "enum": [
+              "wish",
+              "collect"
+            ]
           },
           "status_label": {
             "type": "string"
@@ -3655,7 +4334,10 @@
             }
           },
           "user_rating": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 5
           }
@@ -3676,7 +4358,10 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["wish", "collect"]
+            "enum": [
+              "wish",
+              "collect"
+            ]
           },
           "label": {
             "type": "string"
@@ -3705,7 +4390,15 @@
       "DoubanLibraryResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["source", "cached", "fetched_at", "ttl_seconds", "limit", "wish", "collect"],
+        "required": [
+          "source",
+          "cached",
+          "fetched_at",
+          "ttl_seconds",
+          "limit",
+          "wish",
+          "collect"
+        ],
         "properties": {
           "source": {
             "type": "string",
@@ -3738,7 +4431,11 @@
       "DoubanTagCountDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tag", "count", "category"],
+        "required": [
+          "tag",
+          "count",
+          "category"
+        ],
         "properties": {
           "tag": {
             "type": "string"
@@ -3755,7 +4452,10 @@
       "DoubanTagCategoryDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "wanted_tag"],
+        "required": [
+          "name",
+          "wanted_tag"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -3784,7 +4484,10 @@
             "type": "boolean"
           },
           "updated_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "tags": {
@@ -3810,7 +4513,10 @@
       "DoubanQrStartResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["session_id", "image_url"],
+        "required": [
+          "session_id",
+          "image_url"
+        ],
         "properties": {
           "session_id": {
             "type": "string"
@@ -3823,7 +4529,13 @@
       "DoubanQrPollResponseDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["done", "login_status", "message", "description", "cookie_saved"],
+        "required": [
+          "done",
+          "login_status",
+          "message",
+          "description",
+          "cookie_saved"
+        ],
         "properties": {
           "done": {
             "type": "boolean"
@@ -3845,13 +4557,35 @@
       "ApiErrorDto": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["code", "message"],
+        "required": [
+          "code",
+          "message"
+        ],
         "properties": {
           "code": {
             "type": "string"
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "ConfirmSubscriptionCandidateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "torrent_id",
+          "expected_revision"
+        ],
+        "properties": {
+          "torrent_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
           }
         }
       }

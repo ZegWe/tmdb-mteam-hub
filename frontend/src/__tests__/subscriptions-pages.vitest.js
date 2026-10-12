@@ -234,6 +234,59 @@ async function mountAtInjectedSubscriptionParam(id, fetchMock) {
 }
 
 describe("subscription lazy route pages", () => {
+  it("keeps keyword candidates pending until the user selects a torrent", async () => {
+    let confirmations = 0;
+    let summary = subscriptionSummaryDto({
+      lifecycle_state: "searching",
+      attention_tags: ["needs_confirmation"],
+    });
+    let confirmed = false;
+    const fetchMock = vi.fn(async (input, init = {}) => {
+      const path = String(input);
+      if (path === "/api/config") return jsonResponse(configSnapshot());
+      if (path === "/api/subscriptions/wanted?limit=100")
+        return jsonResponse(subscriptionState(summary));
+      if (path === "/api/subscriptions/wanted/subject-7") {
+        return jsonResponse(
+          nestedSubscriptionDetail("subject-7", {
+            summary,
+            downloads: [],
+            links: [],
+            issues: [],
+            candidates: [
+              {
+                torrent_id: "keyword-7",
+                title: "Court S01E01",
+                source: "keyword",
+                selected: confirmed,
+                user_confirmed: confirmed,
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/subscriptions/wanted/subject-7/candidates/confirm") {
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(init.body)).toEqual({ torrent_id: "keyword-7", expected_revision: 7 });
+        confirmations += 1;
+        confirmed = true;
+        summary = { ...summary, revision: 8, attention_tags: [], force_eligible_once: true };
+        return jsonResponse(summary);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+    expect(confirmations).toBe(0);
+    expect(wrapper.text()).toContain("待确认种子");
+    const selectButton = wrapper.findAll("button").find((button) => button.text() === "选中并下载");
+    expect(selectButton).toBeTruthy();
+    await selectButton.trigger("click");
+    await flushPromises();
+    expect(confirmations).toBe(1);
+    expect(wrapper.text()).toContain("已手动确认");
+    expect(wrapper.findAll("button").some((button) => button.text() === "选中并下载")).toBe(false);
+  });
+
   it("shares one loaded store across list, detail, and browser Back", async () => {
     let wantedRequests = 0;
     let detailRequests = 0;

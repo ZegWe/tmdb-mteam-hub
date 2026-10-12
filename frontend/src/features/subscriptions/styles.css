@@ -229,7 +229,8 @@
   background: var(--danger);
 }
 
-.subscription-state-node-waiting_release .subscription-state-dot {
+.subscription-state-node-waiting_release .subscription-state-dot,
+.subscription-state-node-needs_confirmation .subscription-state-dot {
   border-color: rgba(245, 158, 11, 0.75);
   background: #f59e0b;
 }

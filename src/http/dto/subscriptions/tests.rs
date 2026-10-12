@@ -105,6 +105,7 @@ fn rich_detail() -> SubscriptionDetail {
                 ..payload::CandidatePayload::default()
             },
             selected: true,
+            user_confirmed: false,
             matched_rule_name: Some("1080p".to_string()),
             matched_priority: Some(10),
             matched_keywords: vec!["1080p".to_string()],

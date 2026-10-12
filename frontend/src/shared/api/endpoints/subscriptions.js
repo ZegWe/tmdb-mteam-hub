@@ -510,10 +510,7 @@ export function pollWantedSubscriptions({ client = defaultApiClient, ...requestO
  * @param {SubscriptionRequestOptions} [options]
  * @returns {Promise<import("../contracts.js").SubscriptionSummaryDto>}
  */
-export async function retrySubscription(
-  id,
-  { client = defaultApiClient, ...requestOptions } = {},
-) {
+export async function retrySubscription(id, { client = defaultApiClient, ...requestOptions } = {}) {
   const subjectId = requestedSubscriptionId(id);
   const signal = requestOptions.signal;
   throwIfAborted(signal);
@@ -522,5 +519,29 @@ export async function retrySubscription(
     { ...requestOptions, method: "POST", body: {} },
   );
   throwIfAborted(signal);
+  return normalizeSubscriptionSummaryRecord(response);
+}
+
+/**
+ * @param {unknown} id
+ * @param {string} torrentId
+ * @param {number} expectedRevision
+ * @param {SubscriptionRequestOptions} [options]
+ */
+export async function confirmSubscriptionCandidate(
+  id,
+  torrentId,
+  expectedRevision,
+  { client = defaultApiClient, ...requestOptions } = {},
+) {
+  const subjectId = requestedSubscriptionId(id);
+  const response = await client.request(
+    `/api/subscriptions/wanted/${encodeURIComponent(subjectId)}/candidates/confirm`,
+    {
+      ...requestOptions,
+      method: "POST",
+      body: { torrent_id: torrentId, expected_revision: expectedRevision },
+    },
+  );
   return normalizeSubscriptionSummaryRecord(response);
 }

@@ -162,6 +162,7 @@ pub(crate) struct CandidateRuleEvaluationPayload {
 pub(crate) struct CandidateMatchPayload {
     pub(crate) candidate: CandidatePayload,
     pub(crate) selected: bool,
+    pub(crate) user_confirmed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) matched_rule_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +173,12 @@ pub(crate) struct CandidateMatchPayload {
     pub(crate) excluded_reason: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) rule_evaluations: Vec<CandidateRuleEvaluationPayload>,
+}
+
+impl CandidateMatchPayload {
+    pub(crate) fn download_authorized(&self) -> bool {
+        self.user_confirmed || matches!(self.candidate.source.as_str(), "douban" | "imdb")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +200,9 @@ pub(crate) struct TvEpisodeDetailPayload {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct TvDetailPayload {
+    /// Localized series title returned by the metadata API.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) localized_title: String,
     pub(crate) season_number: u32,
     pub(crate) episode_total: u32,
     pub(crate) target_start_episode: u32,
@@ -734,6 +744,7 @@ mod tests {
                 uploaded_at: Some("2026-07-11T10:00:00Z".to_string()),
             },
             selected: true,
+            user_confirmed: false,
             matched_rule_name: Some("fixture-rule".to_string()),
             matched_priority: Some(10),
             matched_keywords: vec!["1080p".to_string()],

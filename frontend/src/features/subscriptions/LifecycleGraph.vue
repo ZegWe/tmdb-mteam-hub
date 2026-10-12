@@ -24,6 +24,7 @@ import { subscriptionDisplayStatus, subscriptionLifecycleNodes } from "./domain.
 
 const ATTENTION_TEXT = Object.freeze({
   waiting_release: "等待发布",
+  needs_confirmation: "待确认种子",
   retry_blocked: "阻塞",
   skipped: "跳过",
   failed: "失败",

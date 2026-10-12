@@ -152,6 +152,7 @@ async fn seed_tv_artifact_detail(repository: &SqliteSubscriptionRepository, path
         .expect("load fresh TV artifact seed");
     let mut payload = detail.payload().clone();
     payload.tv = Some(TvDetailPayload {
+        localized_title: String::new(),
         season_number: 1,
         episode_total: 2,
         target_start_episode: 1,

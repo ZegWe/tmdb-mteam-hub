@@ -238,6 +238,7 @@ fn read_range_end(bytes: &[u8], mut cursor: usize) -> Option<u32> {
         }
     }
     read_number(bytes, cursor)
+        .filter(|(_, end)| *end == bytes.len() || !bytes[*end].is_ascii_alphanumeric())
         .map(|(value, _)| value)
         .filter(|value| *value > 0)
 }
@@ -287,6 +288,13 @@ mod tests {
 
     #[test]
     fn recognizes_episode_partial_and_season_pack_coverage() {
+        assert_eq!(
+            recognize("Court S01E01 2160p"),
+            Some(EpisodeCoverage::Episode {
+                season: Some(1),
+                episode: 1
+            })
+        );
         assert_eq!(
             recognize("Show.S02E03.1080p"),
             Some(EpisodeCoverage::Episode {
