@@ -52,6 +52,10 @@ test("subscription detail observes one polling stream and exposes no legacy side
 
   await expect(page).toHaveURL(/#\/subscriptions\/fixture-subscription/);
   await expect(page.locator("[aria-label='下载进度 25%']")).toBeVisible();
+  await expect(page.locator(".subscription-download-artifact a").first()).toHaveAttribute(
+    "href",
+    "https://kp.m-team.cc/detail/fixture-torrent",
+  );
   const candidates = page.locator(".subscription-saved-candidates");
   await expect(candidates).not.toHaveAttribute("open", "");
   await candidates.locator("summary").click();

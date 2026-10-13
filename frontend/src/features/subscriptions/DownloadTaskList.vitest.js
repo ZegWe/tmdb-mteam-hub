@@ -11,6 +11,33 @@ function record(overrides = {}) {
 }
 
 describe("DownloadTaskList", () => {
+  it.each(["pushed", "downloading", "downloaded", "superseded"])(
+    "links the original M-Team torrent for %s downloads even without candidate results",
+    (state) => {
+      const wrapper = mount(DownloadTaskList, {
+        props: {
+          record: record({
+            downloads: [
+              {
+                id: "download-1",
+                torrent_id: "12345",
+                torrent_title: "Chosen.Release.2160p",
+                state,
+              },
+            ],
+          }),
+        },
+      });
+      expect(wrapper.get("a").attributes()).toMatchObject({
+        href: "https://kp.m-team.cc/detail/12345",
+        target: "_blank",
+        rel: "noopener noreferrer",
+      });
+      expect(wrapper.get("a").text()).toBe("Chosen.Release.2160p");
+      wrapper.unmount();
+    },
+  );
+
   it("renders the not-pushed empty state without progress or episodes", () => {
     const wrapper = mount(DownloadTaskList, {
       props: { record: record({ lifecycle_state: "queued" }) },
