@@ -29,6 +29,7 @@
         @tag-suggestion="detailStore.applyTagSuggestion"
         @load-season="detailStore.loadSeason"
         @select-torrent-source="detailStore.selectTorrentSource"
+        @search-torrents="detailStore.searchTorrents"
         @select-torrent-season="detailStore.selectTorrentSeason"
         @push-torrent="openQbPushDialog"
       />

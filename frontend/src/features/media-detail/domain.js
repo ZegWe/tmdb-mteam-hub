@@ -1,4 +1,5 @@
-import { formatSize, joinNames } from "../../shared/lib/formatters.js";
+import { joinNames } from "../../shared/lib/formatters.js";
+export { mteamTorrentWebUrl, torrentStats } from "../../shared/media/torrents.js";
 
 const TV_STATUS_ZH = {
   "Returning Series": "连载中",
@@ -256,20 +257,4 @@ function positiveInteger(value) {
 
 function pad2(value) {
   return String(value).padStart(2, "0");
-}
-
-export function mteamTorrentWebUrl(torrentId) {
-  const id = String(torrentId ?? "").trim();
-  return id ? `https://kp.m-team.cc/detail/${encodeURIComponent(id)}` : "https://kp.m-team.cc/";
-}
-
-export function torrentStats(torrent) {
-  return [
-    torrent?.size != null ? formatSize(Number(torrent.size)) : "",
-    `做种 ${torrent?.seeders ?? "—"}`,
-    `下载 ${torrent?.leechers ?? "—"}`,
-    torrent?.created_at || "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
 }

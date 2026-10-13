@@ -1388,7 +1388,7 @@
     "/api/subscriptions/wanted/{id}/retry": {
       "post": {
         "summary": "Rerun a movie from torrent search or retry an incomplete TV subscription",
-        "description": "For any eligible movie subscription, reset the lifecycle to searching using the existing source metadata, clear prior candidates and issues, and mark previous active downloads superseded. An incomplete TV subscription retries its current lifecycle stage and preserves its recovery payload. Both operations clear the skip gate and retry count, schedule an immediate forced attempt, and record an audit entry atomically. Download identities and link history are retained so existing qBittorrent tasks can be reconciled during the new search. Running, inactive, blocked, and completed TV subscriptions are rejected with 409.",
+        "description": "When replacement cleanup is pending, retry preserves the confirmed candidate and cleanup journal to resume that operation. For any other eligible movie subscription, reset the lifecycle to searching using the existing source metadata, clear prior candidates and issues, and mark previous active downloads superseded. An incomplete TV subscription retries its current lifecycle stage and preserves its recovery payload. Both operations clear the skip gate and retry count, schedule an immediate forced attempt, and record an audit entry atomically. Download identities and link history are retained so existing qBittorrent tasks can be reconciled during the new search. Running, inactive, blocked, and completed TV subscriptions are rejected with 409.",
         "parameters": [
           {
             "name": "id",
@@ -1546,6 +1546,190 @@
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/subscriptions/wanted/{id}/candidates/confirm": {
+      "post": {
+        "summary": "确认订阅候选种子并安排下载",
+        "description": "确认当前候选列表中的一个种子。replace_existing=true 时允许下载中、链接中和已完成订阅清理旧任务及文件后换种。默认只确认搜索阶段候选，TV 可继续补集。expected_revision 拒绝过期操作，运行中或清理期间返回 409。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Subscription subject ID, up to 256 UTF-8 bytes. Must be nonempty, trimmed, and contain no control characters, slash, or backslash; dot and double-dot are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription summary after scheduling the retry or rerun",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummaryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid subscription subject ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "invalid_subscription_id",
+                  "message": "subscription id is invalid"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "404": {
+            "description": "Subscription not found for the current account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "subscription_not_found",
+                  "message": "subscription not found"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "候选已变化、订阅正在执行、种子已下载或当前不可选择",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "operationId": "confirmSubscriptionCandidate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmSubscriptionCandidateRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/subscriptions/wanted/{id}/candidates/search": {
+      "post": {
+        "summary": "Search supplementary candidates by name, Douban ID, or IMDb ID",
+        "description": "搜索并保存手动候选，不改变当前选择和下载。所有补充搜索结果均需用户确认；expected_revision 拒绝过期操作，任务运行中或清理期间返回 409。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Subscription subject ID, up to 256 UTF-8 bytes. Must be nonempty, trimmed, and contain no control characters, slash, or backslash; dot and double-dot are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription summary after scheduling the retry or rerun",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummaryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid subscription subject ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "invalid_subscription_id",
+                  "message": "subscription id is invalid"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ManagementUnauthorized"
+          },
+          "404": {
+            "description": "Subscription not found for the current account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                },
+                "example": {
+                  "code": "subscription_not_found",
+                  "message": "subscription not found"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "description": "候选已变化、订阅正在执行、种子已下载或当前不可选择",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "operationId": "searchSubscriptionCandidates",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchSubscriptionCandidatesRequest"
+              }
+            }
           }
         }
       }
@@ -2110,7 +2294,14 @@
       },
       "SubscriptionAttentionTag": {
         "type": "string",
-        "enum": ["waiting_release", "failed", "retry_blocked", "skipped", "needs_reconciliation"]
+        "enum": [
+          "waiting_release",
+          "failed",
+          "retry_blocked",
+          "skipped",
+          "needs_reconciliation",
+          "needs_confirmation"
+        ]
       },
       "MteamSearchSource": {
         "type": "string",
@@ -2817,7 +3008,8 @@
           "matched_rule_name",
           "matched_priority",
           "matched_keywords",
-          "excluded_reason"
+          "excluded_reason",
+          "user_confirmed"
         ],
         "properties": {
           "torrent_id": {
@@ -2863,6 +3055,10 @@
           },
           "excluded_reason": {
             "type": ["string", "null"]
+          },
+          "user_confirmed": {
+            "type": "boolean",
+            "description": "用户显式确认这个种子；名字搜索结果必须确认后才下载。"
           }
         }
       },
@@ -3212,6 +3408,10 @@
             "items": {
               "$ref": "#/components/schemas/SubscriptionLinkArtifactDto"
             }
+          },
+          "replacement_pending": {
+            "type": "boolean",
+            "description": "Old downloads and links are being cleaned before the selected torrent is downloaded."
           }
         }
       },
@@ -3959,6 +4159,50 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "ConfirmSubscriptionCandidateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["torrent_id", "expected_revision"],
+        "properties": {
+          "torrent_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "replace_existing": {
+            "type": "boolean",
+            "default": false,
+            "description": "Explicitly clear all previous subscription torrents, downloaded files and verified links before downloading the selected candidate."
+          }
+        }
+      },
+      "SearchSubscriptionCandidatesRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["keyword", "expected_revision"],
+        "properties": {
+          "keyword": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Search text: name, numeric Douban ID, or IMDb ID (tt prefix optional), depending on source."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source": {
+            "type": "string",
+            "enum": ["keyword", "douban", "imdb"],
+            "default": "keyword",
+            "description": "Search by name, Douban ID, or IMDb ID."
           }
         }
       }

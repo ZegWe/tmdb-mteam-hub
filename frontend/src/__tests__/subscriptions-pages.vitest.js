@@ -9,6 +9,7 @@ let activeWrapper = null;
 afterEach(() => {
   activeWrapper?.unmount();
   activeWrapper = null;
+  vi.unstubAllGlobals();
 });
 
 function configSnapshot(overrides = {}) {
@@ -262,6 +263,190 @@ async function mountAtInjectedSubscriptionParam(id, fetchMock) {
 }
 
 describe("subscription lazy route pages", () => {
+  it("keeps keyword candidates pending until the user selects a torrent", async () => {
+    let confirmations = 0;
+    let summary = subscriptionSummaryDto({
+      lifecycle_state: "searching",
+      attention_tags: ["needs_confirmation"],
+    });
+    let confirmed = false;
+    const fetchMock = vi.fn(async (input, init = {}) => {
+      const path = String(input);
+      if (path === "/api/config") return jsonResponse(configSnapshot());
+      if (path === "/api/subscriptions/wanted?limit=100")
+        return jsonResponse(subscriptionState(summary));
+      if (path === "/api/subscriptions/wanted/subject-7") {
+        return jsonResponse(
+          nestedSubscriptionDetail("subject-7", {
+            summary,
+            downloads: [],
+            links: [],
+            issues: [],
+            candidates: [
+              {
+                torrent_id: "keyword-7",
+                title: "Court S01E01",
+                source: "keyword",
+                selected: confirmed,
+                user_confirmed: confirmed,
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/subscriptions/wanted/subject-7/candidates/confirm") {
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(init.body)).toEqual({ torrent_id: "keyword-7", expected_revision: 7 });
+        confirmations += 1;
+        confirmed = true;
+        summary = { ...summary, revision: 8, attention_tags: [], force_eligible_once: true };
+        return jsonResponse(summary);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+    expect(confirmations).toBe(0);
+    expect(wrapper.text()).toContain("待确认种子");
+    const selectButton = wrapper.findAll("button").find((button) => button.text() === "选中并下载");
+    expect(selectButton).toBeTruthy();
+    await selectButton.trigger("click");
+    await flushPromises();
+    expect(confirmations).toBe(1);
+    expect(wrapper.text()).toContain("已手动确认");
+    expect(wrapper.findAll("button").some((button) => button.text() === "选中并下载")).toBe(false);
+  });
+
+  it.each(["downloading", "linking", "completed"])(
+    "allows replacing an automatic ID match in %s only after cleanup confirmation",
+    async (lifecycle) => {
+      const confirm = vi.fn().mockReturnValue(false);
+      vi.stubGlobal("confirm", confirm);
+      let requested = false;
+      const summary = subscriptionSummaryDto({ lifecycle_state: lifecycle });
+      const fetchMock = vi.fn(async (input, init = {}) => {
+        const path = String(input);
+        if (path === "/api/config") return jsonResponse(configSnapshot());
+        if (path === "/api/subscriptions/wanted?limit=100")
+          return jsonResponse(subscriptionState(summary));
+        if (path === "/api/subscriptions/wanted/subject-7")
+          return jsonResponse(
+            nestedSubscriptionDetail("subject-7", {
+              summary,
+              ...(requested ? { replacement_pending: true } : {}),
+              candidates: [
+                {
+                  torrent_id: "old",
+                  title: "Old ID match",
+                  source: "douban",
+                  selected: !requested,
+                  user_confirmed: false,
+                },
+                {
+                  torrent_id: "new",
+                  title: "New torrent",
+                  source: "imdb",
+                  selected: requested,
+                  user_confirmed: requested,
+                },
+              ],
+              downloads: [{ torrent_id: "old", state: "downloading" }],
+              links: [],
+            }),
+          );
+        if (path.endsWith("/candidates/confirm")) {
+          expect(JSON.parse(init.body)).toEqual({
+            torrent_id: "new",
+            expected_revision: 7,
+            replace_existing: true,
+          });
+          requested = true;
+          return jsonResponse(summary);
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      });
+      const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+      const button = wrapper.findAll("button").find((item) => item.text() === "清理旧任务并换种");
+      expect(button).toBeTruthy();
+      await button.trigger("click");
+      await flushPromises();
+      expect(requested).toBe(false);
+      confirm.mockReturnValue(true);
+      await button.trigger("click");
+      await flushPromises();
+      expect(requested).toBe(true);
+      expect(wrapper.text()).toContain("正在换种");
+      expect(wrapper.findAll("button").some((item) => item.text() === "清理旧任务并换种")).toBe(
+        false,
+      );
+    },
+  );
+
+  it.each([
+    ["keyword", "Alternative 2026"],
+    ["douban", "1292052"],
+    ["imdb", "tt0111161"],
+  ])(
+    "searches by %s without changing the automatic selection or downloads",
+    async (source, query) => {
+      let searched = false;
+      const summary = subscriptionSummaryDto({ lifecycle_state: "downloading" });
+      const old = {
+        torrent_id: "old",
+        title: "ID match",
+        source: "douban",
+        selected: true,
+        user_confirmed: false,
+      };
+      const fetchMock = vi.fn(async (input, init = {}) => {
+        const path = String(input);
+        if (path === "/api/config") return jsonResponse(configSnapshot());
+        if (path === "/api/subscriptions/wanted?limit=100")
+          return jsonResponse(subscriptionState(summary));
+        if (path === "/api/subscriptions/wanted/subject-7")
+          return jsonResponse(
+            nestedSubscriptionDetail("subject-7", {
+              summary: { ...summary, revision: searched ? 8 : 7 },
+              candidates: searched
+                ? [
+                    old,
+                    {
+                      torrent_id: "new",
+                      title: "Alternative 2026",
+                      source: source === "keyword" ? source : `manual_${source}`,
+                      selected: false,
+                      user_confirmed: false,
+                    },
+                  ]
+                : [old],
+              downloads: [{ torrent_id: "old", state: "downloading" }],
+              links: [],
+            }),
+          );
+        if (path.endsWith("/candidates/search")) {
+          expect(JSON.parse(init.body)).toEqual({
+            keyword: query,
+            expected_revision: 7,
+            ...(source === "keyword" ? {} : { source }),
+          });
+          searched = true;
+          return jsonResponse({ ...summary, revision: 8 });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      });
+      const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+      await wrapper.get('select[aria-label="种子搜索方式"]').setValue(source);
+      await wrapper.get('input[aria-label="种子搜索内容"]').setValue(query);
+      await wrapper.get(".subscription-candidate-list form").trigger("submit");
+      await flushPromises();
+      expect(searched).toBe(true);
+      expect(wrapper.text()).toContain("Alternative 2026");
+      expect(wrapper.text()).toContain("已选择");
+      expect(
+        fetchMock.mock.calls.some(([path]) => String(path).endsWith("/candidates/confirm")),
+      ).toBe(false);
+    },
+  );
+
   it("shares one loaded store across list, detail, and browser Back", async () => {
     let wantedRequests = 0;
     let detailRequests = 0;

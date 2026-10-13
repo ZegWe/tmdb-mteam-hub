@@ -272,6 +272,32 @@ pub async fn list_torrents_by_hashes(
     list_torrents_query(server, Some(&hashes.join("|")), None).await
 }
 
+/// Delete exactly one validated torrent and its downloaded content.
+pub async fn delete_torrent_and_files(
+    server: &QbServerEntry,
+    hash: &str,
+) -> Result<(), ClientError> {
+    if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ClientError::invalid_request(
+            QB_POLICY.provider,
+            "invalid deletion hash",
+        ));
+    }
+    let (client, base) = session(server).await?;
+    let response = client
+        .execute(
+            client
+                .post(join_url(&base, "/api/v2/torrents/delete"))
+                .header("Referer", join_url(&base, "/"))
+                .form(&[("hashes", hash), ("deleteFiles", "true")]),
+        )
+        .await?;
+    if !response.is_success() {
+        return Err(ClientError::for_status(QB_POLICY.provider, response.status));
+    }
+    Ok(())
+}
+
 /// Returns torrents carrying the exact qB tag supplied through the Web API's
 /// `tag` filter. Callers must still validate the returned tag set because the
 /// upstream server, rather than this client, owns filtering semantics.

@@ -4,7 +4,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const STATIC_ROOT = join(ROOT, "static");
+const STATIC_ROOT = resolve(process.env.E2E_STATIC_ROOT || join(ROOT, "static"));
 const DEFAULT_PORT = 4174;
 
 const MIME_TYPES = Object.freeze({
@@ -96,6 +96,10 @@ function detail(revision) {
         title: "Browser.Fixture.2026.2160p",
         subtitle: "deterministic candidate",
         source: "mteam",
+        size: "1073741824",
+        seeders: 8,
+        leechers: 2,
+        uploaded_at: "2026-10-13 10:00:00",
         selected: true,
         excluded_reason: null,
       },

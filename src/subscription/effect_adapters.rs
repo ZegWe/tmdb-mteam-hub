@@ -681,6 +681,35 @@ fn probe_regular_path(path: &Path, operation: HardlinkFilesystemOperation) -> Pa
     }
 }
 
+pub(crate) fn verify_cleanup_link(
+    source: &Path,
+    target: &Path,
+    outcome: super::effects::LinkFileOutcome,
+) -> Result<(), String> {
+    let target_metadata = match std::fs::symlink_metadata(target) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result.map_err(|error| error.to_string())?,
+    };
+    // A linked outcome alone is insufficient: the inode must still match.
+    if !matches!(
+        outcome,
+        super::effects::LinkFileOutcome::Linked | super::effects::LinkFileOutcome::Pending
+    ) {
+        return Err("链接目标不是本任务创建或验证的硬链接，已停止清理".to_string());
+    }
+    let source_metadata = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if !source_metadata.is_file()
+        || !target_metadata.is_file()
+        || source_metadata.file_type().is_symlink()
+        || target_metadata.file_type().is_symlink()
+        || metadata_identity(&source_metadata).map_err(|error| error.to_string())?
+            != metadata_identity(&target_metadata).map_err(|error| error.to_string())?
+    {
+        return Err("链接文件已被替换，已停止清理".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn metadata_identity(metadata: &std::fs::Metadata) -> Result<FileIdentity, io::ErrorKind> {
     use std::os::unix::fs::MetadataExt;

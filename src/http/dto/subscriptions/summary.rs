@@ -139,6 +139,7 @@ const fn execution_label(value: SubscriptionExecutionState) -> &'static str {
 const fn attention_tag_label(value: SubscriptionAttentionTag) -> &'static str {
     match value {
         SubscriptionAttentionTag::WaitingRelease => "waiting_release",
+        SubscriptionAttentionTag::NeedsConfirmation => "needs_confirmation",
         SubscriptionAttentionTag::Failed => "failed",
         SubscriptionAttentionTag::RetryBlocked => "retry_blocked",
         SubscriptionAttentionTag::Skipped => "skipped",

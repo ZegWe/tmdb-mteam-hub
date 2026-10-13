@@ -97,6 +97,11 @@ async function mountDetail(fetchMock = detailFetchMock()) {
     global: { plugins: [router] },
   });
   await flushPromises();
+  expect(
+    fetchMock.mock.calls.some(([path]) => String(path).startsWith("/api/mteam/torrents")),
+  ).toBe(false);
+  await activeWrapper.get(".mteam-search-trigger").trigger("click");
+  await flushPromises();
   return { wrapper: activeWrapper, fetchMock };
 }
 

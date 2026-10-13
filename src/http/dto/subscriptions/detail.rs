@@ -15,6 +15,8 @@ use crate::subscription::repository::SubscriptionDetail;
 /// persisted provider/config secrets by using a raw `From` conversion.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SubscriptionDetailDto {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    replacement_pending: bool,
     summary: SubscriptionSummaryDto,
     source: SubscriptionSourceDto,
     observation: SubscriptionObservationDto,
@@ -33,6 +35,7 @@ impl SubscriptionDetailDto {
     ) -> Self {
         let payload = detail.payload();
         Self {
+            replacement_pending: payload.replacement_pending,
             summary: detail.summary().into(),
             source: (&payload.source).into(),
             observation: (&payload.observation).into(),
@@ -195,6 +198,7 @@ struct SubscriptionCandidateDto {
     leechers: Option<u64>,
     uploaded_at: Option<String>,
     selected: bool,
+    user_confirmed: bool,
     matched_rule_name: Option<String>,
     matched_priority: Option<i32>,
     matched_keywords: Vec<String>,
@@ -216,6 +220,7 @@ impl SubscriptionCandidateDto {
             leechers: value.candidate.leechers,
             uploaded_at: value.candidate.uploaded_at.clone(),
             selected: value.selected,
+            user_confirmed: value.user_confirmed,
             matched_rule_name: value.matched_rule_name.clone(),
             matched_priority: value.matched_priority,
             matched_keywords: value.matched_keywords.clone(),

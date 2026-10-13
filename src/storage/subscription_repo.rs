@@ -321,6 +321,84 @@ impl SqliteSubscriptionRepository {
         self.executor
             .run(move |connection| force_retry(connection, key, now_unix))
     }
+
+    pub(crate) fn confirm_candidate(
+        &self,
+        key: SubscriptionKey,
+        torrent_id: String,
+        expected_revision: u64,
+        now_unix: u64,
+    ) -> RepoFuture<SubscriptionSummary> {
+        self.executor.run(move |connection| {
+            confirm_candidate(
+                connection,
+                key,
+                torrent_id,
+                expected_revision,
+                now_unix,
+                false,
+            )
+        })
+    }
+
+    pub(crate) fn replace_candidate(
+        &self,
+        key: SubscriptionKey,
+        torrent_id: String,
+        expected_revision: u64,
+        now_unix: u64,
+    ) -> RepoFuture<SubscriptionSummary> {
+        self.executor.run(move |connection| {
+            confirm_candidate(
+                connection,
+                key,
+                torrent_id,
+                expected_revision,
+                now_unix,
+                true,
+            )
+        })
+    }
+
+    pub(crate) fn add_manual_candidates(
+        &self,
+        key: SubscriptionKey,
+        expected_revision: u64,
+        candidates: Vec<crate::subscription::repository::payload::CandidateMatchPayload>,
+        now_unix: u64,
+    ) -> RepoFuture<SubscriptionSummary> {
+        self.executor.run(move |connection| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| map_write_error("begin manual candidate search", error))?;
+            let current = load_detail(&transaction, key.clone())?;
+            let head = &current.summary().head;
+            if head.execution_state == SubscriptionExecutionState::Running {
+                return Err(RepositoryError::ExecutionGateConflict { key });
+            }
+            if head.revision.value() != expected_revision || current.payload().replacement_pending
+                || !head.active || !head.schedulable || head.blocked_reason.is_some() {
+                return Err(RepositoryError::invalid("confirm_candidate.search", "subscription changed; refresh before searching"));
+            }
+            let mut payload = current.payload().clone();
+            // Replace previous manual search results, preserving the
+            // current selection and all precise ID matches.
+            payload.candidates.retain(|candidate| candidate.selected || candidate.user_confirmed || !matches!(candidate.candidate.source.as_str(), "keyword" | "manual_douban" | "manual_imdb"));
+            for candidate in candidates.into_iter().take(100) {
+                if !payload.candidates.iter().any(|existing| existing.candidate.torrent_id == candidate.candidate.torrent_id) {
+                    payload.candidates.push(candidate);
+                }
+            }
+            payload.validate_for(&key.account_key, &key.subject_id)?;
+            let record_json = serde_json::to_string(&payload).map_err(|error| RepositoryError::Internal { message: error.to_string() })?;
+            transaction.execute(
+                "UPDATE wanted_subscription_records SET revision = revision + 1, record_json = ?3, updated_at = MAX(updated_at, ?4) WHERE account_key = ?1 AND subject_id = ?2",
+                params![key.account_key, key.subject_id, record_json, command_integer("candidate_search.now", now_unix)?],
+            ).map_err(|error| map_write_error("save manual search candidates", error))?;
+            let result = load_detail(&transaction, key)?;
+            transaction.commit().map_err(|error| map_write_error("commit manual candidate search", error))?;
+            Ok(result.summary().clone())
+        })
+    }
 }
 
 impl SubscriptionReadRepository for SqliteSubscriptionRepository {
@@ -365,6 +443,157 @@ fn get(connection: &Connection, key: SubscriptionKey) -> RepositoryResult<Subscr
     raw.try_into_head()
 }
 
+fn confirm_candidate(
+    connection: &mut Connection,
+    key: SubscriptionKey,
+    torrent_id: String,
+    expected_revision: u64,
+    now_unix: u64,
+    replace_existing: bool,
+) -> RepositoryResult<SubscriptionSummary> {
+    let now_sql = command_integer("confirm_candidate.now", now_unix)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_write_error("begin candidate confirmation", error))?;
+    let current = load_detail(&transaction, key.clone())?;
+    let head = &current.summary().head;
+    if head.execution_state == SubscriptionExecutionState::Running {
+        return Err(RepositoryError::ExecutionGateConflict { key });
+    }
+    if head.revision.value() != expected_revision {
+        return Err(RepositoryError::invalid(
+            "confirm_candidate.stale",
+            "candidate list changed; refresh before selecting",
+        ));
+    }
+    if !head.active
+        || !head.schedulable
+        || head.blocked_reason.is_some()
+        || (!replace_existing && head.lifecycle_state != SubscriptionLifecycleState::Searching)
+        || current.payload().replacement_pending
+    {
+        return Err(RepositoryError::invalid(
+            "confirm_candidate.state",
+            "subscription is not awaiting a torrent selection",
+        ));
+    }
+    let revision_sql = command_integer("confirm_candidate.revision", head.revision.value())?;
+    if revision_sql == i64::MAX {
+        return Err(RepositoryError::invalid(
+            "confirm_candidate.revision",
+            "revision exhausted",
+        ));
+    }
+    let mut payload = current.payload().clone();
+    if !replace_existing
+        && head.media_kind != SubscriptionMediaKind::Tv
+        && (!payload.artifacts.downloads.is_empty() || !payload.artifacts.links.is_empty())
+    {
+        return Err(RepositoryError::invalid(
+            "confirm_candidate.cleanup_required",
+            "replacement requires explicit cleanup consent",
+        ));
+    }
+    let candidate = payload
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.candidate.torrent_id == torrent_id && !torrent_id.trim().is_empty()
+        })
+        .ok_or_else(|| {
+            RepositoryError::invalid(
+                "confirm_candidate.missing",
+                "torrent is no longer in the candidate list",
+            )
+        })?;
+    if payload.artifacts.downloads.iter().any(|download| download.torrent_id == torrent_id
+        && !matches!(download.state, crate::subscription::repository::payload::DownloadArtifactStatePayload::Failed
+            | crate::subscription::repository::payload::DownloadArtifactStatePayload::Superseded
+            | crate::subscription::repository::payload::DownloadArtifactStatePayload::Ignored))
+    {
+        return Err(RepositoryError::invalid("confirm_candidate.used", "torrent was already downloaded"));
+    }
+    if head.media_kind == SubscriptionMediaKind::Tv {
+        let tv = payload.tv.as_ref().ok_or_else(|| {
+            RepositoryError::invalid("confirm_candidate.tv", "TV metadata missing")
+        })?;
+        let mut selection_payload = payload.clone();
+        if replace_existing {
+            selection_payload.artifacts = Default::default();
+        }
+        let cursor =
+            crate::subscription::execution_effects::first_uncovered_episode(&selection_payload, tv)
+                .ok_or_else(|| {
+                    RepositoryError::invalid("confirm_candidate.tv", "no uncovered TV episodes")
+                })?;
+        if crate::subscription::episode::recognize(&candidate.candidate.title)
+            .is_none_or(|coverage| !coverage.covers(tv.season_number, cursor))
+        {
+            return Err(RepositoryError::invalid(
+                "confirm_candidate.tv",
+                "torrent does not cover the next required episode",
+            ));
+        }
+    }
+    for candidate in &mut payload.candidates {
+        candidate.user_confirmed = candidate.candidate.torrent_id == torrent_id;
+        candidate.selected = candidate.user_confirmed;
+        if candidate.user_confirmed {
+            candidate.excluded_reason = None;
+        }
+    }
+    payload.skip_reason = None;
+    payload.replacement_pending = replace_existing;
+    payload.replacement_prepared = false;
+    payload.validate_for(&key.account_key, &key.subject_id)?;
+    let attention_tags = current
+        .summary()
+        .attention_tags
+        .iter()
+        .copied()
+        .filter(|tag| {
+            !replace_existing
+                && !matches!(
+                    tag,
+                    SubscriptionAttentionTag::NeedsConfirmation
+                        | SubscriptionAttentionTag::WaitingRelease
+                        | SubscriptionAttentionTag::Failed
+                        | SubscriptionAttentionTag::RetryBlocked
+                        | SubscriptionAttentionTag::Skipped
+                )
+        })
+        .collect::<Vec<_>>();
+    let record_json =
+        serde_json::to_string(&payload).map_err(|error| RepositoryError::Internal {
+            message: error.to_string(),
+        })?;
+    let tags_json =
+        serde_json::to_string(&attention_tags).map_err(|error| RepositoryError::Internal {
+            message: error.to_string(),
+        })?;
+    transaction.execute(
+        "UPDATE wanted_subscription_records SET lifecycle_state = 'searching', revision = revision + 1, next_attempt_at = ?3, retry_count = 0, retry_blocked = 0, force_eligible_once = 1, attention_tags_json = ?4, record_json = ?5, updated_at = MAX(updated_at, ?3) WHERE account_key = ?1 AND subject_id = ?2",
+        params![key.account_key.as_str(), key.subject_id.as_str(), now_sql, tags_json, record_json],
+    ).map_err(|error| map_write_error("confirm candidate", error))?;
+    let result = load_detail(&transaction, key.clone())?;
+    execution_audit::append_execution_audit(
+        &transaction,
+        execution_audit::ExecutionAuditEntry {
+            account_key: key.account_key,
+            created_at: now_unix,
+            action: "confirm_subscription_candidate",
+            target_id: key.subject_id,
+            target_title: current.summary().projection.title.clone(),
+            summary: "user confirmed a subscription torrent for download",
+            related: serde_json::json!({"torrent_id": torrent_id, "replace_existing": replace_existing, "row_revision": result.summary().head.revision.value()}),
+        },
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| map_write_error("commit candidate confirmation", error))?;
+    Ok(result.summary().clone())
+}
+
 fn force_retry(
     connection: &mut Connection,
     key: SubscriptionKey,
@@ -401,9 +630,10 @@ fn force_retry(
         });
     }
 
-    // A movie rerun always restarts torrent search. Retain effect identities and
-    // link history, but retire old downloads so progress/link cannot reuse them.
-    let restart_movie = head.media_kind == SubscriptionMediaKind::Movie;
+    // Movie reruns restart search, but an interrupted replacement must retain
+    // its confirmed candidate and cleanup journal until cleanup completes.
+    let restart_movie =
+        head.media_kind == SubscriptionMediaKind::Movie && !current.payload().replacement_pending;
     let lifecycle_state = if restart_movie {
         SubscriptionLifecycleState::Searching
     } else {
@@ -1075,6 +1305,7 @@ fn parse_attention_tags(value: &str) -> RepositoryResult<Vec<SubscriptionAttenti
 const fn attention_tag_label(tag: SubscriptionAttentionTag) -> &'static str {
     match tag {
         SubscriptionAttentionTag::WaitingRelease => "waiting_release",
+        SubscriptionAttentionTag::NeedsConfirmation => "needs_confirmation",
         SubscriptionAttentionTag::Failed => "failed",
         SubscriptionAttentionTag::RetryBlocked => "retry_blocked",
         SubscriptionAttentionTag::Skipped => "skipped",
@@ -1980,6 +2211,324 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
     }
 
     #[tokio::test]
+    async fn candidate_confirmation_is_revision_checked_scoped_and_retry_does_not_authorize() {
+        use crate::subscription::repository::payload::{CandidateMatchPayload, CandidatePayload};
+        let fixture = fresh_fixture("candidate-confirmation").await;
+        let repository = make_repository(&fixture.path);
+        let original = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        let neighbor = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        let mut payload = original.payload().clone();
+        payload.candidates = vec![CandidateMatchPayload {
+            candidate: CandidatePayload {
+                torrent_id: "keyword-1".to_string(),
+                title: "Movie 2026 2160p".to_string(),
+                source: "keyword".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let raw = serde_json::to_string(&payload).unwrap();
+        repository.executor.run(move |connection| {
+            connection.execute("UPDATE wanted_subscription_records SET lifecycle_state = 'searching', record_json = ?1 WHERE account_key = ?2 AND subject_id = 'rows-movie-001'", params![raw, ACCOUNT]).unwrap();
+            Ok(())
+        }).await.unwrap();
+        repository
+            .force_retry(key("rows-movie-001"), SEED_AT + 1)
+            .await
+            .unwrap();
+        let before = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        assert!(before.payload().candidates.is_empty());
+        repository
+            .add_manual_candidates(
+                key("rows-movie-001"),
+                before.summary().head.revision.value(),
+                payload.candidates.clone(),
+                SEED_AT + 1,
+            )
+            .await
+            .unwrap();
+        let before = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        assert!(!before.payload().candidates[0].download_authorized());
+        for (torrent_id, revision) in [
+            ("keyword-1", before.summary().head.revision.value() - 1),
+            ("missing", before.summary().head.revision.value()),
+        ] {
+            assert!(repository
+                .confirm_candidate(
+                    key("rows-movie-001"),
+                    torrent_id.to_string(),
+                    revision,
+                    SEED_AT + 2
+                )
+                .await
+                .is_err());
+            assert_eq!(
+                repository.load_detail(key("rows-movie-001")).await.unwrap(),
+                before
+            );
+        }
+        let connection = Connection::open(&fixture.path).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_candidate_audit BEFORE INSERT ON operation_logs WHEN NEW.action = 'confirm_subscription_candidate' BEGIN SELECT RAISE(ABORT, 'audit rejected'); END;").unwrap();
+        assert!(repository
+            .confirm_candidate(
+                key("rows-movie-001"),
+                "keyword-1".to_string(),
+                before.summary().head.revision.value(),
+                SEED_AT + 2
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            repository.load_detail(key("rows-movie-001")).await.unwrap(),
+            before
+        );
+        connection
+            .execute_batch("DROP TRIGGER reject_candidate_audit;")
+            .unwrap();
+        let selected = repository
+            .confirm_candidate(
+                key("rows-movie-001"),
+                "keyword-1".to_string(),
+                before.summary().head.revision.value(),
+                SEED_AT + 2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected.head.next_attempt_at, Some(SEED_AT + 2));
+        assert!(selected.head.force_eligible_once);
+        let after = repository.load_detail(key("rows-movie-001")).await.unwrap();
+        assert!(after.payload().candidates[0].user_confirmed);
+        assert_eq!(
+            after.summary().head.revision.value(),
+            before.summary().head.revision.value() + 1
+        );
+        assert_eq!(
+            repository.load_detail(key("rows-movie-002")).await.unwrap(),
+            neighbor
+        );
+        assert!(repository
+            .confirm_candidate(
+                key("rows-movie-002"),
+                "keyword-1".to_string(),
+                neighbor.summary().head.revision.value(),
+                SEED_AT + 3
+            )
+            .await
+            .is_err());
+        let connection = Connection::open(&fixture.path).unwrap();
+        let audits: i64 = connection.query_row("SELECT COUNT(*) FROM operation_logs WHERE action = 'confirm_subscription_candidate'", [], |row| row.get(0)).unwrap();
+        assert_eq!(audits, 1);
+    }
+
+    #[tokio::test]
+    async fn replacement_preserves_old_artifacts_until_cleanup_and_requeues_completed_subscription()
+    {
+        use crate::subscription::repository::{
+            payload::CandidateMatchPayload, payload::CandidatePayload, ExecutionPayloadDelta,
+        };
+        let fixture = fresh_fixture("candidate-replacement").await;
+        let repository = make_repository(&fixture.path);
+        let before = seed_retry_artifacts(
+            &repository,
+            "rows-movie-002",
+            &fixture.root.join("old.mkv"),
+            &fixture.root.join("link.mkv"),
+        )
+        .await;
+        let mut payload = before.payload().clone();
+        payload.candidates[0].candidate.source = "douban".to_string();
+        payload.candidates.push(CandidateMatchPayload {
+            candidate: CandidatePayload {
+                torrent_id: "new-torrent".to_string(),
+                title: "Replacement 2026".to_string(),
+                source: "keyword".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let supplementary = payload.candidates.pop().unwrap();
+        repository
+            .update_detail(
+                UpdateSubscriptionDetailCommand::try_new(
+                    key("rows-movie-002"),
+                    before.summary().head.revision,
+                    SEED_AT + 2,
+                    vec![],
+                    payload.clone(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let before_search = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        for source in ["keyword", "manual_douban", "manual_imdb"] {
+            let current = repository.load_detail(key("rows-movie-002")).await.unwrap();
+            let mut candidate = supplementary.clone();
+            candidate.candidate.source = source.to_string();
+            repository
+                .add_manual_candidates(
+                    key("rows-movie-002"),
+                    current.summary().head.revision.value(),
+                    vec![candidate],
+                    SEED_AT + 2,
+                )
+                .await
+                .unwrap();
+            let searched = repository.load_detail(key("rows-movie-002")).await.unwrap();
+            assert_eq!(searched.payload().candidates.len(), 2);
+            assert_eq!(searched.payload().candidates[1].candidate.source, source);
+            assert!(!searched.payload().candidates[1].download_authorized());
+        }
+        let before = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        assert_eq!(
+            before.summary().head.lifecycle_state,
+            before_search.summary().head.lifecycle_state
+        );
+        assert_eq!(
+            before.payload().artifacts,
+            before_search.payload().artifacts
+        );
+        assert!(before.payload().candidates[0].selected);
+        assert!(!before.payload().candidates[1].download_authorized());
+        let revision = before.summary().head.revision.value();
+        assert!(repository
+            .confirm_candidate(
+                key("rows-movie-002"),
+                "new-torrent".to_string(),
+                revision,
+                SEED_AT + 3
+            )
+            .await
+            .is_err());
+        assert!(repository
+            .replace_candidate(
+                key("rows-movie-002"),
+                "new-torrent".to_string(),
+                revision - 1,
+                SEED_AT + 3
+            )
+            .await
+            .is_err());
+        assert!(repository
+            .replace_candidate(
+                key("rows-movie-002"),
+                "213970".to_string(),
+                revision,
+                SEED_AT + 3
+            )
+            .await
+            .is_err());
+        repository
+            .replace_candidate(
+                key("rows-movie-002"),
+                "new-torrent".to_string(),
+                revision,
+                SEED_AT + 3,
+            )
+            .await
+            .unwrap();
+        let after = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        assert_eq!(
+            after.summary().head.lifecycle_state,
+            SubscriptionLifecycleState::Searching
+        );
+        assert!(after.summary().head.force_eligible_once);
+        assert_eq!(after.summary().head.next_attempt_at, Some(SEED_AT + 3));
+        assert!(after.payload().replacement_pending);
+        assert!(!after.payload().replacement_prepared);
+        assert!(after.payload().skip_reason.is_none());
+        assert_eq!(after.payload().artifacts, before.payload().artifacts);
+        assert!(after.payload().candidates[1].user_confirmed);
+        assert!(!after.payload().candidates[0].selected);
+        assert!(repository
+            .replace_candidate(
+                key("rows-movie-002"),
+                "new-torrent".to_string(),
+                after.summary().head.revision.value(),
+                SEED_AT + 4
+            )
+            .await
+            .is_err());
+        repository
+            .force_retry(key("rows-movie-002"), SEED_AT + 4)
+            .await
+            .unwrap();
+        let retried = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        assert!(retried.payload().replacement_pending);
+        assert_eq!(retried.payload().artifacts, before.payload().artifacts);
+        let mut cleaned = retried.payload().clone();
+        ExecutionPayloadDelta::ReplacementPrepared {
+            download_updates: vec![],
+        }
+        .apply_to_latest(&key("rows-movie-002"), &mut cleaned)
+        .unwrap();
+        assert!(cleaned.replacement_prepared);
+        ExecutionPayloadDelta::ReplacementCleaned
+            .apply_to_latest(&key("rows-movie-002"), &mut cleaned)
+            .unwrap();
+        assert!(!cleaned.replacement_pending);
+        assert!(!cleaned.replacement_prepared);
+        assert!(cleaned.artifacts.downloads.is_empty());
+        assert!(cleaned.artifacts.links.is_empty());
+        assert!(cleaned.issues.is_empty());
+        assert!(cleaned.candidates[1].user_confirmed);
+    }
+
+    #[tokio::test]
+    async fn tv_confirmation_continues_missing_episodes_but_replacement_requires_the_start_episode()
+    {
+        let fixture = fresh_fixture("tv-candidate-replacement").await;
+        let repository = make_repository(&fixture.path);
+        let before = seed_retry_artifacts(
+            &repository,
+            "rows-movie-002",
+            &fixture.root.join("old.mkv"),
+            &fixture.root.join("link.mkv"),
+        )
+        .await;
+        let mut payload = before.payload().clone();
+        payload.tv = Some(serde_json::from_value(serde_json::json!({ "season_number": 1, "episode_total": 2, "target_start_episode": 1, "target_end_episode": 2 })).unwrap());
+        payload.artifacts.links[0].files[0].season_number = Some(1);
+        payload.artifacts.links[0].files[0].episode_number = Some(1);
+        payload.candidates = serde_json::from_value(serde_json::json!([
+            { "candidate": { "torrent_id": "next", "title": "Show S01E02", "source": "keyword" } },
+            { "candidate": { "torrent_id": "restart", "title": "Show S01E01", "source": "keyword" } }
+        ])).unwrap();
+        let old_artifacts = payload.artifacts.clone();
+        let raw = serde_json::to_string(&payload).unwrap();
+        repository.executor.run(move |connection| {
+            connection.execute("UPDATE wanted_subscription_records SET media_kind = 'tv', lifecycle_state = 'searching', record_json = ?1 WHERE account_key = ?2 AND subject_id = 'rows-movie-002'", params![raw, ACCOUNT]).unwrap();
+            Ok(())
+        }).await.unwrap();
+        let revision = before.summary().head.revision.value();
+        assert!(repository
+            .replace_candidate(key("rows-movie-002"), "next".into(), revision, SEED_AT + 2)
+            .await
+            .is_err());
+        repository
+            .confirm_candidate(key("rows-movie-002"), "next".into(), revision, SEED_AT + 2)
+            .await
+            .unwrap();
+        let continued = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        assert!(!continued.payload().replacement_pending);
+        assert_eq!(continued.payload().artifacts, old_artifacts);
+        assert!(continued.payload().candidates[0].user_confirmed);
+        repository
+            .replace_candidate(
+                key("rows-movie-002"),
+                "restart".into(),
+                continued.summary().head.revision.value(),
+                SEED_AT + 3,
+            )
+            .await
+            .unwrap();
+        let restarted = repository.load_detail(key("rows-movie-002")).await.unwrap();
+        assert!(restarted.payload().replacement_pending);
+        assert!(restarted.payload().candidates[1].user_confirmed);
+        assert_eq!(restarted.payload().artifacts, old_artifacts);
+    }
+
+    #[tokio::test]
     async fn optimistic_detail_update_is_atomic_bounded_and_preserves_control_state() {
         let fixture = fresh_fixture("optimistic-update").await;
         let repository = make_repository(&fixture.path);
@@ -2590,6 +3139,7 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
 
         let mut movie_with_tv_payload = current.payload().clone();
         movie_with_tv_payload.tv = Some(TvDetailPayload {
+            localized_title: String::new(),
             season_number: 1,
             episode_total: 1,
             target_start_episode: 1,

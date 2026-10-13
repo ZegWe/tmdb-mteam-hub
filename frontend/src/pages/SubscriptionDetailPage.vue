@@ -21,7 +21,12 @@
         v-else-if="selectedDetail"
         :selected-subscription="selectedDetail"
         :retrying="retryLoading"
+        :confirming="confirmLoading"
+        :searching="candidateSearchLoading"
+        :searched="candidateSearchSubjectId === selectedDetail.subject_id"
         @retry="retrySubscription"
+        @confirm-candidate="confirmCandidate"
+        @search-candidates="searchCandidates"
       />
     </div>
   </section>
@@ -35,7 +40,11 @@ import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notificati
 import SubscriptionDetailView from "../components/SubscriptionDetailView.vue";
 import SubscriptionWatcherBanner from "../features/subscriptions/SubscriptionWatcherBanner.vue";
 import { SUBSCRIPTION_CONTEXT_KEY } from "../features/subscriptions/context.js";
-import { retrySubscription as retrySubscriptionApi } from "../shared/api/endpoints/subscriptions.js";
+import {
+  retrySubscription as retrySubscriptionApi,
+  confirmSubscriptionCandidate,
+  searchSubscriptionCandidates,
+} from "../shared/api/endpoints/subscriptions.js";
 
 const subscriptionContext = inject(SUBSCRIPTION_CONTEXT_KEY, null);
 if (!subscriptionContext) {
@@ -69,6 +78,9 @@ const detailLoading = computed(
     (activeDetailId ? subscriptionStore.isDetailLoading(activeDetailId) : false),
 );
 const retryLoading = ref(false);
+const confirmLoading = ref(false);
+const candidateSearchLoading = ref(false);
+const candidateSearchSubjectId = ref("");
 
 onMounted(() => {
   mounted = true;
@@ -164,6 +176,7 @@ async function syncSubscriptionDetail() {
   }
 
   const id = parsed.id;
+  if (activeDetailId !== id) candidateSearchSubjectId.value = "";
   if (activeDetailId && activeDetailId !== id) {
     subscriptionStore.cancelDetailLoad(activeDetailId);
   }
@@ -223,6 +236,57 @@ async function retrySubscription(subjectId) {
     notifications.showToast(failure, "err");
   } finally {
     retryLoading.value = false;
+  }
+}
+
+async function confirmCandidate(torrentId, replaceRequested) {
+  const detail = selectedDetail.value;
+  if (!detail || confirmLoading.value) return;
+  const replaceExisting =
+    replaceRequested ?? Boolean(detail.downloads?.length || detail.links?.length);
+  if (
+    replaceExisting &&
+    !globalThis.confirm(
+      "确认换种？将删除本订阅之前的 qB 种子任务、下载文件和链接文件，再下载所选种子。剧集会清空旧进度，从目标起始集重新开始。此操作无法撤销。",
+    )
+  )
+    return;
+  confirmLoading.value = true;
+  notifications.clearError();
+  try {
+    await confirmSubscriptionCandidate(detail.subject_id, torrentId, detail.revision, {
+      replaceExisting,
+    });
+    await subscriptionStore.loadDetail(detail.subject_id, { force: true });
+    notifications.showToast(
+      replaceExisting
+        ? "已提交换种，将在清理旧任务和文件后下载新种子"
+        : "已确认所选种子，将在下次调度时下载",
+      "ok",
+    );
+  } catch (error) {
+    notifications.showError(`选中失败：${error instanceof Error ? error.message : String(error)}`);
+    await subscriptionStore.loadDetail(detail.subject_id, { force: true }).catch(() => {});
+  } finally {
+    confirmLoading.value = false;
+  }
+}
+
+async function searchCandidates(keyword, source = "keyword") {
+  const detail = selectedDetail.value;
+  if (!detail || candidateSearchLoading.value || confirmLoading.value) return;
+  candidateSearchLoading.value = true;
+  notifications.clearError();
+  try {
+    await searchSubscriptionCandidates(detail.subject_id, keyword, detail.revision, { source });
+    await subscriptionStore.loadDetail(detail.subject_id, { force: true });
+    if (activeDetailId === detail.subject_id) candidateSearchSubjectId.value = detail.subject_id;
+    notifications.showToast("搜索完成，请核对候选后选择；当前下载保持不变", "ok");
+  } catch (error) {
+    notifications.showError(`搜索失败：${error instanceof Error ? error.message : String(error)}`);
+    await subscriptionStore.loadDetail(detail.subject_id, { force: true }).catch(() => {});
+  } finally {
+    candidateSearchLoading.value = false;
   }
 }
 

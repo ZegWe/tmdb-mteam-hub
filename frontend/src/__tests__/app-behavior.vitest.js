@@ -279,7 +279,9 @@ describe("current App latest response behavior", () => {
     const keywordButton = sourceButtons.find((button) => button.text() === "原标题");
 
     await doubanButton.trigger("click");
+    await wrapper.get(".mteam-search-trigger").trigger("click");
     await keywordButton.trigger("click");
+    await wrapper.get(".mteam-search-trigger").trigger("click");
 
     keyword.resolveJson({ items: [{ id: "new", name: "新种子" }], page: 1, page_size: 50 });
     await flushPromises();

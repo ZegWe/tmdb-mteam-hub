@@ -147,6 +147,7 @@ pub(super) fn match_candidates(
                 CandidateMatchPayload {
                     candidate,
                     selected: row_selected,
+                    user_confirmed: false,
                     matched_rule_name: row_selected.then(|| "default_first_candidate".to_string()),
                     matched_priority: row_selected.then_some(0),
                     matched_keywords: Vec::new(),
@@ -189,6 +190,7 @@ pub(super) fn match_candidates(
                 },
                 candidate,
                 selected: false,
+                user_confirmed: false,
                 matched_rule_name: matched.map(|evaluation| evaluation.rule_name.clone()),
                 matched_priority: matched.map(|evaluation| evaluation.priority),
                 matched_keywords: matched

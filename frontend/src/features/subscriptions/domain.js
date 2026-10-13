@@ -4,6 +4,7 @@ import {
   joinDetailList,
   normalizedStatus,
 } from "../../shared/lib/formatters.js";
+import { mteamTorrentWebUrl } from "../../shared/media/torrents.js";
 
 const SUB_LIFECYCLE_LABELS = {
   queued: "待处理",
@@ -18,6 +19,7 @@ const SUB_ATTENTION_LABELS = {
   failed: "失败",
   skipped: "已跳过",
   waiting_release: "等待发布",
+  needs_confirmation: "待确认种子",
   retry_blocked: "重试阻塞",
 };
 
@@ -58,7 +60,13 @@ const SUB_LIFECYCLE_STEPS = [
   { key: "completed", label: "完成" },
 ];
 
-const SUB_ATTENTION_PRIORITY = ["skipped", "retry_blocked", "failed", "waiting_release"];
+const SUB_ATTENTION_PRIORITY = [
+  "skipped",
+  "retry_blocked",
+  "failed",
+  "needs_confirmation",
+  "waiting_release",
+];
 
 const SUMMARY_LIFECYCLE_LABELS = [
   ["queued", "待处理"],
@@ -73,6 +81,7 @@ const SUMMARY_ATTENTION_LABELS = [
   ["failed", "失败"],
   ["skipped", "跳过"],
   ["waiting_release", "等待发布"],
+  ["needs_confirmation", "待确认种子"],
   ["retry_blocked", "重试阻塞"],
 ];
 
@@ -324,7 +333,11 @@ export function downloadArtifactRows(download) {
   const files = Array.isArray(download?.files) ? download.files : [];
   const completedFiles = files.filter((file) => Number(file?.progress) >= 1).length;
   return [
-    row("种子", download.torrent_title),
+    row(
+      "种子",
+      download.torrent_title || download.torrent_id,
+      download.torrent_id ? mteamTorrentWebUrl(download.torrent_id) : "",
+    ),
     row("qB", download.qb_server_name || download.qb_server_id),
     row("分类", download.qb_category),
     row("保存目录", download.qb_save_dir_name),

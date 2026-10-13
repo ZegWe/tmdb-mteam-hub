@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -101,13 +100,20 @@ const unformattedGenerated = [
 ].join("\n");
 
 function formatGenerated(source) {
-  const temporaryRoot = mkdtempSync(resolve(tmpdir(), "tmdb-mteam-api-contracts-"));
+  mkdirSync(resolve(root, ".tmp"), { recursive: true });
+  const temporaryRoot = mkdtempSync(resolve(root, ".tmp/tmdb-mteam-api-contracts-"));
   const temporaryFile = resolve(temporaryRoot, "contracts.js");
   try {
     writeFileSync(temporaryFile, source);
     const formatter = spawnSync(
-      resolve(root, "node_modules/.bin/vp"),
-      ["check", "--fix", "--no-lint", temporaryFile],
+      process.execPath,
+      [
+        resolve(root, "node_modules/vite-plus/bin/vp"),
+        "check",
+        "--fix",
+        "--no-lint",
+        temporaryFile,
+      ],
       { cwd: root, encoding: "utf8" },
     );
     if (formatter.status !== 0) {

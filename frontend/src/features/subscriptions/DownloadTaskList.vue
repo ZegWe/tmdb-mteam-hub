@@ -19,7 +19,7 @@
             <div v-for="row in task.downloadRows" :key="row.label" class="detail-meta-row">
               <dt>{{ row.label }}</dt>
               <dd>
-                <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                <a v-if="row.href" :href="row.href" target="_blank" rel="noopener noreferrer">{{
                   row.value
                 }}</a>
                 <span v-else>{{ row.value }}</span>
@@ -32,7 +32,7 @@
               <div v-for="row in link.rows" :key="row.label" class="detail-meta-row">
                 <dt>{{ row.label }}</dt>
                 <dd>
-                  <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
+                  <a v-if="row.href" :href="row.href" target="_blank" rel="noopener noreferrer">{{
                     row.value
                   }}</a>
                   <span v-else>{{ row.value }}</span>
@@ -83,9 +83,14 @@
           <div v-for="row in link.rows" :key="row.label" class="detail-meta-row">
             <dt>{{ row.label }}</dt>
             <dd>
-              <a v-if="row.href" :href="row.href" target="_blank" rel="noreferrer">{{
-                row.value
-              }}</a>
+              <a
+                v-if="row.href"
+                :href="row.href"
+                class="link link-hover"
+                target="_blank"
+                rel="noopener noreferrer"
+                >{{ row.value }}</a
+              >
               <span v-else>{{ row.value }}</span>
             </dd>
           </div>

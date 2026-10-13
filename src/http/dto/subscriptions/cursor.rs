@@ -346,5 +346,6 @@ const fn attention_scope_code(value: Option<SubscriptionAttentionTag>) -> u8 {
         Some(SubscriptionAttentionTag::RetryBlocked) => 3,
         Some(SubscriptionAttentionTag::Skipped) => 4,
         Some(SubscriptionAttentionTag::NeedsReconciliation) => 5,
+        Some(SubscriptionAttentionTag::NeedsConfirmation) => 6,
     }
 }

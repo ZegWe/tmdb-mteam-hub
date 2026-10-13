@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod link;
 mod mteam;
+mod replacement;
 
 use self::link::{error as hardlink_error, plans as link_plans};
 use self::mteam::{
@@ -131,7 +132,7 @@ impl LatestSubscriptionExecutionEffects {
                     &source.title,
                 )
                 .await;
-                let tv = tv_detail_from_douban(episodes_count, season_number);
+                let tv = tv_detail_from_douban(episodes_count, season_number, &detail.title);
                 return ExecutionEffectResult::Finished {
                     disposition: FinishExecutionDisposition::MetaReady,
                     payload_delta: ExecutionPayloadDelta::TvMeta {
@@ -150,15 +151,24 @@ impl LatestSubscriptionExecutionEffects {
                 retry_after,
             );
         }
-        let lookup_title = source
-            .original_title
-            .as_deref()
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or(&source.title);
+        let douban_detail = douban_result.as_ref().ok();
+        let lookup_title = douban_detail
+            .and_then(|detail| non_empty(&detail.original_title))
+            .or_else(|| source.original_title.clone())
+            .unwrap_or_else(|| source.title.clone());
+        let localized_title = douban_detail
+            .and_then(|detail| non_empty(&detail.title))
+            .unwrap_or_else(|| source.title.clone());
         let requested_season = season_number_from_title(&source.title)
-            .or_else(|| season_number_from_title(lookup_title));
+            .or_else(|| season_number_from_title(&localized_title))
+            .or_else(|| season_number_from_title(&lookup_title));
         match self
-            .load_tv_detail(policy.tmdb_api_key.trim(), lookup_title, requested_season)
+            .load_tv_detail(
+                policy.tmdb_api_key.trim(),
+                &lookup_title,
+                requested_season,
+                &localized_title,
+            )
             .await
         {
             Ok(tv) => ExecutionEffectResult::Finished {
@@ -182,6 +192,7 @@ impl LatestSubscriptionExecutionEffects {
         api_key: &str,
         title: &str,
         requested_season: Option<u32>,
+        localized_title: &str,
     ) -> Result<TvDetailPayload, String> {
         let search_title = tv_series_search_title(title);
         let response = self
@@ -257,7 +268,12 @@ impl LatestSubscriptionExecutionEffects {
         if season_number == 0 || episode_total == 0 {
             return Err("TMDB selected season has no episodes".to_string());
         }
+        let localized_title = localized_title.trim().to_string();
+        if localized_title.is_empty() {
+            return Err("Douban rexxar TV detail has no localized title".to_string());
+        }
         Ok(TvDetailPayload {
+            localized_title,
             season_number,
             episode_total,
             target_start_episode: 1,
@@ -278,6 +294,9 @@ impl LatestSubscriptionExecutionEffects {
         claimed: &ClaimedSubscription,
         policy: &ExecutionEffectPolicy,
     ) -> ExecutionEffectResult {
+        if claimed.detail().payload().replacement_pending {
+            return self.execute_replacement(claimed, policy).await;
+        }
         let detail = claimed.detail();
         let key = &detail.summary().head.key;
         let payload = detail.payload();
@@ -325,37 +344,38 @@ impl LatestSubscriptionExecutionEffects {
                 format!("{title} S{:02}E{:02}", tv.season_number, episode)
             })
         });
-        let search_subject_id = if is_tv { "" } else { key.subject_id.as_str() };
+        let search_subject_id = key.subject_id.as_str();
         let search_title = tv_search.as_deref().unwrap_or(&payload.source.title);
 
-        let (mut matches, mut selected) =
-            if let Some((matches, selected)) = retry_selection(payload) {
-                (matches, Some(selected))
-            } else {
-                let candidates = match self
-                    .search_candidates(
-                        policy.mteam_api_key.trim(),
-                        &policy.douban_cookie,
-                        search_subject_id,
-                        search_title,
-                        (!is_tv).then_some(&payload.source),
+        let (mut matches, mut selected) = if let Some((matches, selected)) =
+            confirmed_selection(payload).or_else(|| retry_selection(payload))
+        {
+            (matches, Some(selected))
+        } else {
+            let candidates = match self
+                .search_candidates(
+                    policy.mteam_api_key.trim(),
+                    &policy.douban_cookie,
+                    search_subject_id,
+                    search_title,
+                    (!is_tv).then_some(&payload.source),
+                )
+                .await
+            {
+                Ok(candidates) => candidates,
+                Err(message) => {
+                    return failed(
+                        ExecutionOperation::Search,
+                        "mteam_search",
+                        message,
+                        policy.system_retry_interval_secs,
                     )
-                    .await
-                {
-                    Ok(candidates) => candidates,
-                    Err(message) => {
-                        return failed(
-                            ExecutionOperation::Search,
-                            "mteam_search",
-                            message,
-                            policy.system_retry_interval_secs,
-                        )
-                    }
-                };
-                let matches = match_candidates(&candidates, &policy.torrent_match_rules);
-                let selected = matches.iter().find(|candidate| candidate.selected).cloned();
-                (matches, selected)
+                }
             };
+            let mut matches = match_candidates(&candidates, &policy.torrent_match_rules);
+            let selected = authorized_selection(&mut matches);
+            (matches, selected)
+        };
         if is_tv {
             let Some(tv) = payload.tv.as_ref() else {
                 return failed(
@@ -395,6 +415,16 @@ impl LatestSubscriptionExecutionEffects {
                 },
             };
         };
+        // Recheck at the final boundary, including persisted response-loss retries.
+        if !selected.download_authorized() {
+            return failed_search_with_candidates(
+                matches,
+                Vec::new(),
+                "candidate_confirmation",
+                "种子尚未获得下载确认".to_string(),
+                retry_after,
+            );
+        }
 
         let torrent_id = selected.candidate.torrent_id.clone();
         let artifact_key =
@@ -713,7 +743,56 @@ impl LatestSubscriptionExecutionEffects {
             }
         }
 
-        let plans = match link_plans(detail.payload(), category, existing_download, &files) {
+        // Records created before localized TV titles were persisted may already be past the
+        // metadata node. Refresh them from rexxar at the last responsible moment so pending
+        // hardlinks also use the Douban localized title.
+        let mut refreshed_link_payload = None;
+        if let Some(tv) = detail.payload().tv.as_ref() {
+            if tv.localized_title.trim().is_empty() {
+                match crate::douban::subject_detail(
+                    &self.douban,
+                    &policy.douban_cookie,
+                    &key.subject_id,
+                )
+                .await
+                {
+                    Ok(douban_detail) => {
+                        let mut payload = detail.payload().clone();
+                        let mut refreshed_tv = tv.clone();
+                        refreshed_tv.localized_title = douban_detail.title.trim().to_string();
+                        if refreshed_tv.localized_title.is_empty() {
+                            return ExecutionEffectResult::Failed {
+                                error_type: "tv_metadata".to_string(),
+                                message: "Douban rexxar TV detail has no localized title"
+                                    .to_string(),
+                                retry_after_secs: policy.system_retry_interval_secs,
+                                payload_delta: ExecutionPayloadDelta::Link {
+                                    download_updates: vec![updated_download],
+                                    link_updates: Vec::new(),
+                                },
+                            };
+                        }
+                        payload.tv = Some(refreshed_tv);
+                        refreshed_link_payload = Some(payload);
+                    }
+                    Err(error) => {
+                        return ExecutionEffectResult::Failed {
+                            error_type: "tv_metadata".to_string(),
+                            message: error.to_string(),
+                            retry_after_secs: policy.system_retry_interval_secs,
+                            payload_delta: ExecutionPayloadDelta::Link {
+                                download_updates: vec![updated_download],
+                                link_updates: Vec::new(),
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        let link_payload = refreshed_link_payload
+            .as_ref()
+            .unwrap_or_else(|| detail.payload());
+        let plans = match link_plans(link_payload, category, existing_download, &files) {
             Ok(plans) => plans,
             Err(message) => {
                 return ExecutionEffectResult::Failed {
@@ -884,7 +963,7 @@ impl LatestSubscriptionExecutionEffects {
                 }
             }
         }
-        if (movie_source.is_none() || candidates.is_empty()) && !title.trim().is_empty() {
+        if candidates.is_empty() && !title.trim().is_empty() {
             let response = self
                 .mteam
                 .search(api_key, &mteam_search_body("keyword", title.trim()))
@@ -988,8 +1067,13 @@ fn tv_source_from_detail(
     source
 }
 
-fn tv_detail_from_douban(episodes_count: u32, season_number: u32) -> TvDetailPayload {
+fn tv_detail_from_douban(
+    episodes_count: u32,
+    season_number: u32,
+    localized_title: &str,
+) -> TvDetailPayload {
     TvDetailPayload {
+        localized_title: localized_title.trim().to_string(),
         season_number,
         episode_total: episodes_count,
         target_start_episode: 1,
@@ -1133,7 +1217,7 @@ fn leading_number(value: &str) -> Option<u32> {
         .ok()
 }
 
-fn first_uncovered_episode(
+pub(crate) fn first_uncovered_episode(
     payload: &super::repository::payload::SubscriptionPayload,
     tv: &TvDetailPayload,
 ) -> Option<u32> {
@@ -1163,20 +1247,35 @@ fn select_tv_candidate(
 ) -> Option<CandidateMatchPayload> {
     let used = downloads
         .iter()
+        .filter(|download| {
+            !matches!(
+                download.state,
+                DownloadArtifactStatePayload::Failed
+                    | DownloadArtifactStatePayload::Superseded
+                    | DownloadArtifactStatePayload::Ignored
+            )
+        })
         .map(|download| download.torrent_id.as_str())
         .collect::<HashSet<_>>();
     let mut selected_index = None;
     let mut selected_priority = i32::MIN;
     for (index, candidate) in matches.iter().enumerate() {
         let eligible = !candidate.candidate.torrent_id.is_empty()
+            && candidate.download_authorized()
             && !used.contains(candidate.candidate.torrent_id.as_str())
-            && (rules.is_empty() || candidate.matched_priority.is_some())
+            && (candidate.user_confirmed
+                || rules.is_empty()
+                || candidate.matched_priority.is_some())
             && recognize_episode(&candidate.candidate.title)
                 .is_some_and(|coverage| coverage.covers(season, episode));
         if !eligible {
             continue;
         }
-        let priority = candidate.matched_priority.unwrap_or_default();
+        let priority = if candidate.user_confirmed {
+            i32::MAX
+        } else {
+            candidate.matched_priority.unwrap_or_default()
+        };
         if selected_index.is_none() || priority > selected_priority {
             selected_index = Some(index);
             selected_priority = priority;
@@ -1186,6 +1285,8 @@ fn select_tv_candidate(
         candidate.selected = Some(index) == selected_index;
         if candidate.selected {
             candidate.excluded_reason = None;
+        } else if !candidate.download_authorized() {
+            candidate.excluded_reason = Some("此候选需要手动选中后下载".to_string());
         } else if used.contains(candidate.candidate.torrent_id.as_str()) {
             candidate.excluded_reason =
                 Some("torrent was already pushed for this TV subscription".to_string());
@@ -1316,6 +1417,19 @@ fn current_download(
     })
 }
 
+fn authorized_selection(matches: &mut [CandidateMatchPayload]) -> Option<CandidateMatchPayload> {
+    for candidate in matches.iter_mut() {
+        if !candidate.download_authorized() {
+            candidate.selected = false;
+            candidate.excluded_reason = Some("此候选需要手动选中后下载".to_string());
+        }
+    }
+    matches
+        .iter()
+        .find(|candidate| candidate.selected && candidate.download_authorized())
+        .cloned()
+}
+
 fn retry_selection(
     payload: &super::repository::payload::SubscriptionPayload,
 ) -> Option<(Vec<CandidateMatchPayload>, CandidateMatchPayload)> {
@@ -1328,6 +1442,9 @@ fn retry_selection(
         .iter()
         .find(|candidate| candidate.candidate.torrent_id == artifact.torrent_id)?
         .clone();
+    if !selected.download_authorized() {
+        return None;
+    }
     let mut candidates = payload.candidates.clone();
     for candidate in &mut candidates {
         candidate.selected = candidate.candidate.torrent_id == artifact.torrent_id;
@@ -1336,6 +1453,28 @@ fn retry_selection(
         }
     }
     Some((candidates, selected))
+}
+
+fn confirmed_selection(
+    payload: &super::repository::payload::SubscriptionPayload,
+) -> Option<(Vec<CandidateMatchPayload>, CandidateMatchPayload)> {
+    let selected = payload
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.user_confirmed
+                && !payload.artifacts.downloads.iter().any(|download| {
+                    download.torrent_id == candidate.candidate.torrent_id
+                        && !matches!(
+                            download.state,
+                            DownloadArtifactStatePayload::Failed
+                                | DownloadArtifactStatePayload::Superseded
+                                | DownloadArtifactStatePayload::Ignored
+                        )
+                })
+        })?
+        .clone();
+    Some((payload.candidates.clone(), selected))
 }
 
 async fn observe_download(
@@ -1517,6 +1656,7 @@ mod tests {
         CandidateMatchPayload {
             candidate: candidate(id, title, 10),
             selected: false,
+            user_confirmed: false,
             matched_rule_name: None,
             matched_priority: None,
             matched_keywords: Vec::new(),
@@ -1527,6 +1667,7 @@ mod tests {
 
     fn tv_detail() -> TvDetailPayload {
         TvDetailPayload {
+            localized_title: "测试剧集".to_string(),
             season_number: 2,
             episode_total: 6,
             target_start_episode: 1,
@@ -1569,7 +1710,7 @@ mod tests {
             torrent_id: id.to_string(),
             title: title.to_string(),
             subtitle: String::new(),
-            source: "fixture".to_string(),
+            source: "douban".to_string(),
             search_query: "fixture".to_string(),
             size: None,
             seeders: Some(seeders),
@@ -1583,6 +1724,7 @@ mod tests {
         let first = CandidateMatchPayload {
             candidate: candidate("1", "Movie 1080p", 10),
             selected: false,
+            user_confirmed: false,
             matched_rule_name: None,
             matched_priority: None,
             matched_keywords: Vec::new(),
@@ -1592,6 +1734,7 @@ mod tests {
         let second = CandidateMatchPayload {
             candidate: candidate("2", "Movie 2160p", 20),
             selected: true,
+            user_confirmed: false,
             matched_rule_name: None,
             matched_priority: None,
             matched_keywords: Vec::new(),
@@ -1633,6 +1776,18 @@ mod tests {
         assert_eq!(selected.candidate.torrent_id, "1");
         assert!(candidates[0].selected);
         assert!(!candidates[1].selected);
+        let mut unconfirmed = payload.clone();
+        unconfirmed.candidates[0].candidate.source = "keyword".to_string();
+        assert!(
+            retry_selection(&unconfirmed).is_none(),
+            "an old failed keyword download cannot authorize a retry"
+        );
+        unconfirmed.candidates[0].user_confirmed = true;
+        assert!(retry_selection(&unconfirmed).is_some());
+        unconfirmed.artifacts.downloads[0].state = DownloadArtifactStatePayload::Superseded;
+        assert!(confirmed_selection(&unconfirmed).is_some());
+        unconfirmed.artifacts.downloads[0].state = DownloadArtifactStatePayload::Downloaded;
+        assert!(confirmed_selection(&unconfirmed).is_none());
     }
 
     #[test]
@@ -1757,9 +1912,43 @@ mod tests {
             .search_candidates("fixture", "", "1300656", "终结者", None)
             .await
             .unwrap();
-        assert_eq!(general.len(), 3);
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(general.len(), 2);
+        assert!(general.iter().all(|candidate| candidate.source == "douban"));
+        assert_eq!(calls.lock().unwrap().len(), 3);
         server.abort();
+    }
+
+    #[test]
+    fn manual_candidates_require_explicit_confirmation_for_movies_and_tv() {
+        let mut keyword = candidate_match("wrong", "Coming to Court Soon S01E01 2160p");
+        keyword.candidate.source = "keyword".to_string();
+        keyword.selected = true;
+        keyword.matched_priority = Some(999);
+        let mut matches = vec![keyword];
+        for source in ["keyword", "manual_douban", "manual_imdb"] {
+            matches[0].candidate.source = source.to_string();
+            matches[0].selected = true;
+            assert!(authorized_selection(&mut matches).is_none());
+            assert!(!matches[0].selected);
+            assert!(select_tv_candidate(&mut matches, 1, 1, &[], &[]).is_none());
+        }
+        matches[0].user_confirmed = true;
+        matches[0].selected = true;
+        assert!(authorized_selection(&mut matches).is_some());
+        assert!(select_tv_candidate(&mut matches, 1, 1, &[], &[]).is_some());
+        assert!(select_tv_candidate(&mut matches, 1, 2, &[], &[]).is_none());
+        for source in ["douban", "imdb"] {
+            matches[0].candidate.source = source.to_string();
+            matches[0].user_confirmed = false;
+            matches[0].selected = true;
+            assert!(authorized_selection(&mut matches).is_some());
+            assert!(select_tv_candidate(&mut matches, 1, 1, &[], &[]).is_some());
+        }
+        let payload = super::super::repository::payload::SubscriptionPayload {
+            candidates: matches,
+            ..Default::default()
+        };
+        assert!(confirmed_selection(&payload).is_none());
     }
 
     #[test]
@@ -2014,8 +2203,9 @@ mod tests {
 
     #[test]
     fn tv_detail_from_douban_builds_correct_payload() {
-        let tv = tv_detail_from_douban(8, 1);
+        let tv = tv_detail_from_douban(8, 1, "测试剧集 第一季");
 
+        assert_eq!(tv.localized_title, "测试剧集 第一季");
         assert_eq!(tv.season_number, 1);
         assert_eq!(tv.episode_total, 8);
         assert_eq!(tv.target_start_episode, 1);
@@ -2029,7 +2219,7 @@ mod tests {
 
     #[test]
     fn tv_detail_from_douban_handles_different_season() {
-        let tv = tv_detail_from_douban(6, 2);
+        let tv = tv_detail_from_douban(6, 2, "测试剧集 第二季");
 
         assert_eq!(tv.season_number, 2);
         assert_eq!(tv.episode_total, 6);

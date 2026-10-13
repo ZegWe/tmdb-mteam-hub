@@ -331,7 +331,7 @@ fn candidate(torrent_id: &str, title: &str) -> CandidateMatchPayload {
         candidate: CandidatePayload {
             torrent_id: torrent_id.to_string(),
             title: title.to_string(),
-            source: "mteam".to_string(),
+            source: "douban".to_string(),
             search_query: "fixture query".to_string(),
             ..CandidatePayload::default()
         },

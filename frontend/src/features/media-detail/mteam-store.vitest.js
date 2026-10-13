@@ -34,6 +34,32 @@ function createStore(
 }
 
 describe("M-Team torrent store", () => {
+  it("only searches on explicit submit, including source changes and refreshes", async () => {
+    const { searchTorrents, store } = createStore();
+    store.initialize(mediaContext());
+    store.choose("douban");
+    expect(store.state).toMatchObject({
+      activeSource: "douban",
+      searched: false,
+      loading: false,
+      rows: [],
+    });
+    expect(searchTorrents).not.toHaveBeenCalled();
+    await store.search();
+    expect(searchTorrents).toHaveBeenCalledTimes(1);
+    expect(store.state.searched).toBe(true);
+    await store.search();
+    expect(searchTorrents).toHaveBeenCalledTimes(2);
+    store.choose("keyword");
+    expect(searchTorrents).toHaveBeenCalledTimes(2);
+    expect(store.state.searched).toBe(false);
+    await store.search();
+    expect(searchTorrents).toHaveBeenLastCalledWith(
+      { source: "keyword", keyword: "Léon" },
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
   it("searches the selected TV season and annotates safe push coverage", async () => {
     const searchTorrents = vi.fn().mockResolvedValue({
       items: [
@@ -61,6 +87,8 @@ describe("M-Team torrent store", () => {
       }),
     );
 
+    expect(searchTorrents).not.toHaveBeenCalled();
+    await store.search();
     expect(store.state.seasonNumber).toBe(2);
     expect(store.state.sources[0]).toEqual({
       source: "tv_season",
@@ -79,6 +107,8 @@ describe("M-Team torrent store", () => {
     ]);
 
     await store.selectSeason(1);
+    expect(searchTorrents).toHaveBeenCalledTimes(1);
+    await store.search();
     expect(searchTorrents).toHaveBeenLastCalledWith(
       { source: "keyword", keyword: "Series S01" },
       { signal: expect.any(AbortSignal) },
@@ -92,6 +122,7 @@ describe("M-Team torrent store", () => {
     );
 
     await store.initialize(mediaContext());
+    await store.search();
 
     expect(store.state.sources).toEqual([
       { source: "imdb", label: "IMDb", params: { imdb_id: "tt0110413" } },
@@ -113,6 +144,7 @@ describe("M-Team torrent store", () => {
     const { store } = createStore(vi.fn().mockResolvedValue(response));
 
     await store.initialize(mediaContext());
+    await store.search();
 
     expect(store.state.rows).toEqual(expectedRows);
   });
@@ -127,6 +159,7 @@ describe("M-Team torrent store", () => {
         .mockResolvedValueOnce({ items: keywordRows, page: 1, page_size: 50 }),
     );
     await store.initialize(mediaContext({ doubanId: "" }));
+    await store.search();
 
     await store.select("keyword");
     await store.select("imdb");
@@ -148,6 +181,7 @@ describe("M-Team torrent store", () => {
       }),
     );
     await store.initialize(mediaContext());
+    await store.search();
 
     const olderRequest = store.select("douban");
     const latestRequest = store.select("keyword");
@@ -165,7 +199,8 @@ describe("M-Team torrent store", () => {
   it("contains transport failures within the optional panel", async () => {
     const { store } = createStore(vi.fn().mockRejectedValue(new Error("M-Team unavailable")));
 
-    await expect(store.initialize(mediaContext())).resolves.toBeNull();
+    store.initialize(mediaContext());
+    await expect(store.search()).resolves.toBeNull();
 
     expect(store.state.loading).toBe(false);
     expect(store.state.rows).toEqual([]);
@@ -182,7 +217,8 @@ describe("M-Team torrent store", () => {
       })
       .mockResolvedValueOnce({ items: [{ id: "fresh" }], page: 1, page_size: 50 });
     const { store } = createStore(searchTorrents);
-    const request = store.initialize(mediaContext());
+    store.initialize(mediaContext());
+    const request = store.search();
 
     store.reset();
     expect(store.state).toMatchObject({
@@ -196,6 +232,7 @@ describe("M-Team torrent store", () => {
     pending.resolve({ items: [{ id: "stale" }], page: 1, page_size: 50 });
     await request;
     await store.initialize(mediaContext({ doubanId: "", data: { original_title: "Fresh" } }));
+    await store.search();
 
     expect(searchTorrents).toHaveBeenCalledTimes(2);
     expect(store.state.rows).toEqual([{ id: "fresh" }]);
@@ -209,7 +246,8 @@ describe("M-Team torrent store", () => {
       return pending.promise;
     });
     const { store } = createStore(searchTorrents);
-    const request = store.initialize(mediaContext());
+    store.initialize(mediaContext());
+    const request = store.search();
 
     store.dispose();
 

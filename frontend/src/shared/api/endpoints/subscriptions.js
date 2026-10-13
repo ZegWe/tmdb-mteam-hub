@@ -436,7 +436,9 @@ export function normalizeWantedSubscriptionDetailResponse(response, expectedId) 
   if (!isRecord(response)) throw detailResponseError("expected an object");
   const keys = Object.keys(response);
   if (
-    keys.length !== SUBSCRIPTION_DETAIL_FIELDS.length ||
+    keys.length !==
+      SUBSCRIPTION_DETAIL_FIELDS.length +
+        (Object.hasOwn(response, "replacement_pending") ? 1 : 0) ||
     SUBSCRIPTION_DETAIL_FIELDS.some((field) => !Object.hasOwn(response, field))
   ) {
     throw detailResponseError("unexpected top-level DTO shape");
@@ -456,9 +458,18 @@ export function normalizeWantedSubscriptionDetailResponse(response, expectedId) 
     throw detailResponseError("skip_reason must be null or a string");
   }
   if (response.tv !== null) assertDetailRecord(response.tv, "tv");
+  if (
+    response.replacement_pending !== undefined &&
+    typeof response.replacement_pending !== "boolean"
+  ) {
+    throw detailResponseError("replacement_pending must be a boolean");
+  }
 
   return {
     summary,
+    ...(response.replacement_pending !== undefined
+      ? { replacement_pending: response.replacement_pending }
+      : {}),
     source: /** @type {import("../contracts.js").SubscriptionSourceDto} */ (response.source),
     observation: /** @type {import("../contracts.js").SubscriptionObservationDto} */ (
       response.observation
@@ -519,5 +530,61 @@ export async function retrySubscription(id, { client = defaultApiClient, ...requ
     { ...requestOptions, method: "POST", body: {} },
   );
   throwIfAborted(signal);
+  return normalizeSubscriptionSummaryRecord(response);
+}
+
+/**
+ * @param {unknown} id
+ * @param {string} torrentId
+ * @param {number} expectedRevision
+ * @param {SubscriptionRequestOptions & {replaceExisting?: boolean}} [options]
+ */
+export async function confirmSubscriptionCandidate(
+  id,
+  torrentId,
+  expectedRevision,
+  { client = defaultApiClient, replaceExisting = false, ...requestOptions } = {},
+) {
+  const subjectId = requestedSubscriptionId(id);
+  const response = await client.request(
+    `/api/subscriptions/wanted/${encodeURIComponent(subjectId)}/candidates/confirm`,
+    {
+      ...requestOptions,
+      method: "POST",
+      body: {
+        torrent_id: torrentId,
+        expected_revision: expectedRevision,
+        ...(replaceExisting ? { replace_existing: true } : {}),
+      },
+    },
+  );
+  return normalizeSubscriptionSummaryRecord(response);
+}
+
+/**
+ * @param {unknown} id
+ * @param {string} keyword
+ * @param {number} expectedRevision
+ * @param {SubscriptionRequestOptions & {source?: "keyword" | "douban" | "imdb"}} [options]
+ */
+export async function searchSubscriptionCandidates(
+  id,
+  keyword,
+  expectedRevision,
+  { client = defaultApiClient, source = "keyword", ...requestOptions } = {},
+) {
+  const subjectId = requestedSubscriptionId(id);
+  const response = await client.request(
+    `/api/subscriptions/wanted/${encodeURIComponent(subjectId)}/candidates/search`,
+    {
+      ...requestOptions,
+      method: "POST",
+      body: {
+        keyword,
+        expected_revision: expectedRevision,
+        ...(source === "keyword" ? {} : { source }),
+      },
+    },
+  );
   return normalizeSubscriptionSummaryRecord(response);
 }

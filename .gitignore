@@ -1,4 +1,6 @@
 /target/
+/.tmp/
+/.workspaces/
 /cache/
 node_modules/
 static/

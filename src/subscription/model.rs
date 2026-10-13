@@ -37,6 +37,7 @@ pub enum SubscriptionExecutionState {
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionAttentionTag {
     WaitingRelease,
+    NeedsConfirmation,
     Failed,
     RetryBlocked,
     Skipped,

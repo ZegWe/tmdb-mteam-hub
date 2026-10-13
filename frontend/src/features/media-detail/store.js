@@ -61,6 +61,7 @@ export function createMediaDetailStore({
       activeSource: mteam.activeSource,
       rows: mteam.rows,
       loading: mteam.loading,
+      searched: mteam.searched,
       error: mteam.error,
       mediaType: mteam.mediaType,
       seasons: mteam.seasons,
@@ -106,7 +107,11 @@ export function createMediaDetailStore({
   }
 
   function selectTorrentSource(source) {
-    return mteamStore.select(source);
+    return mteamStore.choose(source);
+  }
+
+  function searchTorrents() {
+    return mteamStore.search();
   }
 
   function selectTorrentSeason(seasonNumber) {
@@ -154,6 +159,7 @@ export function createMediaDetailStore({
     load,
     loadSeason,
     selectTorrentSource,
+    searchTorrents,
     selectTorrentSeason,
     setInterest,
     updateRating,

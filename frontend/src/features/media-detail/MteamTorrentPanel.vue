@@ -37,6 +37,14 @@
             {{ source.label }}
           </button>
         </div>
+        <button
+          type="button"
+          class="btn btn-primary btn-sm mteam-search-trigger"
+          :disabled="mteam.loading || !mteam.activeSource"
+          @click="emit('search-torrents')"
+        >
+          {{ mteam.loading ? "搜索中…" : "搜索种子" }}
+        </button>
       </template>
       <span v-else class="subtle">缺少 IMDb / 豆瓣 ID，且无原标题，无法在 M-Team 检索</span>
     </div>
@@ -97,6 +105,9 @@
           </article>
         </div>
       </template>
+      <p v-else-if="mteam.activeSource && !mteam.searched" class="empty-hint">
+        选择检索方式后，点击“搜索种子”开始搜索。
+      </p>
       <p v-else-if="mteam.activeSource" class="empty-hint">
         未返回种子列表（请检查 M-Team 返回结构或账号权限）。
       </p>
@@ -111,5 +122,5 @@ defineProps({
   mteam: { type: Object, required: true },
 });
 
-const emit = defineEmits(["select-source", "select-season", "push-torrent"]);
+const emit = defineEmits(["select-source", "select-season", "search-torrents", "push-torrent"]);
 </script>

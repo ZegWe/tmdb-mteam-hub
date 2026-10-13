@@ -76,6 +76,8 @@ fn rich_detail() -> SubscriptionDetail {
     let download_id = payload::stable_download_artifact_key(ACCOUNT, SUBJECT, "torrent-1");
     let link_id = payload::stable_resolved_link_artifact_key(ACCOUNT, SUBJECT, &download_id);
     let detail_payload = payload::SubscriptionPayload {
+        replacement_pending: false,
+        replacement_prepared: false,
         source: source.clone(),
         observation: payload::ObservationPayload {
             created_at: 10,
@@ -105,6 +107,7 @@ fn rich_detail() -> SubscriptionDetail {
                 ..payload::CandidatePayload::default()
             },
             selected: true,
+            user_confirmed: false,
             matched_rule_name: Some("1080p".to_string()),
             matched_priority: Some(10),
             matched_keywords: vec!["1080p".to_string()],

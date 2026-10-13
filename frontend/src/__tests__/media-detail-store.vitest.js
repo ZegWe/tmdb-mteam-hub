@@ -24,7 +24,7 @@ function createTransport(overrides = {}) {
 }
 
 describe("media detail store", () => {
-  it("publishes primary detail while the initial M-Team request is still pending", async () => {
+  it("does not search until requested after primary detail is ready", async () => {
     const torrents = deferred();
     const transport = createTransport({
       loadDetail: vi.fn().mockResolvedValue({
@@ -41,6 +41,9 @@ describe("media detail store", () => {
     expect(store.primary.loading).toBe(false);
     expect(store.primary.data?.title).toBe("已加载详情");
     expect(store.mteam.activeSource).toBe("keyword");
+    expect(store.mteam.loading).toBe(false);
+    expect(transport.searchTorrents).not.toHaveBeenCalled();
+    void store.searchTorrents();
     expect(store.mteam.loading).toBe(true);
 
     torrents.resolve({ items: [], page: 1, page_size: 50 });
@@ -83,7 +86,7 @@ describe("media detail store", () => {
     expect(store.primary.data?.title).toBe("主详情先完成");
     expect(store.interest.loading).toBe(true);
     expect(store.interest.tagHistoryLoading).toBe(true);
-    expect(callOrder).toEqual(["tags", "interest", "mteam"]);
+    expect(callOrder).toEqual(["tags", "interest"]);
 
     tags.resolve({ tags: [] });
     interest.resolve({});
@@ -118,7 +121,7 @@ describe("media detail store", () => {
     expect(transport.loadInterest).toHaveBeenCalledWith("200", {
       signal: expect.any(AbortSignal),
     });
-    expect(transport.searchTorrents).toHaveBeenCalledOnce();
+    expect(transport.searchTorrents).not.toHaveBeenCalled();
 
     older.resolve({
       id: 1,
@@ -132,7 +135,7 @@ describe("media detail store", () => {
     expect(store.primary.numericId).toBe("2");
     expect(transport.loadTags).toHaveBeenCalledOnce();
     expect(transport.loadInterest).toHaveBeenCalledOnce();
-    expect(transport.searchTorrents).toHaveBeenCalledOnce();
+    expect(transport.searchTorrents).not.toHaveBeenCalled();
     store.dispose();
   });
 
@@ -184,8 +187,10 @@ describe("media detail store", () => {
     await store.load({ mediaType: "movie", id: 88 });
     await vi.waitFor(() => expect(store.mteam.loading).toBe(false));
 
-    const olderRequest = store.selectTorrentSource("douban");
-    const newerRequest = store.selectTorrentSource("keyword");
+    store.selectTorrentSource("douban");
+    const olderRequest = store.searchTorrents();
+    store.selectTorrentSource("keyword");
+    const newerRequest = store.searchTorrents();
     keyword.resolve({ items: [{ id: "new", name: "新种子" }], page: 1, page_size: 50 });
     await newerRequest;
 
@@ -217,6 +222,7 @@ describe("media detail store", () => {
 
     await store.load({ mediaType: "tv", id: 9 });
     await store.loadSeason(1);
+    await store.searchTorrents();
     await vi.waitFor(() => {
       expect(store.interest.error).toBe("豆瓣状态失败");
       expect(store.mteam.error).toBe("M-Team 失败");

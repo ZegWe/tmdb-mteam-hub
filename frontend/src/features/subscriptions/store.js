@@ -154,6 +154,7 @@ function nestedDetailEntity(detail, id) {
     observation: normalized.observation,
     issues: normalized.issues,
     skip_reason: normalized.skip_reason,
+    replacement_pending: normalized.replacement_pending === true,
     candidates: normalized.candidates,
     tv: normalized.tv,
     downloads: normalized.downloads,
