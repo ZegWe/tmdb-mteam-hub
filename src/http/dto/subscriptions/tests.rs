@@ -76,6 +76,8 @@ fn rich_detail() -> SubscriptionDetail {
     let download_id = payload::stable_download_artifact_key(ACCOUNT, SUBJECT, "torrent-1");
     let link_id = payload::stable_resolved_link_artifact_key(ACCOUNT, SUBJECT, &download_id);
     let detail_payload = payload::SubscriptionPayload {
+        replacement_pending: false,
+        replacement_prepared: false,
         source: source.clone(),
         observation: payload::ObservationPayload {
             created_at: 10,

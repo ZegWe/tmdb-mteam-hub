@@ -744,6 +744,10 @@ impl ExecutionScheduleDelay {
 /// Poll or detail changes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ExecutionPayloadDelta {
+    ReplacementCleaned,
+    ReplacementPrepared {
+        download_updates: Vec<DownloadArtifactPayload>,
+    },
     Meta,
     MovieMeta {
         source: Box<payload::WantedSourcePayload>,
@@ -768,7 +772,9 @@ impl ExecutionPayloadDelta {
     pub(crate) const fn operation(&self) -> ExecutionOperation {
         match self {
             Self::Meta | Self::MovieMeta { .. } | Self::TvMeta { .. } => ExecutionOperation::Meta,
-            Self::Search { .. } => ExecutionOperation::Search,
+            Self::Search { .. } | Self::ReplacementCleaned | Self::ReplacementPrepared { .. } => {
+                ExecutionOperation::Search
+            }
             Self::Progress { .. } => ExecutionOperation::Progress,
             Self::Link { .. } => ExecutionOperation::Link,
         }
@@ -776,11 +782,12 @@ impl ExecutionPayloadDelta {
 
     fn validate_shape(&self) -> RepositoryResult<()> {
         match self {
-            Self::Meta | Self::TvMeta { .. } => Ok(()),
+            Self::Meta | Self::TvMeta { .. } | Self::ReplacementCleaned => Ok(()),
             Self::MovieMeta { source } => source.validate(),
             Self::Search {
                 download_updates, ..
             }
+            | Self::ReplacementPrepared { download_updates }
             | Self::Progress { download_updates } => validate_unique_execution_updates(
                 "payload_delta.download_updates",
                 download_updates
@@ -816,6 +823,29 @@ impl ExecutionPayloadDelta {
         self.validate_shape()?;
         match self {
             Self::Meta => {}
+            Self::ReplacementPrepared { download_updates } => {
+                if !latest.replacement_pending {
+                    return Err(RepositoryError::invalid(
+                        "replacement",
+                        "no replacement pending",
+                    ));
+                }
+                merge_download_updates(&mut latest.artifacts.downloads, download_updates);
+                latest.replacement_prepared = true;
+            }
+            Self::ReplacementCleaned => {
+                if !latest.replacement_pending {
+                    return Err(RepositoryError::invalid(
+                        "replacement",
+                        "no replacement pending",
+                    ));
+                }
+                latest.artifacts = Default::default();
+                latest.issues.clear();
+                latest.skip_reason = None;
+                latest.replacement_pending = false;
+                latest.replacement_prepared = false;
+            }
             Self::MovieMeta { source } => {
                 let mut merged = latest.source.clone();
                 merge_source_observation(&mut merged, source.as_ref());

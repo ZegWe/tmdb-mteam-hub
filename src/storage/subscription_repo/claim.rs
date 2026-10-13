@@ -493,13 +493,19 @@ fn finish(
         &command.token().key().subject_id,
     )?;
     let projection = SubscriptionProjection::from_source(&payload.source)?;
+    let replacement_step = matches!(
+        command.payload_delta(),
+        crate::subscription::repository::ExecutionPayloadDelta::ReplacementPrepared { .. }
+            | crate::subscription::repository::ExecutionPayloadDelta::ReplacementCleaned
+    );
     let mut attention_tags = terminal_attention_tags(
         &stored.detail.summary().attention_tags,
-        command.disposition().waits_for_release(),
+        command.disposition().waits_for_release() && !replacement_step,
         false,
         false,
     );
     if command.disposition().waits_for_release()
+        && !replacement_step
         && payload.candidates.iter().any(|candidate| {
             !candidate.download_authorized() && !candidate.candidate.torrent_id.is_empty()
         })

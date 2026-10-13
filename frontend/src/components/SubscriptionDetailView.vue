@@ -76,12 +76,61 @@
       </article>
     </section>
     <section
-      v-if="candidates.length"
+      v-if="candidates.length || subscriptionCapability.schedulable"
       class="subscription-detail-section subscription-candidate-list"
     >
       <h4>候选种子</h4>
+      <form
+        class="flex flex-wrap items-center gap-2"
+        @submit.prevent="$emit('search-candidates', searchKeyword, searchSource)"
+      >
+        <select
+          v-model="searchSource"
+          class="select select-bordered select-sm"
+          aria-label="种子搜索方式"
+          :disabled="searching"
+        >
+          <option value="keyword">名称</option>
+          <option value="douban">豆瓣 ID</option>
+          <option value="imdb">IMDb ID</option>
+        </select>
+        <input
+          v-model="searchKeyword"
+          class="input input-bordered input-sm"
+          aria-label="种子搜索内容"
+          :placeholder="
+            searchSource === 'douban'
+              ? '例如 1292052'
+              : searchSource === 'imdb'
+                ? '例如 tt0111161'
+                : '输入名称、年份或季集数'
+          "
+          maxlength="256"
+        />
+        <button
+          type="submit"
+          class="btn btn-secondary btn-sm"
+          :disabled="
+            searching ||
+            confirming ||
+            retrying ||
+            !searchKeyword.trim() ||
+            selectedSubscription.replacement_pending ||
+            selectedSubscription.execution_state === 'running' ||
+            !subscriptionCapability.schedulable
+          "
+        >
+          {{ searching ? "搜索中…" : "查找其他种子" }}
+        </button>
+      </form>
+      <p v-if="selectedSubscription.replacement_pending" class="hint" role="status">
+        正在换种：清理旧下载和链接后从新种子开始。清理失败时可重跑继续。
+      </p>
+      <p v-if="hasPreviousArtifacts" class="hint" role="note">
+        可手动改选其他种子。换种会清理本订阅旧 qB 任务、下载文件和链接；剧集将从目标起始集重新下载。
+      </p>
       <p v-if="needsConfirmation" class="hint" role="note">
-        仅按名字找到的种子不会自动下载。请核对剧名、年份和季集数，再选中需要下载的种子。
+        手动搜索结果不会自动下载。请核对名称、年份和季集数，再选中需要下载的种子。
       </p>
       <article
         v-for="candidate in candidates"
@@ -101,8 +150,8 @@
           <span class="subscription-file-status">{{
             candidate.user_confirmed
               ? "已手动确认"
-              : candidate.source === "keyword"
-                ? "名字匹配 · 待确认"
+              : manualSourceLabels[candidate.source]
+                ? `${manualSourceLabels[candidate.source]} · 待确认`
                 : candidate.selected
                   ? "已选择"
                   : candidate.source || "候选"
@@ -111,10 +160,41 @@
             v-if="canConfirm(candidate)"
             type="button"
             class="btn btn-primary btn-sm"
-            :disabled="confirming || retrying || selectedSubscription.execution_state === 'running'"
-            @click="$emit('confirm-candidate', candidate.torrent_id)"
+            :disabled="
+              confirming ||
+              searching ||
+              retrying ||
+              selectedSubscription.execution_state === 'running'
+            "
+            @click="
+              $emit(
+                'confirm-candidate',
+                candidate.torrent_id,
+                hasPreviousArtifacts && !canContinueTv,
+              )
+            "
           >
-            {{ confirming ? "提交中…" : "选中并下载" }}
+            {{
+              confirming
+                ? "提交中…"
+                : hasPreviousArtifacts && !canContinueTv
+                  ? "清理旧任务并换种"
+                  : "选中并下载"
+            }}
+          </button>
+          <button
+            v-if="canConfirm(candidate) && hasPreviousArtifacts && canContinueTv"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            :disabled="
+              confirming ||
+              searching ||
+              retrying ||
+              selectedSubscription.execution_state === 'running'
+            "
+            @click="$emit('confirm-candidate', candidate.torrent_id, true)"
+          >
+            清理旧任务并换种
           </button>
         </div>
       </article>
@@ -125,7 +205,7 @@
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { formatUnixSeconds } from "../shared/lib/formatters.js";
 import DownloadTaskList from "../features/subscriptions/DownloadTaskList.vue";
 import LinkResult from "../features/subscriptions/LinkResult.vue";
@@ -140,9 +220,33 @@ const props = defineProps({
   selectedSubscription: { type: Object, required: true },
   retrying: { type: Boolean, default: false },
   confirming: { type: Boolean, default: false },
+  searching: { type: Boolean, default: false },
 });
 
-defineEmits(["retry", "confirm-candidate"]);
+defineEmits(["retry", "confirm-candidate", "search-candidates"]);
+const searchKeyword = ref("");
+const searchSource = ref("keyword");
+const manualSourceLabels = {
+  keyword: "名字匹配",
+  manual_douban: "豆瓣 ID",
+  manual_imdb: "IMDb ID",
+};
+watch(searchSource, (source) => {
+  searchKeyword.value =
+    source === "keyword"
+      ? props.selectedSubscription.title || ""
+      : source === "douban"
+        ? props.selectedSubscription.subject_id || ""
+        : "";
+});
+watch(
+  () => props.selectedSubscription.subject_id,
+  () => {
+    searchSource.value = "keyword";
+    searchKeyword.value = props.selectedSubscription.title || "";
+  },
+  { immediate: true },
+);
 
 const subscriptionCapability = computed(() => subscriptionCapabilities(props.selectedSubscription));
 const issues = computed(() =>
@@ -154,14 +258,27 @@ const candidates = computed(() =>
     : [],
 );
 const needsConfirmation = computed(() =>
-  candidates.value.some((candidate) => candidate.source === "keyword" && !candidate.user_confirmed),
+  candidates.value.some(
+    (candidate) => manualSourceLabels[candidate.source] && !candidate.user_confirmed,
+  ),
+);
+const hasPreviousArtifacts = computed(() =>
+  Boolean(props.selectedSubscription.downloads?.length || props.selectedSubscription.links?.length),
+);
+const canContinueTv = computed(
+  () =>
+    props.selectedSubscription.media_kind === "tv" &&
+    props.selectedSubscription.lifecycle_state === "searching",
 );
 
 function canConfirm(candidate) {
   return (
     candidate.torrent_id &&
     !candidate.user_confirmed &&
-    props.selectedSubscription.lifecycle_state === "searching" &&
+    ["searching", "downloading", "linking", "completed"].includes(
+      props.selectedSubscription.lifecycle_state,
+    ) &&
+    !props.selectedSubscription.replacement_pending &&
     subscriptionCapability.value.schedulable &&
     !(props.selectedSubscription.downloads || []).some(
       (download) =>

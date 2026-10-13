@@ -15,6 +15,8 @@ use crate::subscription::repository::SubscriptionDetail;
 /// persisted provider/config secrets by using a raw `From` conversion.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SubscriptionDetailDto {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    replacement_pending: bool,
     summary: SubscriptionSummaryDto,
     source: SubscriptionSourceDto,
     observation: SubscriptionObservationDto,
@@ -33,6 +35,7 @@ impl SubscriptionDetailDto {
     ) -> Self {
         let payload = detail.payload();
         Self {
+            replacement_pending: payload.replacement_pending,
             summary: detail.summary().into(),
             source: (&payload.source).into(),
             observation: (&payload.observation).into(),

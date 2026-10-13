@@ -342,6 +342,9 @@ pub(crate) struct ArtifactPayload {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct SubscriptionPayload {
+    /// Old artifacts remain durable until replacement cleanup has succeeded.
+    pub(crate) replacement_pending: bool,
+    pub(crate) replacement_prepared: bool,
     pub(crate) source: WantedSourcePayload,
     pub(crate) observation: ObservationPayload,
     #[serde(skip_serializing_if = "Vec::is_empty")]

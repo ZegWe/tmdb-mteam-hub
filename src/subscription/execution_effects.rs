@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod link;
 mod mteam;
+mod replacement;
 
 use self::link::{error as hardlink_error, plans as link_plans};
 use self::mteam::{
@@ -279,6 +280,9 @@ impl LatestSubscriptionExecutionEffects {
         claimed: &ClaimedSubscription,
         policy: &ExecutionEffectPolicy,
     ) -> ExecutionEffectResult {
+        if claimed.detail().payload().replacement_pending {
+            return self.execute_replacement(claimed, policy).await;
+        }
         let detail = claimed.detail();
         let key = &detail.summary().head.key;
         let payload = detail.payload();
@@ -1180,7 +1184,7 @@ fn select_tv_candidate(
         if candidate.selected {
             candidate.excluded_reason = None;
         } else if !candidate.download_authorized() {
-            candidate.excluded_reason = Some("仅按名字匹配，请手动选中种子后下载".to_string());
+            candidate.excluded_reason = Some("此候选需要手动选中后下载".to_string());
         } else if used.contains(candidate.candidate.torrent_id.as_str()) {
             candidate.excluded_reason =
                 Some("torrent was already pushed for this TV subscription".to_string());
@@ -1315,7 +1319,7 @@ fn authorized_selection(matches: &mut [CandidateMatchPayload]) -> Option<Candida
     for candidate in matches.iter_mut() {
         if !candidate.download_authorized() {
             candidate.selected = false;
-            candidate.excluded_reason = Some("仅按名字匹配，请手动选中种子后下载".to_string());
+            candidate.excluded_reason = Some("此候选需要手动选中后下载".to_string());
         }
     }
     matches
@@ -1813,15 +1817,19 @@ mod tests {
     }
 
     #[test]
-    fn keyword_candidates_require_explicit_confirmation_for_movies_and_tv() {
+    fn manual_candidates_require_explicit_confirmation_for_movies_and_tv() {
         let mut keyword = candidate_match("wrong", "Coming to Court Soon S01E01 2160p");
         keyword.candidate.source = "keyword".to_string();
         keyword.selected = true;
         keyword.matched_priority = Some(999);
         let mut matches = vec![keyword];
-        assert!(authorized_selection(&mut matches).is_none());
-        assert!(!matches[0].selected);
-        assert!(select_tv_candidate(&mut matches, 1, 1, &[], &[]).is_none());
+        for source in ["keyword", "manual_douban", "manual_imdb"] {
+            matches[0].candidate.source = source.to_string();
+            matches[0].selected = true;
+            assert!(authorized_selection(&mut matches).is_none());
+            assert!(!matches[0].selected);
+            assert!(select_tv_candidate(&mut matches, 1, 1, &[], &[]).is_none());
+        }
         matches[0].user_confirmed = true;
         matches[0].selected = true;
         assert!(authorized_selection(&mut matches).is_some());
