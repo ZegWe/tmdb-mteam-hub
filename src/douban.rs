@@ -1662,6 +1662,13 @@ fn image_fetch_candidates(raw: &str) -> Vec<String> {
     let Some(cleaned) = clean_douban_image_url(raw) else {
         return Vec::new();
     };
+    // CDN signatures bind the original URL; resizing can invalidate them.
+    if Url::parse(&cleaned).is_ok_and(|url| {
+        url.query_pairs()
+            .any(|(key, _)| matches!(key.as_ref(), "sa_cv" | "sa_ct"))
+    }) {
+        return vec![cleaned];
+    }
     let mut out = Vec::new();
     if has_ratio_poster_size(&cleaned) {
         for size in ["l_ratio_poster", "m_ratio_poster", "s_ratio_poster"] {
@@ -1760,10 +1767,20 @@ fn clean_douban_image_url(raw: &str) -> Option<String> {
 }
 
 fn is_allowed_douban_image_query(query: &str) -> bool {
-    query.starts_with("imageView2/")
-        && query
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.'))
+    query.split('&').all(|part| {
+        if part.starts_with("imageView2/") {
+            return part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.'));
+        }
+        // Rexxar covers use signed Douban CDN URLs. Keep their signature
+        // parameters intact instead of turning them into unusable bare URLs.
+        part.split_once('=').is_some_and(|(key, value)| {
+            matches!(key, "sa_cv" | "sa_ct")
+                && !value.is_empty()
+                && value.chars().all(|ch| ch.is_ascii_hexdigit())
+        })
+    })
 }
 
 fn is_allowed_douban_image_url(url: &Url) -> bool {
@@ -1951,6 +1968,48 @@ mod tests {
 
         assert!(url.contains("qnmob3.doubanio.com"));
         assert!(url.contains("imageView2%2F0%2Fq%2F80%2Fw%2F9999%2Fh%2F120%2Fformat%2Fjpg"));
+    }
+
+    #[test]
+    fn search_poster_preserves_signed_url_through_proxy_and_fetch() {
+        let original = "https://qnmob3-sign.doubanio.com/view/photo/large/public/p2545472803.jpg?sa_cv=e7adeef0f1f261e825a4bc96f7db335d&sa_ct=6ace35a4&imageView2/0/q/80/w/9999/h/120/format/jpg";
+        let data = json!({
+            "subjects": { "items": [{
+                "layout": "subject",
+                "target": { "id": "26266893", "title": "流浪地球", "cover_url": original }
+            }] }
+        });
+        let items = search_results_from_rexxar_json(&data, 1).expect("search results");
+        let proxy =
+            Url::parse(&format!("http://localhost{}", items[0].poster_url)).expect("proxy URL");
+        let (_, image_url) = proxy.query_pairs().find(|(key, _)| key == "url").unwrap();
+
+        assert_eq!(image_url, original);
+        assert_eq!(image_fetch_candidates(&image_url), vec![original]);
+    }
+
+    #[test]
+    fn signed_image_candidates_do_not_change_the_signed_path() {
+        let original = "https://img1-sign.doubanio.com/view/photo/s_ratio_poster/public/p1.webp?sa_cv=abcdef0123456789&sa_ct=6ace35a4";
+        assert_eq!(image_fetch_candidates(original), vec![original]);
+    }
+
+    #[test]
+    fn image_query_allowlist_accepts_only_supported_transforms_and_signatures() {
+        assert!(is_allowed_douban_image_query("imageView2/0/q/80"));
+        assert!(is_allowed_douban_image_query("sa_ct=6ace35a4&sa_cv=abcdef"));
+        for query in [
+            "sa_cv=",
+            "sa_ct=not-hex",
+            "sa_cv=abcdef&redirect=https://example.test",
+            "imageView2/0/q/80&unknown=value",
+        ] {
+            assert!(!is_allowed_douban_image_query(query), "{query}");
+        }
+        assert!(clean_douban_image_url(
+            "https://example.test/view/photo/large/public/p1.jpg?sa_cv=abcdef"
+        )
+        .is_none());
     }
 
     #[test]
