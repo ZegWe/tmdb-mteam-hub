@@ -123,81 +123,104 @@
           {{ searching ? "搜索中…" : "查找其他种子" }}
         </button>
       </form>
+      <p v-if="!searched" class="hint">
+        尚未发起新的搜索。点击“查找其他种子”开始，或展开下方已保存的候选。
+      </p>
+      <p v-else-if="!candidates.length" class="empty-hint">
+        未找到候选种子，请调整名称或 ID 后重新搜索。
+      </p>
       <p v-if="selectedSubscription.replacement_pending" class="hint" role="status">
         正在换种：清理旧下载和链接后从新种子开始。清理失败时可重跑继续。
       </p>
-      <p v-if="hasPreviousArtifacts" class="hint" role="note">
-        可手动改选其他种子。换种会清理本订阅旧 qB 任务、下载文件和链接；剧集将从目标起始集重新下载。
-      </p>
-      <p v-if="needsConfirmation" class="hint" role="note">
-        手动搜索结果不会自动下载。请核对名称、年份和季集数，再选中需要下载的种子。
-      </p>
-      <article
-        v-for="candidate in candidates"
-        :key="candidate.torrent_id"
-        class="subscription-file-row"
-      >
-        <div class="subscription-file-main">
-          <span class="subscription-file-name">{{ candidate.title || candidate.torrent_id }}</span>
-          <span v-if="candidate.subtitle" class="subscription-file-note">{{
-            candidate.subtitle
-          }}</span>
-          <span v-if="candidate.excluded_reason" class="subscription-file-note">{{
-            candidate.excluded_reason
-          }}</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <span class="subscription-file-status">{{
-            candidate.user_confirmed
-              ? "已手动确认"
-              : manualSourceLabels[candidate.source]
-                ? `${manualSourceLabels[candidate.source]} · 待确认`
-                : candidate.selected
-                  ? "已选择"
-                  : candidate.source || "候选"
-          }}</span>
-          <button
-            v-if="canConfirm(candidate)"
-            type="button"
-            class="btn btn-primary btn-sm"
-            :disabled="
-              confirming ||
-              searching ||
-              retrying ||
-              selectedSubscription.execution_state === 'running'
-            "
-            @click="
-              $emit(
-                'confirm-candidate',
-                candidate.torrent_id,
-                hasPreviousArtifacts && !canContinueTv,
-              )
-            "
-          >
-            {{
-              confirming
-                ? "提交中…"
-                : hasPreviousArtifacts && !canContinueTv
-                  ? "清理旧任务并换种"
-                  : "选中并下载"
-            }}
-          </button>
-          <button
-            v-if="canConfirm(candidate) && hasPreviousArtifacts && canContinueTv"
-            type="button"
-            class="btn btn-secondary btn-sm"
-            :disabled="
-              confirming ||
-              searching ||
-              retrying ||
-              selectedSubscription.execution_state === 'running'
-            "
-            @click="$emit('confirm-candidate', candidate.torrent_id, true)"
-          >
-            清理旧任务并换种
-          </button>
-        </div>
-      </article>
+      <details v-if="candidates.length" :open="searched" class="subscription-saved-candidates">
+        <summary>
+          {{ searched ? "候选种子" : "已保存的候选（非本次搜索）" }} · {{ candidates.length }}
+        </summary>
+        <p v-if="hasPreviousArtifacts" class="hint" role="note">
+          可手动改选其他种子。换种会清理本订阅旧 qB
+          任务、下载文件和链接；剧集将从目标起始集重新下载。
+        </p>
+        <p v-if="needsConfirmation" class="hint" role="note">
+          手动搜索结果不会自动下载。请核对名称、年份和季集数，再选中需要下载的种子。
+        </p>
+        <article
+          v-for="candidate in candidates"
+          :key="candidate.torrent_id"
+          class="subscription-file-row"
+        >
+          <div class="subscription-file-main">
+            <a
+              v-if="candidate.torrent_id"
+              class="subscription-file-name link link-hover"
+              :href="mteamTorrentWebUrl(candidate.torrent_id)"
+              target="_blank"
+              rel="noopener noreferrer"
+              >{{ candidate.title || candidate.torrent_id }} ↗</a
+            >
+            <span v-else class="subscription-file-name">{{ candidate.title || "未命名种子" }}</span>
+            <span class="subscription-file-note subscription-candidate-stats">{{
+              torrentStats(candidate)
+            }}</span>
+            <span v-if="candidate.subtitle" class="subscription-file-note">{{
+              candidate.subtitle
+            }}</span>
+            <span v-if="candidate.excluded_reason" class="subscription-file-note">{{
+              candidate.excluded_reason
+            }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="subscription-file-status">{{
+              candidate.user_confirmed
+                ? "已手动确认"
+                : manualSourceLabels[candidate.source]
+                  ? `${manualSourceLabels[candidate.source]} · 待确认`
+                  : candidate.selected
+                    ? "已选择"
+                    : candidate.source || "候选"
+            }}</span>
+            <button
+              v-if="canConfirm(candidate)"
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="
+                confirming ||
+                searching ||
+                retrying ||
+                selectedSubscription.execution_state === 'running'
+              "
+              @click="
+                $emit(
+                  'confirm-candidate',
+                  candidate.torrent_id,
+                  hasPreviousArtifacts && !canContinueTv,
+                )
+              "
+            >
+              {{
+                confirming
+                  ? "提交中…"
+                  : hasPreviousArtifacts && !canContinueTv
+                    ? "清理旧任务并换种"
+                    : "选中并下载"
+              }}
+            </button>
+            <button
+              v-if="canConfirm(candidate) && hasPreviousArtifacts && canContinueTv"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="
+                confirming ||
+                searching ||
+                retrying ||
+                selectedSubscription.execution_state === 'running'
+              "
+              @click="$emit('confirm-candidate', candidate.torrent_id, true)"
+            >
+              清理旧任务并换种
+            </button>
+          </div>
+        </article>
+      </details>
     </section>
     <DownloadTaskList :record="selectedSubscription" />
     <LinkResult :record="selectedSubscription" />
@@ -207,6 +230,7 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import { formatUnixSeconds } from "../shared/lib/formatters.js";
+import { mteamTorrentWebUrl, torrentStats } from "../shared/media/torrents.js";
 import DownloadTaskList from "../features/subscriptions/DownloadTaskList.vue";
 import LinkResult from "../features/subscriptions/LinkResult.vue";
 import LifecycleGraph from "../features/subscriptions/LifecycleGraph.vue";
@@ -221,6 +245,7 @@ const props = defineProps({
   retrying: { type: Boolean, default: false },
   confirming: { type: Boolean, default: false },
   searching: { type: Boolean, default: false },
+  searched: { type: Boolean, default: false },
 });
 
 defineEmits(["retry", "confirm-candidate", "search-candidates"]);

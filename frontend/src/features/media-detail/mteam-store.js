@@ -47,6 +47,7 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
     activeSource: "",
     rows: [],
     loading: false,
+    searched: false,
     error: "",
     mediaType: "",
     data: null,
@@ -64,6 +65,7 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
     state.activeSource = "";
     state.rows = [];
     state.loading = false;
+    state.searched = false;
     state.error = "";
     state.mediaType = "";
     state.data = null;
@@ -84,7 +86,6 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
     reset();
     if (disposed || !data) return null;
 
-    const revision = contextRevision;
     state.mediaType = mediaType;
     state.data = data;
     state.doubanId = doubanId;
@@ -100,10 +101,26 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
       seasonNumber: state.seasonNumber,
     });
     if (!state.sources.length) return null;
-    return select(state.sources[0].source, revision);
+    choose(state.sources[0].source);
+    return null;
   }
 
-  async function select(source, revision = contextRevision) {
+  function choose(source) {
+    if (disposed || !state.sources.some((item) => item.source === source)) return null;
+    requests.cancel();
+    state.activeSource = source;
+    state.rows = [];
+    state.error = "";
+    state.loading = false;
+    state.searched = false;
+    return null;
+  }
+
+  function search() {
+    return select(state.activeSource, contextRevision, true);
+  }
+
+  async function select(source, revision = contextRevision, force = false) {
     if (disposed || revision !== contextRevision) return null;
 
     const selectedSource = String(source || "");
@@ -111,7 +128,8 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
     state.loading = false;
     state.activeSource = selectedSource;
     state.error = "";
-    if (Object.hasOwn(cache, selectedSource)) {
+    state.searched = true;
+    if (!force && Object.hasOwn(cache, selectedSource)) {
       state.rows = cache[selectedSource];
       return state.rows;
     }
@@ -121,6 +139,7 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
 
     let requestId = 0;
     state.loading = true;
+    state.rows = [];
     try {
       const response = await requests.run(({ signal, requestId: currentRequestId }) => {
         requestId = currentRequestId;
@@ -163,7 +182,7 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
     state.rows = [];
     state.error = "";
     state.activeSource = "";
-    return state.sources.length ? select(state.sources[0].source, contextRevision) : null;
+    return state.sources.length ? choose(state.sources[0].source) : null;
   }
 
   function dispose() {
@@ -171,7 +190,7 @@ export function createMteamTorrentStore({ transport, requests = createLatestRequ
     reset();
   }
 
-  return Object.freeze({ state, initialize, select, selectSeason, reset, dispose });
+  return Object.freeze({ state, initialize, choose, search, select, selectSeason, reset, dispose });
 }
 
 function normalizedSeasons(seasons) {

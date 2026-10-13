@@ -23,6 +23,7 @@
         :retrying="retryLoading"
         :confirming="confirmLoading"
         :searching="candidateSearchLoading"
+        :searched="candidateSearchSubjectId === selectedDetail.subject_id"
         @retry="retrySubscription"
         @confirm-candidate="confirmCandidate"
         @search-candidates="searchCandidates"
@@ -75,6 +76,7 @@ const detailLoading = computed(
 const retryLoading = ref(false);
 const confirmLoading = ref(false);
 const candidateSearchLoading = ref(false);
+const candidateSearchSubjectId = ref("");
 
 onMounted(() => {
   mounted = true;
@@ -170,6 +172,7 @@ async function syncSubscriptionDetail() {
   }
 
   const id = parsed.id;
+  if (activeDetailId !== id) candidateSearchSubjectId.value = "";
   if (activeDetailId && activeDetailId !== id) {
     subscriptionStore.cancelDetailLoad(activeDetailId);
   }
@@ -261,6 +264,7 @@ async function searchCandidates(keyword, source = "keyword") {
   try {
     await searchSubscriptionCandidates(detail.subject_id, keyword, detail.revision, { source });
     await subscriptionStore.loadDetail(detail.subject_id, { force: true });
+    if (activeDetailId === detail.subject_id) candidateSearchSubjectId.value = detail.subject_id;
     notifications.showToast("搜索完成，请核对候选后选择；当前下载保持不变", "ok");
   } catch (error) {
     notifications.showError(`搜索失败：${error instanceof Error ? error.message : String(error)}`);

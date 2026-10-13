@@ -335,6 +335,16 @@
   gap: 0.2rem;
 }
 
+.subscription-saved-candidates > summary {
+  cursor: pointer;
+  padding: 0.5rem 0;
+  font-weight: 600;
+}
+
+.subscription-saved-candidates > .subscription-file-row + .subscription-file-row {
+  margin-top: 0.5rem;
+}
+
 .subscription-file-note {
   color: var(--muted);
   font-size: 0.72rem;

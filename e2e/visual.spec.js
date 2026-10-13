@@ -22,6 +22,7 @@ const routes = [
     heading: "浏览器验收电影详情",
     headingSelector: "#page-detail > .top h1",
     prepare: async (page) => {
+      await page.getByRole("button", { name: "搜索种子", exact: true }).click();
       await expect(page.getByText("Browser.Acceptance.Movie.2160p")).toBeVisible();
     },
   },
@@ -97,7 +98,7 @@ for (const theme of themes) {
       );
 
       const screenshotPath = resolve(
-        "test-results",
+        process.env.E2E_VISUAL_OUTPUT || "test-results",
         "visual-evidence",
         testInfo.project.name,
         theme,

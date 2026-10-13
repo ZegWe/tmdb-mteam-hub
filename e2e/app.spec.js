@@ -31,6 +31,8 @@ test("search detail renders before optional provider and Back preserves results"
   await expect(page).toHaveURL(/#\/detail\/movie\/42/);
   await expect(page.getByRole("heading", { level: 1, name: "浏览器验收电影详情" })).toBeVisible();
   await expect(page.getByText("主详情不等待可选 M-Team 请求即可渲染。")).toBeVisible();
+  expect((await fixtureState(page)).mteamRequests).toBe(0);
+  await page.getByRole("button", { name: "搜索种子", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "正在加载 M-Team" })).toBeVisible();
   await expect(page.getByText("Browser.Acceptance.Movie.2160p")).toBeVisible();
 
@@ -50,6 +52,17 @@ test("subscription detail observes one polling stream and exposes no legacy side
 
   await expect(page).toHaveURL(/#\/subscriptions\/fixture-subscription/);
   await expect(page.locator("[aria-label='下载进度 25%']")).toBeVisible();
+  const candidates = page.locator(".subscription-saved-candidates");
+  await expect(candidates).not.toHaveAttribute("open", "");
+  await candidates.locator("summary").click();
+  await expect(candidates.locator("a")).toHaveAttribute(
+    "href",
+    "https://kp.m-team.cc/detail/fixture-torrent",
+  );
+  await expect(
+    candidates.getByText("大小 1.00 GB · 做种 8 · 下载中 2 · 发布 2026-10-13 10:00:00"),
+  ).toBeVisible();
+  expect((await fixtureState(page)).mteamRequests).toBe(0);
   await expect(page.getByRole("button", { name: /重试|重新执行|立即执行/ })).toHaveCount(0);
 
   await expect(page.getByRole("heading", { level: 1, name: "浏览器订阅（已更新）" })).toBeVisible({
@@ -94,4 +107,5 @@ test("direct media-detail deep link survives a full reload", async ({ page }) =>
   await expect(page).toHaveURL(/#\/detail\/movie\/42$/);
   await expect(page.getByRole("heading", { level: 1, name: "浏览器验收电影详情" })).toBeVisible();
   await expect(page.getByText("主详情不等待可选 M-Team 请求即可渲染。")).toBeVisible();
+  expect((await fixtureState(page)).mteamRequests).toBe(0);
 });
