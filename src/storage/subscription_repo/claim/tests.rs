@@ -45,6 +45,121 @@ const NOW: u64 = 1_800_000_000;
 const RACE_AT: u64 = NOW + 10;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[tokio::test]
+async fn metadata_only_claim_retries_skipped_nodes_and_never_claims_download_work() {
+    let fixture = fresh_fixture("metadata-only").await;
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection.execute(
+        r#"UPDATE wanted_subscription_records
+              SET next_attempt_at = NULL, attention_tags_json = '["skipped"]',
+                  record_json = json_set(record_json, '$.skip_reason', 'initial_bootstrap_existing_wish')
+            WHERE account_key = ?1 AND subject_id = ?2"#,
+        params![ACCOUNT, BASE_SUBJECT],
+    ).unwrap();
+    drop(connection);
+    let clock = Arc::new(FixedClock::new(NOW));
+    let repository = repository(
+        &fixture.path,
+        clock.clone(),
+        Arc::new(SequenceAttemptIds::new(["metadata-fail", "metadata-retry"])),
+    );
+    let command = || {
+        ClaimDueCommand::try_new(ACCOUNT, 60, 1)
+            .unwrap()
+            .metadata_only()
+    };
+    let first = repository
+        .claim_due(command())
+        .await
+        .unwrap()
+        .into_claim()
+        .unwrap();
+    let failed = repository
+        .fail(
+            FailExecutionCommand::try_new(
+                first.attempt().token().clone(),
+                "movie_metadata",
+                "detail unavailable",
+                30,
+                ExecutionPayloadDelta::Meta,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.detail().summary().head.lifecycle_state,
+        SubscriptionLifecycleState::Meta
+    );
+    assert_eq!(failed.detail().summary().head.retry_count, 1);
+    assert_eq!(
+        failed.detail().summary().head.next_attempt_at,
+        Some(NOW + 30)
+    );
+    assert!(failed
+        .detail()
+        .payload()
+        .issues
+        .iter()
+        .any(|issue| issue.error_type.as_deref() == Some("movie_metadata")));
+    assert!(repository
+        .claim_due(command())
+        .await
+        .unwrap()
+        .into_claim()
+        .is_none());
+    clock.set(NOW + 30);
+    let retried = repository
+        .claim_due(command())
+        .await
+        .unwrap()
+        .into_claim()
+        .unwrap();
+    let mut source = retried.detail().payload().source.clone();
+    source.title = "独立片名".into();
+    source.detail_title = Some("独立片名".into());
+    source.original_title = Some("Original title".into());
+    let finished = repository
+        .finish(
+            FinishExecutionCommand::try_new(
+                retried.attempt().token().clone(),
+                FinishExecutionDisposition::MetaReady,
+                ExecutionPayloadDelta::MovieMeta {
+                    source: Box::new(source),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        finished.detail().summary().projection.title,
+        "Original title"
+    );
+    assert_eq!(finished.detail().summary().head.retry_count, 0);
+    assert!(finished
+        .detail()
+        .summary()
+        .attention_tags
+        .contains(&SubscriptionAttentionTag::Skipped));
+    assert_eq!(
+        finished.detail().payload().skip_reason.as_deref(),
+        Some("initial_bootstrap_existing_wish")
+    );
+    assert!(repository
+        .claim_due(command())
+        .await
+        .unwrap()
+        .into_claim()
+        .is_none());
+    assert!(repository
+        .claim_due(ClaimDueCommand::try_new(ACCOUNT, 60, 1).unwrap())
+        .await
+        .unwrap()
+        .into_claim()
+        .is_none());
+}
+
 const CLONE_SUBJECT_SQL: &str = r#"
 INSERT INTO wanted_subscription_records (
     account_key, subject_id, revision, active, inactive_at, last_seen_snapshot_id,

@@ -630,10 +630,11 @@ fn force_retry(
         });
     }
 
-    // Movie reruns restart search, but an interrupted replacement must retain
-    // its confirmed candidate and cleanup journal until cleanup completes.
-    let restart_movie =
-        head.media_kind == SubscriptionMediaKind::Movie && !current.payload().replacement_pending;
+    // Retry unfinished metadata in place. Later movie reruns restart search,
+    // except an interrupted replacement must retain its cleanup journal.
+    let restart_movie = head.media_kind == SubscriptionMediaKind::Movie
+        && head.lifecycle_state != SubscriptionLifecycleState::Meta
+        && !current.payload().replacement_pending;
     let lifecycle_state = if restart_movie {
         SubscriptionLifecycleState::Searching
     } else {
@@ -1962,17 +1963,80 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
     }
 
     #[tokio::test]
-    async fn force_retry_restarts_search_from_every_idle_movie_lifecycle() {
+    async fn force_retry_keeps_failed_metadata_in_place_even_after_retry_exhaustion() {
+        use crate::subscription::ports::SubscriptionExecutionRepository;
+        use crate::subscription::repository::{
+            ClaimOneCommand, ClaimOneResult, ExecutionOperation,
+        };
+
+        for media_kind in ["movie", "tv"] {
+            for retry_count in [1, 3] {
+                let fixture =
+                    fresh_fixture(&format!("retry-meta-{media_kind}-{retry_count}")).await;
+                let repository = make_repository(&fixture.path);
+                let before = seed_retry_artifacts(
+                    &repository,
+                    "rows-movie-001",
+                    &fixture.root.join("source.mkv"),
+                    &fixture.root.join("target.mkv"),
+                )
+                .await;
+                let connection = Connection::open(&fixture.path).unwrap();
+                connection
+                    .execute(
+                        "UPDATE wanted_subscription_records
+                        SET media_kind = ?2, lifecycle_state = 'meta', retry_count = ?3,
+                            max_retries = 3, retry_blocked = CASE WHEN ?3 = 3 THEN 1 ELSE 0 END,
+                            next_attempt_at = NULL,
+                            attention_tags_json = CASE WHEN ?3 = 3
+                                THEN '[\"failed\",\"retry_blocked\"]' ELSE '[\"failed\"]' END
+                      WHERE account_key = ?1 AND subject_id = 'rows-movie-001'",
+                        params![ACCOUNT, media_kind, retry_count],
+                    )
+                    .unwrap();
+                drop(connection);
+
+                let head = repository
+                    .force_retry(key("rows-movie-001"), SEED_AT + 2)
+                    .await
+                    .unwrap();
+                assert_eq!(head.lifecycle_state, SubscriptionLifecycleState::Meta);
+                assert_eq!(head.retry_count, 0);
+                assert!(!head.retry_blocked);
+                assert!(head.force_eligible_once);
+                assert_eq!(head.next_attempt_at, Some(SEED_AT + 2));
+                let after = repository.load_detail(key("rows-movie-001")).await.unwrap();
+                assert_eq!(after.payload().source, before.payload().source);
+                assert_eq!(after.payload().candidates, before.payload().candidates);
+                assert_eq!(after.payload().artifacts, before.payload().artifacts);
+                assert_eq!(after.payload().issues, before.payload().issues);
+                let claim = repository
+                    .claim_one(ClaimOneCommand::try_new(key("rows-movie-001"), 120).unwrap())
+                    .await
+                    .unwrap();
+                let ClaimOneResult::Claimed(claimed) = claim else {
+                    panic!("metadata retry must be claimable");
+                };
+                assert_eq!(
+                    claimed.attempt().token().operation(),
+                    ExecutionOperation::Meta
+                );
+                let connection = Connection::open(&fixture.path).unwrap();
+                let action: String = connection.query_row(
+                    "SELECT action FROM operation_logs WHERE action IN ('retry_subscription', 'rerun_subscription')",
+                    [],
+                    |row| row.get(0),
+                ).unwrap();
+                assert_eq!(action, "retry_subscription");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn force_retry_restarts_search_from_idle_movie_stages_other_than_metadata() {
         use crate::subscription::repository::payload::DownloadArtifactStatePayload;
 
-        for lifecycle in [
-            "queued",
-            "meta",
-            "searching",
-            "downloading",
-            "linking",
-            "completed",
-        ] {
+        for lifecycle in ["queued", "searching", "downloading", "linking", "completed"] {
             let fixture = fresh_fixture(&format!("force-retry-movie-{lifecycle}")).await;
             let repository = make_repository(&fixture.path);
             let before = seed_retry_artifacts(

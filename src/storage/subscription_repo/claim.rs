@@ -88,10 +88,25 @@ SELECT claimed_operation, attempt_id, lease_until
  WHERE account_key = ?1 AND subject_id = ?2
 "#;
 
+// Read-only metadata work may run for skipped subscriptions, but this selector
+// must never pick search/progress/link work on their behalf.
+const METADATA_CANDIDATE_SQL: &str = r#"
+SELECT subject_id FROM wanted_subscription_records
+ WHERE account_key = ?1 AND active = 1 AND schedulable = 1
+   AND blocked_reason IS NULL AND lifecycle_state IN ('queued', 'meta')
+   AND ((execution_state = 'idle' AND retry_blocked = 0
+         AND (next_attempt_at IS NULL OR next_attempt_at <= ?2))
+        OR (execution_state = 'running' AND claimed_operation = 'movie_meta'
+            AND lease_until <= ?2))
+ ORDER BY COALESCE(next_attempt_at, 0), updated_at, subject_id
+ LIMIT 1
+"#;
+
 const CLAIM_IDLE_SQL: &str = r#"
 UPDATE wanted_subscription_records
    SET revision = revision + 1,
        lifecycle_state = CASE WHEN ?4 = 'movie_meta' THEN 'meta' ELSE lifecycle_state END,
+       next_attempt_at = CASE WHEN ?4 = 'movie_meta' THEN COALESCE(next_attempt_at, ?7) ELSE next_attempt_at END,
        execution_state = 'running',
        claimed_operation = ?4,
        attempt_id = ?5,
@@ -326,7 +341,33 @@ fn claim_due(
     let transaction = begin_immediate(connection, "begin bounded due claim")?;
     let now = dependencies.now_unix_seconds()?;
     let now_sql = repository_integer("repository clock", now)?;
-    let selected = select_due_candidate(&transaction, command.account_key(), now, now_sql)?;
+    let selected = if command.is_metadata_only() {
+        let subject_id: Option<String> = transaction
+            .query_row(
+                METADATA_CANDIDATE_SQL,
+                params![command.account_key(), now_sql],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_read_error("select metadata node", error))?;
+        subject_id
+            .map(|subject_id| -> RepositoryResult<_> {
+                let key = SubscriptionKey::try_new(command.account_key(), subject_id)?;
+                let stored = load_stored_subscription(&transaction, key)?;
+                let eligibility = match &stored.controls {
+                    ExecutionControls::Running(previous) => {
+                        ClaimEligibility::Expired(previous.clone())
+                    }
+                    ExecutionControls::Idle => ClaimEligibility::Normal {
+                        operation: ExecutionOperation::Meta,
+                    },
+                };
+                Ok((stored, eligibility))
+            })
+            .transpose()?
+    } else {
+        select_due_candidate(&transaction, command.account_key(), now, now_sql)?
+    };
     let Some((stored, eligibility)) = selected else {
         transaction
             .commit()
@@ -1075,7 +1116,11 @@ fn persist_claim(
             key.account_key, key.subject_id
         )));
     }
-    let expected_next_attempt_at = head.next_attempt_at;
+    let expected_next_attempt_at = if eligibility.operation() == ExecutionOperation::Meta {
+        head.next_attempt_at.or(Some(now))
+    } else {
+        head.next_attempt_at
+    };
     let expected_force = head.force_eligible_once;
     let expected_updated_at = head.updated_at.max(now);
     let operation = eligibility.operation();

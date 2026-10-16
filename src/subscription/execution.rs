@@ -149,6 +149,29 @@ impl SubscriptionExecutionService {
         if policy.dry_run {
             return Ok(ExecutionBatchOutcome::dry_run());
         }
+        self.run_batch(policy, batch_size, max_concurrency, false)
+            .await
+    }
+
+    /// Runs only the existing metadata node, even when automatic downloads are
+    /// disabled. Claim selection enforces this boundary in the repository.
+    pub(crate) async fn run_metadata_batch(
+        &self,
+        policy: &ExecutionPolicy,
+        batch_size: usize,
+        max_concurrency: usize,
+    ) -> Result<ExecutionBatchOutcome, SubscriptionExecutionError> {
+        self.run_batch(policy, batch_size, max_concurrency, true)
+            .await
+    }
+
+    async fn run_batch(
+        &self,
+        policy: &ExecutionPolicy,
+        batch_size: usize,
+        max_concurrency: usize,
+        metadata_only: bool,
+    ) -> Result<ExecutionBatchOutcome, SubscriptionExecutionError> {
         if batch_size == 0 {
             return Err(SubscriptionExecutionError::invalid(
                 "execution batch size must be greater than zero",
@@ -174,6 +197,11 @@ impl SubscriptionExecutionService {
             while !no_more_due && tasks.len() < max_concurrency && outcome.claimed < batch_size {
                 let command = ClaimDueCommand::try_new(account_key.clone(), self.lease_ttl_secs, 1)
                     .map_err(SubscriptionExecutionError::repository)?;
+                let command = if metadata_only {
+                    command.metadata_only()
+                } else {
+                    command
+                };
                 let claim = self
                     .repository
                     .claim_due(command)

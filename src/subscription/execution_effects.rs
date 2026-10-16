@@ -996,37 +996,20 @@ fn movie_source_from_detail(
     current: &WantedSourcePayload,
     detail: crate::douban::DoubanSubjectDetail,
 ) -> WantedSourcePayload {
-    let mut source = current.clone();
-    if !detail.title.trim().is_empty() {
-        source.title = detail.title.trim().to_string();
+    source_from_detail(current, &detail, SubscriptionMediaKind::Movie)
+}
+
+pub(super) fn source_from_detail(
+    current: &WantedSourcePayload,
+    detail: &DoubanSubjectDetail,
+    media_kind: SubscriptionMediaKind,
+) -> WantedSourcePayload {
+    let mut source = tv_source_from_detail(current, detail);
+    // A movie's list year can be its original release rather than a regional
+    // premiere reported by subject detail.
+    if media_kind == SubscriptionMediaKind::Movie {
+        source.release_year = current.release_year.or(source.release_year);
     }
-    if !detail.poster_url.trim().is_empty() {
-        source.poster_url = detail.poster_url.trim().to_string();
-    }
-    if !detail.image.trim().is_empty() {
-        source.cover_url = detail.image.trim().to_string();
-    }
-    source.original_title = non_empty(&detail.original_title).or(source.original_title);
-    for (target, observed) in [
-        (&mut source.aka, detail.aka),
-        (&mut source.languages, detail.languages),
-        (&mut source.countries, detail.countries),
-        (&mut source.genres, detail.genres),
-        (&mut source.directors, detail.directors),
-        (&mut source.actors, detail.actors),
-    ] {
-        if !observed.is_empty() {
-            *target = observed;
-        }
-    }
-    source.date_published = non_empty(&detail.date_published).or(source.date_published);
-    source.duration = non_empty(&detail.duration).or(source.duration);
-    source.summary = non_empty(&detail.summary).or(source.summary);
-    source.rating_value = detail.rating.value.or(source.rating_value);
-    source.rating_count = detail.rating.count.or(source.rating_count);
-    source.release_year = source
-        .release_year
-        .or_else(|| release_year_from_metadata(source.date_published.as_deref()));
     source
 }
 
@@ -1037,6 +1020,7 @@ fn tv_source_from_detail(
     let mut source = current.clone();
     if !detail.title.trim().is_empty() {
         source.title = detail.title.trim().to_string();
+        source.detail_title = Some(source.title.clone());
     }
     if !detail.poster_url.trim().is_empty() {
         source.poster_url = detail.poster_url.trim().to_string();
@@ -2123,6 +2107,12 @@ mod tests {
         let enriched = movie_source_from_detail(&current, detail());
 
         assert_eq!(enriched.title, "肖申克的救赎");
+        assert_eq!(
+            crate::subscription::repository::SubscriptionProjection::from_source(&enriched)
+                .unwrap()
+                .title,
+            "The Shawshank Redemption"
+        );
         assert_eq!(enriched.release_year, Some(1994));
         assert_eq!(
             enriched.original_title.as_deref(),

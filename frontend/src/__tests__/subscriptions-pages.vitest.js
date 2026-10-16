@@ -1058,6 +1058,32 @@ describe("subscription lazy route pages", () => {
     expect(wrapper.get(".subscription-detail-actions button").element.disabled).toBe(false);
   });
 
+  it.each(["movie", "tv"])(
+    "describes a %s metadata retry without claiming search restarted",
+    async (mediaKind) => {
+      const summary = subscriptionRecord({
+        media_kind: mediaKind,
+        lifecycle_state: "meta",
+        retry_blocked: true,
+        attention_tags: ["failed", "retry_blocked"],
+      });
+      const restarted = { ...summary, revision: 2, retry_blocked: false };
+      const fetchMock = retryPageFetch(
+        summary,
+        () => jsonResponse(restarted),
+        () => jsonResponse(nestedSubscriptionDetail("subject-7", { summary: restarted })),
+      );
+      const { wrapper } = await mountAt("/subscriptions/subject-7", fetchMock);
+      await wrapper.get(".subscription-detail-actions button").trigger("click");
+      await flushPromises();
+
+      expect(retryPostCalls(fetchMock)).toHaveLength(1);
+      expect(wrapper.get("#toast").text()).toBe(
+        "已重新安排元数据节点，将在下次调度时重新获取元数据",
+      );
+    },
+  );
+
   it("describes a TV retry as retrying its current stage", async () => {
     const summary = subscriptionRecord({ media_kind: "tv", lifecycle_state: "downloading" });
     const restarted = { ...summary, revision: 2 };

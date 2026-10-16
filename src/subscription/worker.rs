@@ -579,9 +579,27 @@ pub(crate) fn spawn_subscription_worker(
             }
             let snapshot = config.snapshot().await;
             let watcher = snapshot.value.subscription_watcher.clone();
+            // Manual polling can populate the queue while automatic downloads
+            // remain disabled. Drain only metadata nodes in that mode as well.
+            let policy = execution_policy(&snapshot.value);
+            if !policy.account_key.trim().is_empty() {
+                match execution_service
+                    .run_metadata_batch(
+                        &policy,
+                        options.execution_batch_size,
+                        options.execution_concurrency,
+                    )
+                    .await
+                {
+                    Ok(outcome) => log_execution_batch(&outcome),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "subscription metadata batch failed")
+                    }
+                }
+            }
             if !watcher.enabled {
                 next_poll_at = None;
-                if wait_or_cancel(&mut cancelled, 60).await {
+                if wait_or_cancel(&mut cancelled, options.idle_execution_interval_secs).await {
                     break;
                 }
                 continue;
@@ -1117,6 +1135,126 @@ mod tests {
         assert_eq!(open_snapshot_id, None);
         assert_eq!(failure_count, expected_failure_count);
         assert_eq!(error.next_poll_at, Some(next_poll_at as u64));
+    }
+
+    #[tokio::test]
+    async fn metadata_node_enriches_skipped_cards_without_enabling_downloads() {
+        let path = temp_database("poll-metadata");
+        let repository = Arc::new(
+            SqliteSubscriptionRepository::try_create_fresh(&path, 2, Duration::from_secs(1))
+                .unwrap(),
+        );
+        struct MetadataEffects(Arc<crate::douban::DoubanSubjectDetail>);
+        impl SubscriptionExecutionEffects for MetadataEffects {
+            fn execute(
+                &self,
+                claimed: ClaimedSubscription,
+                _policy: ExecutionEffectPolicy,
+            ) -> ExecutionEffectFuture {
+                assert_eq!(
+                    claimed.attempt().token().operation(),
+                    crate::subscription::repository::ExecutionOperation::Meta
+                );
+                let source = super::super::execution_effects::source_from_detail(
+                    &claimed.detail().payload().source,
+                    &self.0,
+                    SubscriptionMediaKind::Movie,
+                );
+                Box::pin(async move {
+                    ExecutionEffectResult::Finished {
+                        disposition: FinishExecutionDisposition::MetaReady,
+                        payload_delta: ExecutionPayloadDelta::MovieMeta {
+                            source: Box::new(source),
+                        },
+                    }
+                })
+            }
+        }
+        let detail = Arc::new(crate::douban::DoubanSubjectDetail {
+            source: "douban",
+            media_type: "douban",
+            id: "subject-1".into(),
+            subject_id: "subject-1".into(),
+            url: String::new(),
+            title: "单独片名".into(),
+            imdb_id: None,
+            original_title: String::new(),
+            aka: vec![],
+            languages: vec![],
+            countries: vec![],
+            image: String::new(),
+            poster_url: String::new(),
+            directors: vec![],
+            writers: vec![],
+            actors: vec![],
+            genres: vec![],
+            date_published: String::new(),
+            duration: String::new(),
+            summary: String::new(),
+            rating: crate::douban::DoubanRating {
+                value: None,
+                count: None,
+                info: String::new(),
+                star_count: None,
+            },
+            user_interest: None,
+            user_rating: None,
+            episodes_count: None,
+        });
+        let source = Arc::new(FakeSource::new([
+            Ok(complete_list(vec![movie("subject-1")])),
+            Ok(complete_list(vec![movie("subject-1")])),
+        ]));
+        let execution = SubscriptionExecutionService::try_new(
+            repository.clone(),
+            Arc::new(MetadataEffects(detail)),
+            60,
+        )
+        .unwrap();
+        let now = system_now();
+        let service = SubscriptionPollService::with_dependencies(
+            repository.clone(),
+            source,
+            Arc::new(SequenceClock(Mutex::new(VecDeque::from([
+                now,
+                now,
+                now + 1,
+                now + 1,
+            ])))),
+        );
+        let mut config = config(false, true);
+        config.subscription_watcher.bootstrap_existing_as_skipped = true;
+        let policy = subscription_poll_policy(&config).unwrap();
+        for expected_claims in [1, 0] {
+            service.poll(&policy).await.unwrap();
+            let outcome = execution
+                .run_metadata_batch(&execution_policy(&config), 10, 2)
+                .await
+                .unwrap();
+            assert_eq!(outcome.claimed, expected_claims);
+            assert_eq!(outcome.finished, expected_claims);
+            let page = repository
+                .list_summaries(
+                    ListSubscriptionsCommand::try_new(
+                        "account-1",
+                        SubscriptionListFilter::default(),
+                        None,
+                        10,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.items[0].projection.title, "单独片名");
+            assert!(page.items[0]
+                .attention_tags
+                .contains(&crate::subscription::SubscriptionAttentionTag::Skipped));
+            assert_eq!(
+                page.items[0].head.lifecycle_state,
+                crate::subscription::SubscriptionLifecycleState::Searching
+            );
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]

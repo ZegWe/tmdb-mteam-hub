@@ -222,9 +222,11 @@ async function retrySubscription(subjectId) {
     submitted = true;
     await subscriptionStore.loadDetail(subjectId, { force: true });
     notifications.showToast(
-      summary.media_kind === "movie"
-        ? "已从搜种子阶段重新开始，将在下次调度时重新处理"
-        : "已重新安排当前阶段，将在下次调度时重试",
+      summary.lifecycle_state === "meta"
+        ? "已重新安排元数据节点，将在下次调度时重新获取元数据"
+        : summary.media_kind === "movie" && summary.lifecycle_state === "searching"
+          ? "已从搜种子阶段重新开始，将在下次调度时重新处理"
+          : "已重新安排当前阶段，将在下次调度时重试",
       "ok",
     );
   } catch (error) {

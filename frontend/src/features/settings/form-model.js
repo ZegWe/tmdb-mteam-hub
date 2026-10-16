@@ -100,7 +100,7 @@ export function subscriptionWatcherRuntimeBanner({ runtimeLoaded, watcher } = {}
       key: "disabled",
       tone: "info",
       title: "订阅自动化已停用",
-      message: "在设置中启用，即可自动同步、检索与下载。",
+      message: "手动刷新后仍会执行元数据节点；自动同步、检索与下载需在设置中启用。",
     };
   }
   if (runtime.dry_run) {
@@ -108,7 +108,7 @@ export function subscriptionWatcherRuntimeBanner({ runtimeLoaded, watcher } = {}
       key: "dry_run",
       tone: "info",
       title: "订阅自动化：试运行",
-      message: "同步片单并匹配资源，不下载或创建硬链接。",
+      message: "同步片单并执行元数据节点；不检索资源，也不下载或创建硬链接。",
     };
   }
   return {

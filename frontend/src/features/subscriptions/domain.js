@@ -181,7 +181,9 @@ export function subscriptionLifecycleKey(record) {
 }
 
 export function subscriptionAttentionKey(record) {
-  return subscriptionAttentionKeys(record)[0] || "";
+  const keys = subscriptionAttentionKeys(record);
+  // Skipping downloads does not skip the metadata node or hide its failures.
+  return keys.find((key) => key !== "skipped" || subscriptionLifecycleKey(record) !== "meta") || "";
 }
 
 export function subscriptionCapabilities(record) {

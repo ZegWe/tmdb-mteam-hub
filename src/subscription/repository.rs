@@ -300,6 +300,7 @@ pub(crate) struct ClaimDueCommand {
     account_key: String,
     lease_ttl: ExecutionLeaseTtl,
     limit: u32,
+    metadata_only: bool,
 }
 
 impl ClaimDueCommand {
@@ -318,7 +319,17 @@ impl ClaimDueCommand {
             account_key: validated_text("account_key", account_key.into())?,
             lease_ttl: ExecutionLeaseTtl::try_new(lease_ttl_secs)?,
             limit,
+            metadata_only: false,
         })
+    }
+
+    pub(crate) fn metadata_only(mut self) -> Self {
+        self.metadata_only = true;
+        self
+    }
+
+    pub(crate) const fn is_metadata_only(&self) -> bool {
+        self.metadata_only
     }
 
     pub(crate) fn account_key(&self) -> &str {
@@ -405,7 +416,21 @@ impl SubscriptionProjection {
             validate_text_bytes("source.category_text", category_text)?;
         }
         Ok(Self {
-            title: source.title.clone(),
+            // Only enriched records opt into the original-name display rule.
+            // Legacy rows keep their persisted projection until their next refresh.
+            title: source
+                .detail_title
+                .as_deref()
+                .map(|detail_title| {
+                    source
+                        .original_title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or(detail_title)
+                })
+                .unwrap_or(&source.title)
+                .to_string(),
             release_year: source.release_year,
             poster_url: source.poster_url.clone(),
             category_text: source.category_text.clone(),
@@ -1994,7 +2019,13 @@ fn validate_snapshot_records(
 }
 
 fn merge_source_observation(current: &mut WantedSourcePayload, observed: &WantedSourcePayload) {
-    current.title = observed.title.trim().to_string();
+    replace_optional_text_if_observed(&mut current.detail_title, &observed.detail_title);
+    current.title = current
+        .detail_title
+        .as_deref()
+        .unwrap_or(&observed.title)
+        .trim()
+        .to_string();
     current.release_year = observed.release_year.or(current.release_year);
     replace_text_if_observed(&mut current.poster_url, &observed.poster_url);
     replace_text_if_observed(&mut current.cover_url, &observed.cover_url);

@@ -16,6 +16,9 @@ pub(crate) const LINK_ARTIFACT_KEY_PREFIX: &str = "link:v1:";
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct WantedSourcePayload {
     pub(crate) title: String,
+    /// Last clean title from subject detail; list refreshes must not replace it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) detail_title: Option<String>,
     pub(crate) release_year: Option<u16>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) poster_url: String,

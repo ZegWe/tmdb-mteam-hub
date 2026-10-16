@@ -72,6 +72,18 @@ describe("subscription domain display", () => {
     expect(subscriptionAttentionKey(record)).toBe("");
   });
 
+  it("shows metadata execution and failures without removing the download skip", () => {
+    const record = { lifecycle_state: "meta", attention_tags: ["skipped"] };
+    expect(subscriptionDisplayStatus(record)).toEqual({ key: "meta", text: "准备元数据" });
+    record.attention_tags.push("failed");
+    expect(subscriptionDisplayStatus(record)).toEqual({ key: "failed", text: "失败" });
+    expect(subscriptionLifecycleNodes(record).find((node) => node.key === "meta").attention).toBe(
+      "failed",
+    );
+    record.lifecycle_state = "searching";
+    expect(subscriptionAttentionKey(record)).toBe("skipped");
+  });
+
   it("uses summary fields for card subtitles", () => {
     expect(subscriptionCardSubtitle({ release_year: 2026, subject_id: "subject-1" })).toBe("2026");
     expect(subscriptionCardSubtitle({ release_year: null, subject_id: "subject-1" })).toBe(
