@@ -43,7 +43,7 @@ describe("App shell", () => {
     expect(wrapper.get(".brand h1").text()).toBe("影视检索");
     expect(wrapper.findAll(".nav-item")).toHaveLength(4);
     expect(router.currentRoute.value.name).toBe("main");
-    expect(wrapper.get(".nav-item.is-active").text()).toBe("主功能");
+    expect(wrapper.get(".nav-item.is-active").text()).toBe("影视检索");
     expect(wrapper.get(".nav-item.is-active").attributes("aria-current")).toBe("page");
     expect(fetchMock.mock.calls[0][0]).toBe("/api/config");
     expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Accept")).toBe("application/json");

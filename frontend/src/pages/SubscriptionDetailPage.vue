@@ -11,7 +11,6 @@
     </header>
 
     <div class="detail-body">
-      <SubscriptionWatcherBanner class="mb-4" />
       <div v-if="detailLoading && !selectedDetail" class="detail-loading" role="status">
         <div class="spinner" aria-hidden="true"></div>
         <p>加载详情…</p>
@@ -38,7 +37,6 @@ import { useRoute, useRouter } from "vue-router";
 import { normalizeDetailRoute } from "../app/detail-routes.js";
 import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notifications.js";
 import SubscriptionDetailView from "../components/SubscriptionDetailView.vue";
-import SubscriptionWatcherBanner from "../features/subscriptions/SubscriptionWatcherBanner.vue";
 import { SUBSCRIPTION_CONTEXT_KEY } from "../features/subscriptions/context.js";
 import {
   retrySubscription as retrySubscriptionApi,

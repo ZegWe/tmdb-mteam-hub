@@ -2,10 +2,10 @@
   <section id="page-main" class="app-page is-active">
     <header class="top">
       <h1>影视检索</h1>
-      <p class="sub">TMDB / 豆瓣资料与 M-Team 种子</p>
+      <p class="sub">发现下一部好作品，从影视资料到 M-Team 资源，一处查找。</p>
     </header>
 
-    <section class="search-bar">
+    <form class="search-bar" @submit.prevent="runSearch">
       <div class="source-switch tabs tabs-boxed" role="group" aria-label="搜索来源">
         <button
           type="button"
@@ -29,15 +29,14 @@
       <input
         v-model.trim="query"
         type="search"
+        aria-label="搜索电影或剧集"
         class="input input-bordered"
         :placeholder="searchSource === 'douban' ? '搜索豆瓣影视标题…' : '搜索电影或剧集标题…'"
         autocomplete="off"
-        @keydown.enter="runSearch"
+        @keydown.enter.prevent="runSearch"
       />
-      <button type="button" class="btn btn-primary" :disabled="searchLoading" @click="runSearch">
-        搜索
-      </button>
-    </section>
+      <button type="submit" class="btn btn-primary" :disabled="searchLoading">搜索</button>
+    </form>
 
     <main
       class="layout search-layout"

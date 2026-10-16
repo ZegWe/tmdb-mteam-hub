@@ -116,6 +116,27 @@ describe("SettingsPage boundary", () => {
     expect(managementToken?.exists()).toBe(true);
     expect(managementToken.element.value).toBe("");
     expect(managementToken.attributes("placeholder")).toContain("已配置");
+    expect(activeWrapper.get("#settings-automation").isVisible()).toBe(true);
+    expect(
+      activeWrapper.findAll(".settings-section").filter((section) => section.isVisible()),
+    ).toHaveLength(1);
+    const navigation = activeWrapper.get(".settings-nav");
+    expect(navigation.findAll("button")).toHaveLength(7);
+    for (const button of navigation.findAll("button")) {
+      await button.trigger("click");
+      expect(button.attributes("aria-current")).toBe("page");
+      expect(activeWrapper.get(`#${button.attributes("aria-controls")}`).isVisible()).toBe(true);
+      expect(
+        activeWrapper.findAll(".settings-section").filter((section) => section.isVisible()),
+      ).toHaveLength(1);
+    }
+    await managementToken.setValue("draft-token-with-at-least-24-characters");
+    await navigation.get('[aria-controls="settings-api"]').trigger("click");
+    await navigation.get('[aria-controls="settings-access"]').trigger("click");
+    expect(managementToken.element.value).toBe("draft-token-with-at-least-24-characters");
+    expect(transport.load).toHaveBeenCalledOnce();
+    await managementToken.setValue("");
+    await navigation.get('[aria-controls="settings-automation"]').trigger("click");
 
     const enableAutomation = activeWrapper
       .findAll("label")
@@ -133,6 +154,7 @@ describe("SettingsPage boundary", () => {
     await enableAutomation.setValue(true);
     await dryRun.setValue(false);
     expect(store.form.subscription_watcher).toEqual({ enabled: true, dry_run: false });
+    expect(activeWrapper.find("#settings-automation [role='alert']").exists()).toBe(false);
 
     activeWrapper.unmount();
     activeWrapper = null;

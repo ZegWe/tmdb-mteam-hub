@@ -10,13 +10,22 @@
   >
     <div class="subscription-card-cover">
       <img :src="imageUrl || transparentPixel" alt="" loading="lazy" />
-      <span class="subscription-status badge" :class="`subscription-status-${displayStatus.key}`">{{
-        displayStatus.text
-      }}</span>
     </div>
     <div class="meta subscription-card-meta">
       <div class="title">{{ title }}</div>
       <div class="subtle">{{ subtitle }}</div>
+      <span class="subscription-status badge" :class="`subscription-status-${displayStatus.key}`">{{
+        displayStatus.text
+      }}</span>
+      <div v-if="progress !== null" class="subscription-card-progress">
+        <progress
+          :value="progress"
+          max="1"
+          :aria-label="`下载进度 ${Math.round(progress * 100)}%`"
+        ></progress>
+        <span>{{ Math.round(progress * 100) }}%</span>
+      </div>
+      <time v-if="updatedAt" class="subscription-card-updated">{{ updatedAt }} 更新</time>
     </div>
   </article>
 </template>
@@ -24,7 +33,12 @@
 <script setup>
 import { computed } from "vue";
 import { itemImageUrl } from "../../shared/media/images.js";
-import { subscriptionCardSubtitle, subscriptionDisplayStatus } from "./domain.js";
+import { formatUnixSeconds } from "../../shared/lib/formatters.js";
+import {
+  subscriptionCardSubtitle,
+  subscriptionDisplayStatus,
+  subscriptionProgress,
+} from "./domain.js";
 
 const transparentPixel =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
@@ -37,6 +51,8 @@ const title = computed(() => props.record.title || props.record.subject_id || "�
 const subtitle = computed(() => subscriptionCardSubtitle(props.record));
 const imageUrl = computed(() => itemImageUrl(props.record));
 const displayStatus = computed(() => subscriptionDisplayStatus(props.record));
+const progress = computed(() => subscriptionProgress(props.record));
+const updatedAt = computed(() => formatUnixSeconds(props.record.updated_at));
 
 function open() {
   emit("open", props.record);

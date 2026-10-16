@@ -1,19 +1,13 @@
 <template>
   <section
-    class="subscription-watcher-banner alert items-start shadow-sm"
-    :class="{
-      'alert-info': banner.tone === 'info',
-      'alert-warning': banner.tone === 'warning',
-      'alert-error': banner.tone === 'danger',
-    }"
+    class="subscription-watcher-banner"
     :data-watcher-mode="banner.key"
     role="status"
     aria-live="polite"
   >
-    <div class="min-w-0">
-      <strong class="block">{{ banner.title }}</strong>
-      <p class="m-0 text-sm leading-relaxed">{{ banner.message }}</p>
-    </div>
+    <span class="watcher-indicator" aria-hidden="true"></span>
+    <strong>{{ banner.title }}</strong>
+    <span class="watcher-description">{{ banner.message }}</span>
   </section>
 </template>
 

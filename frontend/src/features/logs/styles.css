@@ -18,12 +18,14 @@
 
 .operation-log-filters {
   display: grid;
-  grid-template-columns: minmax(9rem, 0.8fr) minmax(8rem, 0.65fr) minmax(16rem, 1.6fr) auto;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.65fr) minmax(0, 1.6fr) auto;
   align-items: end;
   gap: 0.75rem;
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--card) 86%, var(--muted-bg));
+  padding: 1.5rem;
+  margin: 0 var(--page-gutter) 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
 }
 
 .operation-log-filters label {
@@ -43,7 +45,7 @@
 }
 
 .operation-log-search {
-  min-width: min(100%, 16rem);
+  min-width: 0;
 }
 
 .operation-log-filter-actions {
@@ -56,13 +58,13 @@
 }
 
 .operation-log-summary {
-  padding: 0.75rem 1.5rem 0;
+  padding: 0.75rem var(--page-gutter) 0;
 }
 
 .operation-log-list {
   display: grid;
   gap: 0.65rem;
-  padding: 0.65rem 1.5rem 0;
+  padding: 0.65rem var(--page-gutter) 0;
 }
 
 .operation-log-card.card {
@@ -248,7 +250,7 @@
 .operation-log-pager {
   display: flex;
   justify-content: center;
-  padding: 1rem 1.5rem 3rem;
+  padding: 1rem var(--page-gutter) 3rem;
 }
 
 @media (max-width: 640px) {
@@ -283,8 +285,8 @@
   .operation-log-summary,
   .operation-log-list,
   .operation-log-pager {
-    padding-right: 0.85rem;
-    padding-left: 0.85rem;
+    padding-right: var(--page-gutter);
+    padding-left: var(--page-gutter);
   }
 
   .operation-log-card.card {

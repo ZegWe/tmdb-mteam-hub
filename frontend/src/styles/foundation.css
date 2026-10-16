@@ -38,7 +38,9 @@
   --success: var(--app-success);
   --warning: var(--app-warning);
   --info: var(--app-info);
-  --radius: 8px;
+  --radius: 14px;
+  --page-gutter: clamp(1.25rem, 3.2vw, 2.75rem);
+  --poster-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr));
   --shadow-sm: var(--app-shadow-sm);
   --shadow-md: var(--app-shadow-md);
   --bg: var(--background);
@@ -54,5 +56,6 @@
     system-ui,
     -apple-system,
     BlinkMacSystemFont,
+    "Microsoft YaHei",
     sans-serif;
 }

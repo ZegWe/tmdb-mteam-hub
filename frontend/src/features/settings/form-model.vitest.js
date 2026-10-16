@@ -43,7 +43,7 @@ describe("settings form model", () => {
       key: "loading",
       tone: "info",
       title: "订阅自动化状态读取中",
-      message: "正在读取后端运行配置；加载完成前不会推断自动化模式。",
+      message: "正在读取运行配置。",
     });
     expect(
       subscriptionWatcherRuntimeBanner({
@@ -58,17 +58,15 @@ describe("settings form model", () => {
       runtimeLoaded: true,
       watcher: { enabled: true, dry_run: true },
     });
-    expect(dryRun).toMatchObject({ key: "dry_run", title: "订阅自动化：试运行" });
-    expect(dryRun.message).toContain("不会推送 qB 或创建硬链接");
+    expect(dryRun).toMatchObject({ key: "dry_run", tone: "info", title: "订阅自动化：试运行" });
+    expect(dryRun.message).toContain("不下载或创建硬链接");
 
     const live = subscriptionWatcherRuntimeBanner({
       runtimeLoaded: true,
       watcher: { enabled: true, dry_run: false },
     });
-    expect(live).toMatchObject({ key: "live", title: "订阅自动化：实时执行" });
-    expect(live.message).toContain("真实副作用");
-    expect(live.message).toContain("推送 qB");
-    expect(live.message).toContain("创建硬链接");
+    expect(live).toMatchObject({ key: "live", tone: "success", title: "订阅自动化：运行中" });
+    expect(live.message).toContain("自动同步、检索、下载与硬链接");
   });
 
   it("normalizes redacted snapshots without copying response secrets into drafts", () => {

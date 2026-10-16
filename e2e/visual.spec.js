@@ -59,7 +59,7 @@ const routes = [
     heading: "设置",
     headingSelector: "#page-settings > .top h1",
     prepare: async (page) => {
-      await expect(page.getByRole("button", { name: "保存设置" })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "保存全部设置" })).toBeEnabled();
     },
   },
 ];

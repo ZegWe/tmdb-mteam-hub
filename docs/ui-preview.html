@@ -1,0 +1,1813 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>影视检索 · UI 设计预览</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f5;
+        --surface: #fff;
+        --ink: #26352e;
+        --muted: #778078;
+        --line: #e4e8e2;
+        --green: #3b6652;
+        --soft: #eaf0e9;
+        --radius: 14px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          14px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "Microsoft YaHei",
+          sans-serif;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button,
+      a,
+      input,
+      select {
+        -webkit-tap-highlight-color: transparent;
+      }
+      :focus-visible {
+        outline: 3px solid #85aa93;
+        outline-offset: 4px;
+      }
+      button {
+        color: inherit;
+      }
+      .shell {
+        display: grid;
+        grid-template-columns: 224px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+      aside {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--line);
+        padding: 34px 20px 24px;
+        background: var(--surface);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 12px;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 36px;
+        height: 40px;
+        border-radius: 11px;
+        background: var(--green);
+        color: white;
+      }
+      .brand strong {
+        display: block;
+        font-size: 17px;
+        letter-spacing: 1px;
+      }
+      .brand small {
+        color: var(--muted);
+        font-size: 10px;
+        letter-spacing: 2px;
+      }
+      svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        flex-shrink: 0;
+      }
+      .nav-label {
+        color: #969e96;
+        font-size: 10px;
+        letter-spacing: 2px;
+        margin: 46px 14px 12px;
+      }
+      nav {
+        display: grid;
+        gap: 7px;
+      }
+      nav button {
+        border: 0;
+        background: none;
+        text-align: left;
+        border-radius: 9px;
+        display: flex;
+        align-items: center;
+        gap: 13px;
+        padding: 12px 14px;
+        color: #717b73;
+      }
+      nav button.active {
+        color: var(--green);
+        background: var(--soft);
+        font-weight: 600;
+      }
+      nav button:hover {
+        background: var(--bg);
+      }
+      nav button.active:hover {
+        background: var(--soft);
+      }
+      .count {
+        margin-left: auto;
+        font-size: 11px;
+        background: white;
+        padding: 0 7px;
+        border-radius: 5px;
+      }
+      .aside-bottom {
+        margin-top: auto;
+        padding: 28px 12px 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .aside-bottom b {
+        color: var(--green);
+        font-weight: 500;
+        display: block;
+        margin-bottom: 6px;
+      }
+      .dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #73977c;
+        margin-right: 7px;
+      }
+      .workspace {
+        min-width: 0;
+      }
+      .topbar {
+        height: 72px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 44px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .breadcrumb {
+        display: flex;
+        gap: 13px;
+        align-items: center;
+      }
+      .breadcrumb strong {
+        font-weight: 500;
+        color: var(--ink);
+      }
+      .preview-label {
+        border: 1px solid var(--line);
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 11px;
+      }
+      main {
+        max-width: 1340px;
+        margin: auto;
+        padding: 38px 44px 28px;
+      }
+      .heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 28px;
+      }
+      h1 {
+        font-size: 28px;
+        letter-spacing: -0.8px;
+        line-height: 1.35;
+        font-weight: 650;
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 0;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .eyebrow {
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--green);
+        margin-bottom: 9px;
+        font-weight: 600;
+      }
+      .btn {
+        display: inline-flex;
+        gap: 8px;
+        justify-content: center;
+        align-items: center;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .btn:hover {
+        border-color: #9fb2a4;
+        background: var(--soft);
+      }
+      .primary {
+        background: var(--green);
+        color: white;
+        border-color: var(--green);
+      }
+      .primary:hover {
+        background: #2c523f;
+        color: white;
+      }
+      .search-panel {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        padding: 22px 24px;
+        margin-bottom: 30px;
+      }
+      .source-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 18px;
+        gap: 12px;
+      }
+      .segments {
+        display: inline-flex;
+        border-radius: 7px;
+        background: var(--bg);
+        padding: 3px;
+        gap: 3px;
+      }
+      .segments button {
+        padding: 6px 18px;
+        border: 0;
+        border-radius: 5px;
+        color: var(--muted);
+        background: none;
+        font-size: 12px;
+      }
+      .segments button.active {
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: 0 1px 4px #23392c12;
+        font-weight: 600;
+      }
+      .source-note {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .searchbox {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        border: 1px solid var(--line);
+        background: #fafbf9;
+        border-radius: 9px;
+        padding: 7px 8px 7px 15px;
+      }
+      .searchbox svg {
+        color: #929c94;
+      }
+      .searchbox input {
+        border: 0;
+        outline: 0;
+        background: none;
+        flex: 1;
+        width: 0;
+        color: var(--ink);
+        padding: 7px 0;
+      }
+      .searchbox:focus-within {
+        border-color: var(--green);
+        box-shadow: 0 0 0 3px var(--soft);
+      }
+      .search-hint {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 12px;
+      }
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 18px;
+        gap: 10px;
+      }
+      h2 {
+        font-size: 17px;
+        font-weight: 600;
+        margin: 0;
+      }
+      .section-head h2 span {
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--muted);
+        margin-left: 10px;
+      }
+      .text-button {
+        background: none;
+        border: 0;
+        padding: 4px 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .media-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 20px;
+      }
+      .media-card {
+        padding: 0;
+        border: 0;
+        background: none;
+        text-align: left;
+        min-width: 0;
+      }
+      .poster {
+        position: relative;
+        aspect-ratio: 2/2.85;
+        border-radius: 10px;
+        overflow: hidden;
+        background: #d2c8aa;
+        transition: transform 0.2s;
+        isolation: isolate;
+      }
+      .media-card:hover .poster {
+        transform: translateY(-4px);
+      }
+      .poster::before,
+      .poster::after {
+        content: "";
+        position: absolute;
+        z-index: -1;
+      }
+      .poster::before {
+        width: 130%;
+        height: 70%;
+        background: #ffffff15;
+        transform: rotate(-25deg);
+        left: -10%;
+        bottom: -15%;
+        border-top: 1px solid #ffffff30;
+      }
+      .poster::after {
+        width: 110px;
+        height: 110px;
+        border-radius: 50%;
+        left: calc(50% - 55px);
+        top: 18%;
+        background: #e5dfb5;
+        box-shadow: 0 0 60px #e6dfb530;
+      }
+      .poster.dune {
+        background: linear-gradient(160deg, #4c4b3d, #bc8d59 65%, #3d302a);
+        color: #f8e5c7;
+      }
+      .poster.interstellar {
+        background: linear-gradient(150deg, #16272e, #52717b 65%, #c6d2c7);
+        color: #f0f5f1;
+      }
+      .poster.interstellar::after {
+        background: #0f242e;
+        box-shadow:
+          0 0 0 3px #eee7c1,
+          0 0 27px 9px #e4d6b787;
+      }
+      .poster.arrival {
+        background: linear-gradient(#b1b8ae, #89978f 55%, #34463e);
+        color: white;
+      }
+      .poster.arrival::after {
+        width: 65px;
+        height: 146px;
+        left: calc(50% - 32px);
+        top: 13%;
+        border-radius: 50%;
+        background: linear-gradient(90deg, #172922, #566359);
+        transform: rotate(16deg);
+        box-shadow: 12px 15px 30px #22352b40;
+      }
+      .poster.blade {
+        background: linear-gradient(155deg, #264f5a, #657e78 48%, #be7545);
+        color: #fbe4c6;
+      }
+      .poster.blade::after {
+        width: 3px;
+        height: 78%;
+        top: 0;
+        left: 65%;
+        border-radius: 0;
+        background: #ffb278;
+        box-shadow: 0 0 30px 9px #e89a5c80;
+      }
+      .poster.martian {
+        background: linear-gradient(135deg, #684132, #ca9671 60%, #744e3b);
+        color: #fff1df;
+      }
+      .poster.martian::after {
+        background: radial-gradient(
+          circle at 50% 70%,
+          #3a332c 30%,
+          #c0b498 32%,
+          #e2d5bb 42%,
+          #6a5a49 44%,
+          #bca98a 50%,
+          transparent 51%
+        );
+        width: 150px;
+        height: 150px;
+        left: calc(50% - 75px);
+        box-shadow: none;
+      }
+      .poster-type {
+        position: absolute;
+        left: 18px;
+        right: 12px;
+        bottom: 24px;
+      }
+      .poster-type small {
+        display: block;
+        font-size: 8px;
+        letter-spacing: 2px;
+        opacity: 0.8;
+        margin-bottom: 8px;
+      }
+      .poster-type strong {
+        font-size: 22px;
+        line-height: 1.15;
+        font-weight: 400;
+        letter-spacing: 3px;
+        display: block;
+      }
+      .rating {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        border-radius: 5px;
+        background: #fffef0eb;
+        color: #4e553f;
+        padding: 2px 6px;
+        font-size: 10px;
+        font-weight: 650;
+      }
+      .card-title {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 12px 0 4px;
+      }
+      .card-meta {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .bottom-note {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-top: 30px;
+        border-top: 1px solid var(--line);
+        padding-top: 19px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .bottom-note span:last-child {
+        margin-left: auto;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        padding: 24px;
+        margin-bottom: 20px;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin-bottom: 22px;
+      }
+      .stat {
+        padding: 20px 24px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+      .stat strong {
+        display: block;
+        font-size: 30px;
+        font-weight: 500;
+        margin-top: 8px;
+      }
+      .stat span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .status {
+        display: inline-block;
+        padding: 3px 9px;
+        border-radius: 5px;
+        background: var(--soft);
+        color: var(--green);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .status.wait {
+        background: #f5efe2;
+        color: #967745;
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        white-space: nowrap;
+        text-align: left;
+        font-size: 12px;
+      }
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 400;
+        padding: 12px 16px;
+        background: #fafbf9;
+      }
+      td {
+        padding: 20px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      td strong {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .progress {
+        width: 130px;
+        height: 4px;
+        border-radius: 3px;
+        background: var(--soft);
+        margin-top: 7px;
+        overflow: hidden;
+      }
+      .progress span {
+        display: block;
+        height: 100%;
+        background: #769782;
+      }
+      .subscription-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .subscription-card .poster {
+        border-radius: 10px 10px 0 0;
+      }
+      .subscription-meta {
+        padding: 0 14px 16px;
+      }
+      .subscription-meta .status {
+        margin-top: 12px;
+      }
+      .subscription-meta .progress {
+        width: 100%;
+        margin: 10px 0 8px;
+      }
+      .subscription-meta .card-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .subscription-filters {
+        margin-bottom: 22px;
+        flex-wrap: wrap;
+      }
+      .settings-grid {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: 28px;
+      }
+      .settings-grid form {
+        min-width: 0;
+      }
+      .settings-nav {
+        display: grid;
+        gap: 5px;
+        align-content: start;
+      }
+      .settings-nav button {
+        color: var(--muted);
+        padding: 11px 14px;
+        text-align: left;
+        border: 0;
+        background: none;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      .settings-nav button.active {
+        background: var(--soft);
+        color: var(--green);
+        font-weight: 600;
+      }
+      .settings-nav button:hover {
+        background: var(--soft);
+      }
+      .settings-nav small {
+        color: var(--muted);
+        padding: 18px 14px 7px;
+        font-size: 10px;
+        letter-spacing: 1px;
+      }
+      .field {
+        display: grid;
+        gap: 7px;
+        margin-top: 20px;
+        font-size: 12px;
+      }
+      .field input,
+      .field select,
+      .field textarea {
+        min-width: 0;
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        background: var(--bg);
+        font: inherit;
+      }
+      .field textarea {
+        resize: vertical;
+      }
+      .field small {
+        color: var(--muted);
+      }
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0 20px;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin-top: 16px;
+        font-size: 12px;
+      }
+      .check input {
+        accent-color: var(--green);
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+      }
+      .helper {
+        padding: 12px 15px;
+        margin-top: 18px;
+        border-radius: 8px;
+        background: var(--bg);
+        font-size: 12px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+      .helper.warning {
+        background: #f8f2e6;
+        color: #876c3f;
+      }
+      .settings-intro {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .entry {
+        padding: 20px;
+        background: #fcfdfb;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        margin: 20px 0 16px;
+      }
+      .entry-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .entry-header strong {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .danger {
+        color: #a65c50;
+      }
+      .entry-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 20px;
+      }
+      .settings-footer {
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        align-items: center;
+        border-top: 1px solid var(--line);
+        padding: 20px 0;
+      }
+      .settings-footer p {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .settings-footer strong {
+        display: block;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .form-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 24px;
+      }
+      .log {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
+      .log td {
+        padding-top: 16px;
+        padding-bottom: 16px;
+      }
+      dialog {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 30px;
+        width: min(520px, calc(100% - 32px));
+        color: var(--ink);
+        box-shadow: 0 24px 100px #20332630;
+      }
+      dialog::backdrop {
+        background: #1b2d2450;
+        backdrop-filter: blur(4px);
+      }
+      dialog h2 {
+        font-size: 25px;
+        margin: 12px 0;
+      }
+      dialog p {
+        color: var(--muted);
+        margin-bottom: 20px;
+      }
+      .dialog-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 28px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 25px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--ink);
+        color: white;
+        padding: 12px 22px;
+        border-radius: 10px;
+        box-shadow: 0 8px 30px #26352e20;
+        z-index: 5;
+        max-width: 90%;
+        font-size: 12px;
+      }
+      @media (min-width: 1500px) {
+        main {
+          padding-top: 52px;
+        }
+        .media-grid {
+          gap: 26px;
+        }
+      }
+      @media (max-width: 1100px) {
+        .shell {
+          grid-template-columns: 190px minmax(0, 1fr);
+        }
+        main {
+          padding: 30px 26px;
+        }
+        .topbar {
+          padding: 0 26px;
+        }
+        .media-grid {
+          gap: 14px;
+        }
+        .poster-type {
+          left: 12px;
+        }
+        .poster-type strong {
+          font-size: 18px;
+        }
+      }
+      @media (max-width: 800px) {
+        .shell {
+          display: block;
+        }
+        aside {
+          position: static;
+          height: auto;
+          padding: 18px 20px 10px;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .brand {
+          padding: 0;
+        }
+        .brand small {
+          display: none;
+        }
+        .nav-label,
+        .aside-bottom {
+          display: none;
+        }
+        nav {
+          display: flex;
+          gap: 4px;
+          margin-top: 18px;
+        }
+        nav button {
+          flex: 1;
+          justify-content: center;
+          padding: 9px 5px;
+          font-size: 12px;
+          gap: 6px;
+        }
+        nav svg {
+          width: 16px;
+        }
+        .count {
+          display: none;
+        }
+        .topbar {
+          height: 52px;
+          padding: 0 22px;
+        }
+        main {
+          padding: 26px 22px;
+        }
+        .media-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 20px 14px;
+        }
+        .source-note {
+          display: none;
+        }
+        .heading {
+          align-items: flex-start;
+        }
+        h1 {
+          font-size: 25px;
+        }
+        .settings-grid {
+          grid-template-columns: 1fr;
+          gap: 16px;
+        }
+        .settings-nav {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0;
+        }
+      }
+      @media (max-width: 480px) {
+        .media-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .heading .btn {
+          padding: 8px 10px;
+        }
+        .heading p {
+          font-size: 12px;
+        }
+        .search-panel {
+          padding: 16px;
+        }
+        .searchbox {
+          gap: 8px;
+          padding-left: 10px;
+        }
+        .searchbox .btn {
+          padding: 9px 12px;
+        }
+        .stats {
+          gap: 8px;
+        }
+        .stat {
+          padding: 14px;
+        }
+        .stat strong {
+          font-size: 25px;
+        }
+        .bottom-note {
+          flex-wrap: wrap;
+        }
+        .bottom-note span:last-child {
+          margin-left: 0;
+        }
+        .preview-label {
+          font-size: 10px;
+        }
+        .panel {
+          padding: 18px;
+        }
+      }
+      @media (max-width: 800px) {
+        .settings-nav small {
+          display: none;
+        }
+        .settings-nav button {
+          padding: 10px 12px;
+        }
+      }
+      @media (max-width: 600px) {
+        .field-grid {
+          grid-template-columns: 1fr;
+        }
+        .entry {
+          padding: 14px;
+        }
+        .settings-footer {
+          align-items: flex-start;
+        }
+        .subscription-filters button {
+          padding: 6px 10px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <svg hidden aria-hidden="true">
+      <symbol id="search" viewBox="0 0 24 24">
+        <circle cx="10.5" cy="10.5" r="6.5" />
+        <path d="m16 16 4.5 4.5" />
+      </symbol>
+      <symbol id="library" viewBox="0 0 24 24">
+        <rect x="4" y="4" width="6" height="16" rx="1" />
+        <path d="M14 4v16m4-15 3 14M6 8h2" />
+      </symbol>
+      <symbol id="logs" viewBox="0 0 24 24">
+        <rect x="4" y="3" width="16" height="18" rx="2" />
+        <path d="M8 8h8M8 12h8M8 16h5" />
+      </symbol>
+      <symbol id="settings" viewBox="0 0 24 24">
+        <path d="M4 7h16M4 17h16" />
+        <circle cx="9" cy="7" r="3" fill="var(--surface)" />
+        <circle cx="15" cy="17" r="3" fill="var(--surface)" />
+      </symbol>
+      <symbol id="film" viewBox="0 0 24 24">
+        <rect x="4" y="3" width="16" height="18" rx="3" />
+        <path d="M8 3v18M16 3v18M4 8h4m-4 8h4m8-8h4m-4 8h4" />
+      </symbol>
+    </svg>
+    <div class="shell">
+      <aside>
+        <div class="brand">
+          <div class="mark">
+            <svg><use href="#film" /></svg>
+          </div>
+          <div><strong>影视检索</strong><small>MEDIA HUB</small></div>
+        </div>
+        <div class="nav-label">工作空间</div>
+        <nav aria-label="主导航">
+          <button class="active" data-page="search" aria-current="page">
+            <svg><use href="#search" /></svg>影视检索
+          </button>
+          <button data-page="subscriptions">
+            <svg><use href="#library" /></svg>我的订阅<span class="count">3</span>
+          </button>
+          <button data-page="logs">
+            <svg><use href="#logs" /></svg>运行日志
+          </button>
+          <button data-page="settings">
+            <svg><use href="#settings" /></svg>偏好设置
+          </button>
+        </nav>
+        <div class="aside-bottom">
+          <b><span class="dot"></span>独立设计预览</b>示例数据 · 未连接真实服务<br />TMDB / 豆瓣 /
+          M-Team
+        </div>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="breadcrumb">
+            工作空间 <span>/</span> <strong id="breadcrumb">影视检索</strong>
+          </div>
+          <span class="preview-label">UI CONCEPT / 01 · 浅色</span>
+        </header>
+        <main>
+          <section data-view="search">
+            <div class="heading">
+              <div>
+                <div class="eyebrow">YOUR NEXT GREAT STORY</div>
+                <h1>发现下一部好作品</h1>
+                <p class="muted">从搜索到收藏，让每一份期待都有着落。</p>
+              </div>
+            </div>
+            <form class="search-panel" id="search-form">
+              <div class="source-row">
+                <div class="segments" aria-label="搜索来源">
+                  <button type="button" class="active" data-source="TMDB" aria-pressed="true">
+                    TMDB</button
+                  ><button type="button" data-source="豆瓣" aria-pressed="false">豆瓣</button>
+                </div>
+                <span class="source-note">影视资料与 M-Team 资源，一处查找</span>
+              </div>
+              <div class="searchbox">
+                <svg aria-hidden="true"><use href="#search" /></svg
+                ><input
+                  id="query"
+                  type="search"
+                  aria-label="搜索电影或剧集"
+                  placeholder="搜索电影、剧集，或一个念念不忘的名字…"
+                  autocomplete="off"
+                /><button class="btn primary" type="submit">搜索</button>
+              </div>
+              <p class="search-hint">预览交互：试试搜索「星际」，或点击任意影片查看详情样式。</p>
+            </form>
+            <div class="section-head">
+              <h2 id="result-heading">电影 <span>5 部示例作品</span></h2>
+              <button class="text-button" id="reset">显示全部 ↗</button>
+            </div>
+            <div class="media-grid" id="media-grid"></div>
+            <p class="muted" id="empty" hidden>没有匹配的示例作品，试试其他名字。</p>
+            <div class="bottom-note">
+              <span><span class="dot"></span>当前来源：<b id="source-label">TMDB</b></span
+              ><span>封面为抽象排版占位，正式版使用影片海报</span>
+            </div>
+          </section>
+          <section data-view="subscriptions" hidden>
+            <div class="heading">
+              <div>
+                <div class="eyebrow">YOUR WATCHLIST</div>
+                <h1>我的订阅</h1>
+                <p class="muted">想看的作品，正在为你持续关注。</p>
+              </div>
+              <button class="btn primary" data-notice="预览模式：正式版将从豆瓣刷新订阅。">
+                刷新订阅
+              </button>
+            </div>
+            <div class="stats">
+              <div class="stat"><span>全部订阅</span><strong>3</strong></div>
+              <div class="stat"><span>正在下载</span><strong>1</strong></div>
+              <div class="stat"><span>已完成</span><strong>1</strong></div>
+            </div>
+            <div class="section-head">
+              <h2>订阅片单 <span>3 部示例作品</span></h2>
+              <span class="status">自动追踪 · 示例</span>
+            </div>
+            <div class="segments subscription-filters" aria-label="订阅状态筛选">
+              <button class="active" data-filter="all" aria-pressed="true">全部</button
+              ><button data-filter="downloading" aria-pressed="false">正在下载</button
+              ><button data-filter="waiting" aria-pressed="false">等待资源</button
+              ><button data-filter="completed" aria-pressed="false">已完成</button>
+            </div>
+            <div class="media-grid" id="subscription-grid"></div>
+            <div class="bottom-note">
+              <span>点击海报查看订阅详情</span><span>示例数据 · 不执行真实下载与硬链接</span>
+            </div>
+          </section>
+          <section data-view="logs" hidden>
+            <div class="heading">
+              <div>
+                <div class="eyebrow">ACTIVITY & INSIGHTS</div>
+                <h1>运行日志</h1>
+                <p class="muted">每一次检索与同步，都有迹可循。</p>
+              </div>
+              <button class="btn" data-notice="预览模式：当前展示的是静态日志样例。">
+                刷新日志
+              </button>
+            </div>
+            <div class="panel">
+              <div class="section-head">
+                <h2>最近活动</h2>
+                <span class="status">4 条示例日志</span>
+              </div>
+              <div class="table-wrap">
+                <table class="log">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>级别</th>
+                      <th>模块</th>
+                      <th>消息</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td class="muted">14:32:08</td>
+                      <td><span class="status">INFO</span></td>
+                      <td>subscription</td>
+                      <td>订阅同步完成，共检查 3 部作品</td>
+                    </tr>
+                    <tr>
+                      <td class="muted">14:31:56</td>
+                      <td><span class="status">INFO</span></td>
+                      <td>qbittorrent</td>
+                      <td>下载任务已添加：沙丘 2</td>
+                    </tr>
+                    <tr>
+                      <td class="muted">14:31:42</td>
+                      <td><span class="status wait">WARN</span></td>
+                      <td>mteam</td>
+                      <td>请求超时，将在下一轮重试</td>
+                    </tr>
+                    <tr>
+                      <td class="muted">14:30:12</td>
+                      <td><span class="status">INFO</span></td>
+                      <td>search</td>
+                      <td>TMDB 检索完成，返回 5 条结果</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+          <section data-view="settings" hidden>
+            <div class="heading">
+              <div>
+                <div class="eyebrow">MAKE IT YOURS</div>
+                <h1>偏好设置</h1>
+                <p class="muted">按功能管理配置，一次只专注一件事。</p>
+              </div>
+              <span class="preview-label">7 个设置子页</span>
+            </div>
+            <div class="settings-grid">
+              <div class="settings-nav" role="group" aria-label="设置子页面">
+                <small>账户与服务</small>
+                <button type="button" data-setting="access" aria-controls="setting-access">
+                  管理访问
+                </button>
+                <button
+                  type="button"
+                  class="active"
+                  data-setting="api"
+                  aria-controls="setting-api"
+                  aria-current="page"
+                >
+                  API 密钥
+                </button>
+                <button type="button" data-setting="douban" aria-controls="setting-douban">
+                  豆瓣登录
+                </button>
+                <small>订阅与下载</small>
+                <button type="button" data-setting="automation" aria-controls="setting-automation">
+                  订阅自动化
+                </button>
+                <button type="button" data-setting="categories" aria-controls="setting-categories">
+                  订阅分类
+                </button>
+                <button type="button" data-setting="rules" aria-controls="setting-rules">
+                  种子匹配规则
+                </button>
+                <button type="button" data-setting="qb" aria-controls="setting-qb">
+                  qBittorrent
+                </button>
+              </div>
+              <form id="settings-form">
+                <section
+                  class="panel"
+                  data-setting-view="access"
+                  id="setting-access"
+                  aria-labelledby="access-title"
+                  hidden
+                >
+                  <div class="section-head">
+                    <h2 id="access-title">管理访问</h2>
+                    <span class="status">安全设置</span>
+                  </div>
+                  <p class="settings-intro">管理网页访问凭据与当前登录会话。</p>
+                  <label class="field"
+                    >管理 Token<input
+                      type="password"
+                      minlength="24"
+                      placeholder="已配置；留空则保留（示例）"
+                      disabled
+                    /><small
+                      >至少 24 个字符。替换后当前浏览器立即用新值重新登录；Token
+                      不写入浏览器存储。</small
+                    ></label
+                  >
+                  <label class="check"
+                    ><input type="checkbox" data-clear-admin />清除已保存的管理 Token（预览）</label
+                  >
+                  <p class="helper warning" id="admin-warning" hidden>
+                    只有 loopback
+                    监听允许清除最后一个管理凭据；远程或容器监听会拒绝保存。清除后请确认服务仍只对可信本机开放。
+                  </p>
+                  <div class="entry-actions">
+                    <button type="button" class="btn" data-notice="预览模式：未退出真实会话。">
+                      退出登录</button
+                    ><span class="muted">当前会话 · 示例</span>
+                  </div>
+                </section>
+                <section
+                  class="panel"
+                  data-setting-view="api"
+                  id="setting-api"
+                  aria-labelledby="api-title"
+                >
+                  <div class="section-head">
+                    <h2 id="api-title">API 密钥</h2>
+                    <span class="status">影视资料与资源</span>
+                  </div>
+                  <p class="settings-intro">
+                    连接 TMDB 与 M-Team；豆瓣 Cookie 和扫码登录已移至独立子页。
+                  </p>
+                  <label class="field"
+                    >TMDB API Key<input
+                      type="password"
+                      placeholder="已配置；留空则保留（示例）"
+                      disabled
+                  /></label>
+                  <label class="check"
+                    ><input type="checkbox" />清除已保存的 TMDB API Key（预览）</label
+                  >
+                  <label class="field"
+                    >M-Team OpenAPI Key<input
+                      type="password"
+                      placeholder="已配置；留空则保留（示例）"
+                      disabled
+                  /></label>
+                  <label class="check"
+                    ><input type="checkbox" />清除已保存的 M-Team OpenAPI Key（预览）</label
+                  >
+                  <p class="helper">
+                    正式版写入运行目录的 <code>config.toml</code>，或
+                    <code>CONFIG_PATH</code> 指定路径。预览已禁用所有凭据输入，请勿填写真实密钥。
+                  </p>
+                </section>
+                <section
+                  class="panel"
+                  data-setting-view="douban"
+                  id="setting-douban"
+                  aria-labelledby="douban-title"
+                  hidden
+                >
+                  <div class="section-head">
+                    <h2 id="douban-title">豆瓣登录</h2>
+                    <span class="status">Cookie 与扫码</span>
+                  </div>
+                  <p class="settings-intro">使用 Cookie 或扫码登录，为豆瓣想看订阅提供登录状态。</p>
+                  <label class="field"
+                    >豆瓣 Cookie<textarea
+                      rows="3"
+                      placeholder="已配置；留空则保留，也可重新扫码更新（示例）"
+                      disabled
+                    ></textarea>
+                  </label>
+                  <label class="check"
+                    ><input type="checkbox" />清除已保存的豆瓣 Cookie（预览）</label
+                  >
+                  <div class="entry-actions">
+                    <button type="button" class="btn" id="qr-preview">QR 登录获取 Cookie</button
+                    ><span class="muted" id="qr-status" role="status">尚未开始 · 预览</span>
+                  </div>
+                  <div class="helper" id="qr-placeholder" hidden>
+                    正式版在此显示登录二维码及扫码状态；预览不生成二维码，也不会请求或保存 Cookie。
+                  </div>
+                </section>
+                <section
+                  class="panel"
+                  data-setting-view="automation"
+                  id="setting-automation"
+                  aria-labelledby="automation-title"
+                  hidden
+                >
+                  <div class="section-head">
+                    <h2 id="automation-title">订阅自动化</h2>
+                    <span class="status">运行策略</span>
+                  </div>
+                  <p class="settings-intro">
+                    默认关闭。启用后定时读取想看订阅，推进检索、下载与硬链接流程。
+                  </p>
+                  <label class="check"
+                    ><input type="checkbox" id="automation-enabled" />启用自动订阅</label
+                  >
+                  <label class="check"
+                    ><input
+                      type="checkbox"
+                      id="automation-dry-run"
+                      checked
+                    />试运行（dry-run）</label
+                  >
+                  <p class="helper" id="automation-status" role="status">
+                    当前关闭：不会运行自动订阅流水线。
+                  </p>
+                  <p class="settings-intro">
+                    正式版启用自动化时需确认；试运行也会访问外部服务并更新调度状态。本预览不执行流水线。
+                  </p>
+                </section>
+                <section
+                  class="panel"
+                  data-setting-view="categories"
+                  id="setting-categories"
+                  aria-labelledby="categories-title"
+                  hidden
+                >
+                  <div class="section-head">
+                    <h2 id="categories-title">订阅分类</h2>
+                    <span class="status">分类与目录映射</span>
+                  </div>
+                  <p class="settings-intro">
+                    “想看”只能选择这里配置的文本；自动下载与硬链接使用同一组分类字段。
+                  </p>
+                  <div id="category-entries"></div>
+                  <button type="button" class="btn" data-add-entry="category">＋ 添加分类</button>
+                </section>
+                <section
+                  class="panel"
+                  data-setting-view="rules"
+                  id="setting-rules"
+                  aria-labelledby="rules-title"
+                  hidden
+                >
+                  <div class="section-head">
+                    <h2 id="rules-title">种子匹配规则</h2>
+                    <span class="status">候选优先级</span>
+                  </div>
+                  <p class="settings-intro">
+                    数字越大越先尝试；高优先级没有命中时才尝试低优先级。关键词用逗号分隔。
+                  </p>
+                  <div id="rule-entries"></div>
+                  <button type="button" class="btn" data-add-entry="rule">＋ 添加规则</button>
+                  <p class="helper">
+                    未配置规则时，自动推送使用首个候选种子；配置后按优先级生成可解释的候选匹配结果。
+                  </p>
+                </section>
+                <section
+                  class="panel"
+                  data-setting-view="qb"
+                  id="setting-qb"
+                  aria-labelledby="qb-title"
+                  hidden
+                >
+                  <div class="section-head">
+                    <h2 id="qb-title">qBittorrent</h2>
+                    <span class="status">下载服务器</span>
+                  </div>
+                  <p class="settings-intro">
+                    配置本机可访问的 qB Web UI，支持多个服务器；正式版保存后从配置文件加载。
+                  </p>
+                  <div id="qb-entries"></div>
+                  <button type="button" class="btn" data-add-entry="qb">＋ 添加服务器</button>
+                  <p class="helper">
+                    正式版需先保存服务器配置，再测试连接；忽略 HTTPS 证书错误会降低连接安全性。
+                  </p>
+                </section>
+                <div class="settings-footer">
+                  <p>
+                    <strong id="draft-status">切换子页保留本次填写</strong>统一保存所有子页 ·
+                    预览不会写入配置
+                  </p>
+                  <button class="btn primary" type="submit">保存全部设置</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <dialog id="detail" aria-labelledby="detail-title">
+      <div class="eyebrow">MOVIE DETAILS / 预览</div>
+      <h2 id="detail-title"></h2>
+      <p id="detail-meta"></p>
+      <p>
+        影片资料、资源列表与订阅操作将沿用统一的圆角、间距与状态标签。这是视觉演示，不执行下载或订阅。
+      </p>
+      <span class="status">TMDB 资料</span>
+      <div class="dialog-actions">
+        <button class="btn" id="close-detail">关闭</button
+        ><button class="btn primary" data-notice="预览模式：未创建真实订阅。">加入订阅</button>
+      </div>
+    </dialog>
+    <dialog id="subscription-detail" aria-labelledby="subscription-detail-title">
+      <div class="eyebrow">SUBSCRIPTION / 预览</div>
+      <h2 id="subscription-detail-title"></h2>
+      <p id="subscription-detail-meta"></p>
+      <p>
+        正式版在详情页展示下载任务、订阅生命周期与硬链接结果。卡片只保留状态摘要，让片单保持清爽。
+      </p>
+      <div class="dialog-actions">
+        <button class="btn" id="close-subscription-detail">关闭</button>
+      </div>
+    </dialog>
+    <template id="category-template">
+      <div class="entry">
+        <div class="entry-header">
+          <strong>分类配置</strong
+          ><button type="button" class="text-button danger" data-remove-entry>移除</button>
+        </div>
+        <div class="field-grid">
+          <label class="field">分类名<input placeholder="如 电影" /></label>
+          <label class="field">想看文本<input placeholder="如 电影" /></label>
+          <label class="field">qB 服务器<select data-server-select></select></label>
+          <label class="field">qB 下载分类<input placeholder="如 movie" /></label>
+          <label class="field">qB 保存目录名<input placeholder="如 movies" /></label>
+          <label class="field">真实下载目录<input placeholder="/downloads/movies" /></label>
+          <label class="field">硬链接目标目录<input placeholder="/media/movies" /></label>
+        </div>
+        <p class="helper">
+          修改想看文本后，已有订阅记录可能仍保留旧文本；后续状态迁移需按订阅记录处理。
+        </p>
+      </div>
+    </template>
+    <template id="rule-template">
+      <div class="entry">
+        <div class="entry-header">
+          <strong>匹配规则</strong
+          ><button type="button" class="text-button danger" data-remove-entry>移除</button>
+        </div>
+        <div class="field-grid">
+          <label class="field">规则名<input placeholder="如 优先 2160p BluRay" /></label>
+          <label class="field">优先级<input type="number" step="1" placeholder="100" /></label>
+          <label class="field"
+            >匹配模式<select>
+              <option value="all">全部满足</option>
+              <option value="any">任一满足</option>
+            </select></label
+          >
+          <label class="field">标题关键词<input placeholder="2160p, 4K" /></label>
+          <label class="field">分辨率关键词<input placeholder="1080p, 2160p" /></label>
+          <label class="field">版本/来源关键词<input placeholder="BluRay, REMUX, WEB-DL" /></label>
+        </div>
+      </div>
+    </template>
+    <template id="qb-template">
+      <div class="entry">
+        <div class="entry-header">
+          <strong>服务器配置</strong
+          ><button type="button" class="text-button danger" data-remove-entry>移除</button>
+        </div>
+        <div class="field-grid">
+          <label class="field">显示名<input data-server-name placeholder="如 家用 NAS" /></label>
+          <label class="field">Web UI 根地址<input placeholder="http://127.0.0.1:8080" /></label>
+          <label class="field"
+            >用户名<input placeholder="预览不接收真实凭据" disabled autocomplete="off"
+          /></label>
+          <label class="field"
+            >密码<input type="password" placeholder="已配置；留空则保留（示例）" disabled
+          /></label>
+        </div>
+        <label class="check"><input type="checkbox" />忽略 HTTPS 证书错误</label>
+        <label class="check"><input type="checkbox" />清除已保存密码（预览）</label>
+        <div class="entry-actions">
+          <button type="button" class="btn" data-test-server>测试连接</button
+          ><span class="muted">请先保存后测试 · 预览不连接服务</span>
+        </div>
+      </div>
+    </template>
+    <div class="toast" role="status" id="toast" hidden></div>
+    <script>
+      const movies = [
+        {
+          title: "沙丘 2",
+          english: "DUNE",
+          year: "2024",
+          genre: "科幻 / 冒险",
+          rating: "8.2",
+          art: "dune",
+          caption: "PART TWO · THE DESERT AWAITS",
+        },
+        {
+          title: "星际穿越",
+          english: "INTERSTELLAR",
+          year: "2014",
+          genre: "科幻 / 剧情",
+          rating: "9.4",
+          art: "interstellar",
+          caption: "BEYOND SPACE AND TIME",
+        },
+        {
+          title: "降临",
+          english: "ARRIVAL",
+          year: "2016",
+          genre: "科幻 / 剧情",
+          rating: "7.8",
+          art: "arrival",
+          caption: "WHY ARE THEY HERE?",
+        },
+        {
+          title: "银翼杀手 2049",
+          english: "BLADE RUNNER",
+          year: "2017",
+          genre: "科幻 / 悬疑",
+          rating: "8.3",
+          art: "blade",
+          caption: "THE FUTURE IS STILL HUMAN",
+        },
+        {
+          title: "火星救援",
+          english: "THE MARTIAN",
+          year: "2015",
+          genre: "科幻 / 冒险",
+          rating: "8.5",
+          art: "martian",
+          caption: "BRING HIM HOME",
+        },
+      ];
+      const grid = document.querySelector("#media-grid");
+      const dialog = document.querySelector("#detail");
+      function posterMarkup(movie) {
+        return `<div class="poster ${movie.art}"><span class="rating">★ ${movie.rating}</span><div class="poster-type"><small>${movie.caption}</small><strong>${movie.english}</strong></div></div>`;
+      }
+      function renderMovies(query = "") {
+        const filtered = movies.filter((movie) =>
+          (movie.title + movie.english).toLowerCase().includes(query.toLowerCase()),
+        );
+        grid.replaceChildren();
+        filtered.forEach((movie) => {
+          const card = document.createElement("button");
+          card.className = "media-card";
+          card.setAttribute("aria-label", "查看 " + movie.title);
+          card.innerHTML = `${posterMarkup(movie)}<div class="card-title">${movie.title}</div><div class="card-meta">${movie.year} <span> · </span> ${movie.genre}</div>`;
+          card.addEventListener("click", () => {
+            document.querySelector("#detail-title").textContent = movie.title;
+            document.querySelector("#detail-meta").textContent =
+              `${movie.english} · ${movie.year} · ${movie.genre} · ${movie.rating} 分（示例）`;
+            dialog.showModal();
+          });
+          grid.append(card);
+        });
+        document.querySelector("#empty").hidden = filtered.length > 0;
+        const heading = document.querySelector("#result-heading");
+        heading.textContent = query ? "搜索结果 " : "电影 ";
+        const count = document.createElement("span");
+        count.textContent = `${filtered.length} 部示例作品`;
+        heading.append(count);
+      }
+      const subscriptions = [
+        {
+          movie: movies[0],
+          state: "downloading",
+          label: "正在下载",
+          progress: 68,
+          updated: "刚刚",
+        },
+        {
+          movie: movies[1],
+          state: "completed",
+          label: "硬链接完成",
+          progress: 100,
+          updated: "10 分钟前",
+        },
+        {
+          movie: movies[2],
+          state: "waiting",
+          label: "等待资源",
+          progress: 0,
+          updated: "30 分钟前",
+        },
+      ];
+      function renderSubscriptions(filter = "all") {
+        const container = document.querySelector("#subscription-grid");
+        container.replaceChildren();
+        subscriptions
+          .filter((item) => filter === "all" || item.state === filter)
+          .forEach((item) => {
+            const card = document.createElement("button");
+            card.className = "media-card subscription-card";
+            card.setAttribute("aria-label", `查看订阅 ${item.movie.title}，${item.label}`);
+            card.innerHTML = `${posterMarkup(item.movie)}<div class="subscription-meta"><div class="card-title">${item.movie.title}</div><div class="card-meta">${item.movie.year} · 电影</div><span class="status ${item.state === "waiting" ? "wait" : ""}">${item.label}</span><div class="progress" aria-hidden="true"><span style="width:${item.progress}%"></span></div><div class="card-meta"><span>${item.state === "waiting" ? "尚未开始" : item.progress + "%"}</span><span>${item.updated}</span></div></div>`;
+            card.addEventListener("click", () => {
+              document.querySelector("#subscription-detail-title").textContent = item.movie.title;
+              document.querySelector("#subscription-detail-meta").textContent =
+                `${item.label} · 下载 ${item.progress}% · 更新于${item.updated}（示例）`;
+              document.querySelector("#subscription-detail").showModal();
+            });
+            container.append(card);
+          });
+      }
+      document.querySelectorAll("[data-filter]").forEach((button) =>
+        button.addEventListener("click", () => {
+          document.querySelectorAll("[data-filter]").forEach((filter) => {
+            filter.classList.toggle("active", filter === button);
+            filter.setAttribute("aria-pressed", String(filter === button));
+          });
+          renderSubscriptions(button.dataset.filter);
+        }),
+      );
+      document
+        .querySelector("#close-subscription-detail")
+        .addEventListener("click", () => document.querySelector("#subscription-detail").close());
+      function updateBreadcrumb() {
+        const page = document.querySelector("[data-page].active");
+        const title = page.childNodes[1].textContent;
+        const setting = document.querySelector("[data-setting].active").textContent;
+        document.querySelector("#breadcrumb").textContent =
+          page.dataset.page === "settings" ? `${title} / ${setting}` : title;
+      }
+      function showSetting(key) {
+        document.querySelectorAll("[data-setting]").forEach((button) => {
+          const active = button.dataset.setting === key;
+          button.classList.toggle("active", active);
+          if (active) button.setAttribute("aria-current", "page");
+          else button.removeAttribute("aria-current");
+        });
+        document.querySelectorAll("[data-setting-view]").forEach((panel) => {
+          panel.hidden = panel.dataset.settingView !== key;
+        });
+        updateBreadcrumb();
+      }
+      document
+        .querySelectorAll("[data-setting]")
+        .forEach((button) =>
+          button.addEventListener("click", () => showSetting(button.dataset.setting)),
+        );
+      const settingsForm = document.querySelector("#settings-form");
+      function markDraft() {
+        document.querySelector("#draft-status").textContent = "有演示修改 · 切换子页不会丢失";
+      }
+      settingsForm.addEventListener("input", markDraft);
+      // Reveal the right subpage before native validation focuses an invalid field.
+      settingsForm.addEventListener(
+        "invalid",
+        (event) => {
+          showSetting(event.target.closest("[data-setting-view]").dataset.settingView);
+        },
+        true,
+      );
+      let entryId = 0;
+      function syncServers() {
+        const servers = [...document.querySelectorAll("#qb-entries .entry")];
+        document.querySelectorAll("[data-server-select]").forEach((select) => {
+          const previous = select.value;
+          select.replaceChildren(
+            new Option(servers.length ? "请选择 qB 服务器" : "请先添加 qB 服务器", ""),
+          );
+          servers.forEach((server) =>
+            select.add(
+              new Option(
+                server.querySelector("[data-server-name]").value || "未命名服务器",
+                server.dataset.entryId,
+              ),
+            ),
+          );
+          select.value = servers.some((server) => server.dataset.entryId === previous)
+            ? previous
+            : "";
+          select.disabled = !servers.length;
+        });
+      }
+      function addEntry(kind, values = []) {
+        const entry = document
+          .querySelector(`#${kind}-template`)
+          .content.firstElementChild.cloneNode(true);
+        entry.dataset.entryId = String(++entryId);
+        entry.querySelectorAll(".field input,.field select").forEach((input, index) => {
+          if (values[index] !== undefined) input.value = values[index];
+        });
+        entry.querySelector("[data-remove-entry]").addEventListener("click", () => {
+          entry.remove();
+          syncServers();
+          markDraft();
+          document.querySelector(`[data-add-entry="${kind}"]`).focus();
+        });
+        entry.querySelector("[data-server-name]")?.addEventListener("input", syncServers);
+        entry
+          .querySelector("[data-test-server]")
+          ?.addEventListener("click", () =>
+            notify("预览模式：未连接 qBittorrent。正式版请先保存，再测试已保存配置。"),
+          );
+        document.querySelector(`#${kind}-entries`).append(entry);
+        syncServers();
+        return entry;
+      }
+      document.querySelectorAll("[data-add-entry]").forEach((button) =>
+        button.addEventListener("click", () => {
+          const entry = addEntry(button.dataset.addEntry);
+          markDraft();
+          entry.querySelector("input").focus();
+        }),
+      );
+      document.querySelector("[data-clear-admin]").addEventListener("change", (event) => {
+        document.querySelector("#admin-warning").hidden = !event.target.checked;
+      });
+      document.querySelector("#qr-preview").addEventListener("click", () => {
+        document.querySelector("#qr-placeholder").hidden = false;
+        document.querySelector("#qr-status").textContent = "二维码展示区 · 不发起真实登录";
+      });
+      function updateAutomation() {
+        const enabled = document.querySelector("#automation-enabled").checked;
+        const dryRun = document.querySelector("#automation-dry-run").checked;
+        const status = document.querySelector("#automation-status");
+        status.classList.toggle("warning", enabled);
+        status.textContent = !enabled
+          ? "当前关闭：不会运行自动订阅流水线。"
+          : dryRun
+            ? "试运行会访问外部服务并更新调度状态，但不会推送 qB 或创建硬链接。"
+            : "实时模式会自动推送 qB，并可能在下载完成后创建硬链接；正式版保存时需要再次确认。";
+      }
+      document.querySelector("#automation-enabled").addEventListener("change", updateAutomation);
+      document.querySelector("#automation-dry-run").addEventListener("change", updateAutomation);
+      document.querySelectorAll("[data-page]").forEach((button) =>
+        button.addEventListener("click", () => {
+          document.querySelectorAll("[data-page]").forEach((nav) => {
+            nav.classList.toggle("active", nav === button);
+            if (nav === button) nav.setAttribute("aria-current", "page");
+            else nav.removeAttribute("aria-current");
+          });
+          document.querySelectorAll("[data-view]").forEach((view) => {
+            view.hidden = view.dataset.view !== button.dataset.page;
+          });
+          updateBreadcrumb();
+        }),
+      );
+      document.querySelectorAll("[data-source]").forEach((button) =>
+        button.addEventListener("click", () => {
+          document.querySelectorAll("[data-source]").forEach((source) => {
+            source.classList.toggle("active", source === button);
+            source.setAttribute("aria-pressed", String(source === button));
+          });
+          document.querySelector("#source-label").textContent = button.dataset.source;
+          notify(`已切换到 ${button.dataset.source} 的样式预览，仍展示同一组示例数据。`);
+        }),
+      );
+      document.querySelector("#search-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        renderMovies(document.querySelector("#query").value.trim());
+      });
+      document.querySelector("#reset").addEventListener("click", () => {
+        document.querySelector("#query").value = "";
+        renderMovies();
+      });
+      document.querySelector("#close-detail").addEventListener("click", () => dialog.close());
+      let toastTimer;
+      function notify(message) {
+        const toast = document.querySelector("#toast");
+        toast.textContent = message;
+        toast.hidden = false;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          toast.hidden = true;
+        }, 3500);
+      }
+      document.querySelectorAll("[data-notice]").forEach((button) =>
+        button.addEventListener("click", () => {
+          if (dialog.open) dialog.close();
+          notify(button.dataset.notice);
+        }),
+      );
+      document.querySelector("#settings-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        notify("样式预览：设置未保存，也未发送任何网络请求。");
+      });
+      const initialServer = addEntry("qb", ["家用 NAS", "http://127.0.0.1:8080"]);
+      const initialCategory = addEntry("category", [
+        "电影",
+        "电影",
+        "",
+        "movie",
+        "movies",
+        "/downloads/movies",
+        "/media/movies",
+      ]);
+      initialCategory.querySelector("[data-server-select]").value = initialServer.dataset.entryId;
+      addEntry("rule", ["优先 2160p BluRay", "100", "all", "2160p, 4K", "2160p", "BluRay, REMUX"]);
+      renderSubscriptions();
+      renderMovies();
+    </script>
+  </body>
+</html>

@@ -126,7 +126,7 @@ describe("current App route behavior", () => {
 
     expect(router.currentRoute.value.name).toBe("media-detail");
     expect(wrapper.get(".d-head h3").text()).toBe("深链电影");
-    expect(wrapper.get(".nav-item.is-active").text()).toBe("主功能");
+    expect(wrapper.get(".nav-item.is-active").text()).toBe("影视检索");
   });
 
   it("restores a subscription detail deep link", async () => {

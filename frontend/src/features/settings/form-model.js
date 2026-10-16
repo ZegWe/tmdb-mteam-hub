@@ -90,7 +90,7 @@ export function subscriptionWatcherRuntimeBanner({ runtimeLoaded, watcher } = {}
       key: "loading",
       tone: "info",
       title: "订阅自动化状态读取中",
-      message: "正在读取后端运行配置；加载完成前不会推断自动化模式。",
+      message: "正在读取运行配置。",
     };
   }
 
@@ -100,23 +100,22 @@ export function subscriptionWatcherRuntimeBanner({ runtimeLoaded, watcher } = {}
       key: "disabled",
       tone: "info",
       title: "订阅自动化已停用",
-      message: "后台 watcher 不会自动搜索、推送 qB 或创建硬链接；手动操作仍由后端逐次校验。",
+      message: "在设置中启用，即可自动同步、检索与下载。",
     };
   }
   if (runtime.dry_run) {
     return {
       key: "dry_run",
-      tone: "warning",
+      tone: "info",
       title: "订阅自动化：试运行",
-      message: "会执行轮询与匹配并更新调度状态，但不会推送 qB 或创建硬链接。",
+      message: "同步片单并匹配资源，不下载或创建硬链接。",
     };
   }
   return {
     key: "live",
-    tone: "danger",
-    title: "订阅自动化：实时执行",
-    message:
-      "已启用真实副作用：匹配成功后可能推送 qB，并在下载完成后创建硬链接；请确认下载与目标目录配置正确。",
+    tone: "success",
+    title: "订阅自动化：运行中",
+    message: "自动同步、检索、下载与硬链接。",
   };
 }
 

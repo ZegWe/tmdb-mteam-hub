@@ -2,9 +2,18 @@
   <div class="app-shell">
     <aside class="side-nav menu bg-base-100 text-base-content" aria-label="主导航">
       <div class="brand">
-        <h1>影视检索</h1>
-        <p class="sub">TMDB / 豆瓣 / M-Team</p>
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <rect x="4" y="3" width="16" height="18" rx="3" />
+            <path d="M8 3v18M16 3v18M4 8h4m-4 8h4m8-8h4m-4 8h4" />
+          </svg>
+        </span>
+        <div>
+          <h1>影视检索</h1>
+          <p class="sub">MEDIA HUB</p>
+        </div>
       </div>
+      <p class="nav-caption">工作空间</p>
       <nav class="nav-list" aria-label="页面">
         <button
           type="button"
@@ -13,7 +22,11 @@
           :aria-current="navPage === 'main' ? 'page' : undefined"
           @click="go('main')"
         >
-          主功能
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.5" cy="10.5" r="6.5" />
+            <path d="m16 16 4.5 4.5" />
+          </svg>
+          影视检索
         </button>
         <button
           type="button"
@@ -22,6 +35,10 @@
           :aria-current="navPage === 'subscriptions' ? 'page' : undefined"
           @click="go('subscriptions')"
         >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="4" y="4" width="6" height="16" rx="1" />
+            <path d="M14 4v16m4-15 3 14M6 8h2" />
+          </svg>
           订阅
         </button>
         <button
@@ -31,6 +48,10 @@
           :aria-current="navPage === 'logs' ? 'page' : undefined"
           @click="go('logs')"
         >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="4" y="3" width="16" height="18" rx="2" />
+            <path d="M8 8h8M8 12h8M8 16h5" />
+          </svg>
           日志
         </button>
         <button
@@ -40,6 +61,11 @@
           :aria-current="navPage === 'settings' ? 'page' : undefined"
           @click="go('settings')"
         >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M4 17h16" />
+            <circle cx="9" cy="7" r="3" />
+            <circle cx="15" cy="17" r="3" />
+          </svg>
           设置
         </button>
       </nav>
@@ -83,6 +109,12 @@
     </aside>
 
     <div class="app-content">
+      <header class="workspace-bar">
+        <span
+          >工作空间 <span class="breadcrumb-divider">/</span> <strong>{{ pageLabel }}</strong></span
+        >
+        <span class="workspace-services">TMDB / 豆瓣 / M-Team</span>
+      </header>
       <div v-if="error" id="err" class="banner err alert alert-error" role="alert">{{ error }}</div>
       <div v-if="toast.message" id="toast" class="app-toast" role="status" aria-live="polite">
         <div class="app-toast-message" :class="toast.kind === 'err' ? 'toast-err' : 'toast-ok'">
@@ -146,6 +178,15 @@ function applyThemeScheme(scheme) {
 const route = useRoute();
 const router = useRouter();
 const navPage = computed(() => String(route.meta.navPage || ""));
+const pageLabel = computed(
+  () =>
+    ({
+      main: "影视检索",
+      subscriptions: "我的订阅",
+      logs: "运行日志",
+      settings: "偏好设置",
+    })[navPage.value] || "影视中心",
+);
 const error = ref("");
 const toast = reactive({ message: "", kind: "ok", timer: 0 });
 const themeMode = ref(readStoredThemeMode());

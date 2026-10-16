@@ -88,10 +88,14 @@ test("subscription detail observes one polling stream and exposes no legacy side
 
 test("authenticated settings save returns redacted state", async ({ page }) => {
   await page.goto("/#/settings");
+  await page
+    .getByRole("navigation", { name: "设置子页面" })
+    .getByRole("button", { name: "API 密钥" })
+    .click();
   const mteamKey = page.getByRole("textbox", { name: "M-Team OpenAPI Key", exact: true });
   await expect(mteamKey).toHaveValue("");
   await mteamKey.fill("browser-fixture-replacement-secret");
-  await page.getByRole("button", { name: "保存设置" }).click();
+  await page.getByRole("button", { name: "保存全部设置" }).click();
 
   await expect(page.locator("#settings-save-status")).toHaveText("设置已保存");
   await expect(mteamKey).toHaveValue("");
@@ -115,4 +119,74 @@ test("direct media-detail deep link survives a full reload", async ({ page }) =>
   await expect(page.getByRole("heading", { level: 1, name: "浏览器验收电影详情" })).toBeVisible();
   await expect(page.getByText("主详情不等待可选 M-Team 请求即可渲染。")).toBeVisible();
   expect((await fixtureState(page)).mteamRequests).toBe(0);
+});
+
+test("settings subpages preserve drafts and reveal invalid hidden fields before saving", async ({
+  page,
+}) => {
+  await page.goto("/#/settings");
+  const navigation = page.getByRole("navigation", { name: "设置子页面" });
+  await expect(page.locator("#settings-automation")).toBeVisible();
+  for (const name of [
+    "订阅自动化",
+    "订阅分类",
+    "种子匹配规则",
+    "qBittorrent",
+    "API 密钥",
+    "豆瓣登录",
+    "管理访问",
+  ]) {
+    await navigation.getByRole("button", { name, exact: true }).click();
+    await expect(page.locator(".settings-section:visible")).toHaveCount(1);
+    await expect(page.locator(".settings-section:visible h2")).toHaveText(name);
+  }
+  const token = page.locator("#settings-access input[type=password]");
+  await token.fill("short");
+  await navigation.getByRole("button", { name: "API 密钥" }).click();
+  await page.getByRole("button", { name: "保存全部设置" }).click();
+  await expect(page.locator("#settings-access")).toBeVisible();
+  await expect(token).toBeFocused();
+  expect((await fixtureState(page)).settingsWrites).toBe(0);
+  await token.fill("");
+
+  await navigation.getByRole("button", { name: "qBittorrent", exact: true }).click();
+  await page.getByRole("button", { name: "添加服务器", exact: true }).click();
+  const serverName = page.getByLabel("显示名", { exact: true });
+  await serverName.fill("跨页草稿");
+  await page.getByLabel("Web UI 根地址", { exact: true }).fill("http://127.0.0.1:8080");
+  await navigation.getByRole("button", { name: "订阅分类", exact: true }).click();
+  await page.getByRole("button", { name: "添加分类", exact: true }).click();
+  await expect(
+    page.getByRole("combobox", { name: "qB 服务器", exact: true }).locator("option:checked"),
+  ).toContainText("跨页草稿");
+  await page.getByLabel("分类名", { exact: true }).fill("电影");
+  await page.getByLabel("想看文本", { exact: true }).fill("电影");
+  await page.getByLabel("qB 下载分类", { exact: true }).fill("movie");
+  await page.getByLabel("qB 保存目录名", { exact: true }).fill("movies");
+  await page.getByLabel("真实下载目录", { exact: true }).fill("/downloads/movies");
+  await page.getByLabel("硬链接目标目录", { exact: true }).fill("/media/movies");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await navigation.getByRole("button", { name: "qBittorrent", exact: true }).click();
+  await expect(serverName).toHaveValue("跨页草稿");
+  await navigation.getByRole("button", { name: "API 密钥", exact: true }).click();
+  await page.getByRole("button", { name: "保存全部设置" }).click();
+  await expect(page.locator("#settings-save-status")).toHaveText("设置已保存");
+  expect((await fixtureState(page)).lastSettingsPayload.qb_servers[0].name).toBe("跨页草稿");
+});
+
+test("subscription poster filters keep attention states accessible without automation alerts", async ({
+  page,
+}) => {
+  await page.goto("/#/subscriptions");
+  const filters = page.getByRole("group", { name: "订阅状态筛选" });
+  await expect(page.locator(".subscription-card")).toHaveCount(1);
+  await expect(page.locator(".subscription-watcher-banner")).not.toHaveClass(/alert/);
+  await filters.getByRole("button", { name: "需关注" }).click();
+  await expect(page.locator(".subscription-card")).toHaveCount(0);
+  await expect(page.getByText("该状态下暂无订阅")).toBeVisible();
+  await filters.getByRole("button", { name: "全部", exact: true }).click();
+  await expect(page.locator(".subscription-card")).toHaveCount(1);
+  await page.locator(".subscription-card").press("Enter");
+  await expect(page.locator("#page-subscription-detail")).toBeVisible();
+  await expect(page.locator(".subscription-watcher-banner")).toHaveCount(0);
 });

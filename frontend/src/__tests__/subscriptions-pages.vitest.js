@@ -490,9 +490,7 @@ describe("subscription lazy route pages", () => {
     );
     expect(wrapper.get(".subscription-state-graph").exists()).toBe(true);
     expect(wrapper.get(".subscription-detail-download-progress").text()).toContain("50%");
-    expect(wrapper.get(".subscription-watcher-banner").attributes("data-watcher-mode")).toBe(
-      "disabled",
-    );
+    expect(wrapper.find(".subscription-watcher-banner").exists()).toBe(false);
     expect(wantedRequests).toBe(1);
     expect(detailRequests).toBe(1);
 
@@ -871,19 +869,19 @@ describe("subscription lazy route pages", () => {
       label: "disabled",
       watcher: { enabled: false, dry_run: false },
       mode: "disabled",
-      expected: ["订阅自动化已停用", "后台 watcher 不会自动搜索"],
+      expected: ["订阅自动化已停用", "在设置中启用"],
     },
     {
       label: "dry-run",
       watcher: { enabled: true, dry_run: true },
       mode: "dry_run",
-      expected: ["订阅自动化：试运行", "不会推送 qB 或创建硬链接"],
+      expected: ["订阅自动化：试运行", "不下载或创建硬链接"],
     },
     {
       label: "live",
       watcher: { enabled: true, dry_run: false },
       mode: "live",
-      expected: ["订阅自动化：实时执行", "真实副作用", "推送 qB", "创建硬链接"],
+      expected: ["订阅自动化：运行中", "自动同步、检索、下载与硬链接"],
     },
   ])(
     "renders the $label watcher mode from runtime settings",
@@ -903,6 +901,8 @@ describe("subscription lazy route pages", () => {
       const banner = wrapper.get(".subscription-watcher-banner");
 
       expect(banner.attributes("data-watcher-mode")).toBe(mode);
+      expect(banner.classes()).not.toContain("alert");
+      expect(banner.attributes("role")).toBe("status");
       for (const text of expected) expect(banner.text()).toContain(text);
     },
   );
@@ -925,7 +925,7 @@ describe("subscription lazy route pages", () => {
     const banner = () => wrapper.get(".subscription-watcher-banner");
 
     expect(banner().attributes("data-watcher-mode")).toBe("loading");
-    expect(banner().text()).toContain("加载完成前不会推断自动化模式");
+    expect(banner().text()).toContain("正在读取运行配置");
 
     resolveConfig(
       jsonResponse(configSnapshot({ subscription_watcher: { enabled: true, dry_run: true } })),
