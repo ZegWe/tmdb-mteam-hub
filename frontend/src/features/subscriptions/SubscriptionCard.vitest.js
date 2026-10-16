@@ -49,21 +49,28 @@ describe("SubscriptionCard", () => {
       }),
       expectedStatus: "下载中",
     },
-  ])("renders $label with title, year, image, and status badge", ({ value, expectedStatus }) => {
-    const wrapper = mount(SubscriptionCard, { props: { record: value } });
+  ])(
+    "renders $label with only a title below the poster and an overlay status",
+    ({ value, expectedStatus }) => {
+      const wrapper = mount(SubscriptionCard, { props: { record: value } });
 
-    expect(wrapper.get(".title").text()).toBe(value.title);
-    expect(wrapper.get(".subtle").text()).toBe(String(value.release_year || value.subject_id));
-    expect(wrapper.get("img").attributes("src")).toBe("https://example.test/poster.jpg");
-    expect(wrapper.get(".subscription-status").text()).toBe(expectedStatus);
+      expect(wrapper.get(".title").text()).toBe(value.title);
+      expect(wrapper.get(".subscription-card-meta").text()).toBe(value.title);
+      expect(wrapper.get(".subscription-card-meta").element.children).toHaveLength(1);
+      expect(wrapper.find(".subtle").exists()).toBe(false);
+      expect(wrapper.get("img").attributes("src")).toBe("https://example.test/poster.jpg");
+      expect(wrapper.get(".subscription-card-cover .subscription-status").text()).toBe(
+        expectedStatus,
+      );
 
-    // No capability badges on cards
-    const cardText = wrapper.text();
-    expect(cardText).not.toContain("可调度");
-    expect(cardText).not.toContain("不可调度");
-    expect(cardText).not.toContain("已停用");
-    expect(cardText).not.toContain("TV 未开放");
-  });
+      // No capability badges on cards
+      const cardText = wrapper.text();
+      expect(cardText).not.toContain("可调度");
+      expect(cardText).not.toContain("不可调度");
+      expect(cardText).not.toContain("已停用");
+      expect(cardText).not.toContain("TV 未开放");
+    },
+  );
 
   it("emits one semantic open intent for click and keyboard activation", async () => {
     const value = record();
@@ -79,7 +86,7 @@ describe("SubscriptionCard", () => {
     expect(wrapper.emitted("open")).toEqual([[value], [value]]);
   });
 
-  it("only shows download progress when the record supplies it", async () => {
+  it("omits progress and timestamps even when supplied or completed", async () => {
     const wrapper = mount(SubscriptionCard, {
       props: { record: record({ lifecycle_state: "downloading" }) },
     });
@@ -87,10 +94,11 @@ describe("SubscriptionCard", () => {
     await wrapper.setProps({
       record: record({ downloads: [{ progress: 0.68 }], updated_at: 1700000000 }),
     });
-    expect(wrapper.get("progress").attributes("aria-label")).toBe("下载进度 68%");
-    expect(wrapper.get("time").text()).toContain("更新");
+    expect(wrapper.find("progress").exists()).toBe(false);
+    expect(wrapper.find("time").exists()).toBe(false);
     await wrapper.setProps({ record: record({ lifecycle_state: "completed" }) });
-    expect(wrapper.get("progress").attributes("value")).toBe("1");
+    expect(wrapper.find("progress").exists()).toBe(false);
+    expect(wrapper.get(".subscription-card-meta").text()).toBe("普通电影");
     wrapper.unmount();
   });
 });

@@ -97,23 +97,22 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    transform 0.15s ease;
+  transition: transform 0.15s ease;
 }
 
 .subscription-card:hover {
-  border-color: var(--accent-dim);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
 }
 
 .subscription-card-cover {
   position: relative;
   width: 100%;
+  overflow: hidden;
+  border-radius: 10px;
   background: var(--muted-bg);
 }
 
@@ -175,7 +174,7 @@
 
 .subscription-card-meta {
   min-height: 0;
-  padding: 0.85rem;
+  padding: 0.85rem 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -185,48 +184,19 @@
 }
 
 .subscription-card .subscription-status {
-  margin-top: 0.75rem;
-  max-width: 100%;
-  background: var(--accent-bg);
-  border-color: transparent;
-}
-
-.subscription-card-progress {
-  width: 100%;
-  margin-top: 0.75rem;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--muted);
-  font-size: 0.7rem;
-}
-.subscription-card-progress progress {
-  appearance: none;
-  width: 100%;
-  min-width: 0;
-  height: 4px;
-  border: 0;
-  border-radius: 4px;
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  max-width: calc(100% - 1rem);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  display: block;
+  height: auto;
   overflow: hidden;
-  background: var(--muted-bg);
-}
-.subscription-card-progress progress::-webkit-progress-bar {
-  background: var(--muted-bg);
-}
-.subscription-card-progress progress::-webkit-progress-value {
-  background: var(--accent);
-}
-.subscription-card-progress progress::-moz-progress-bar {
-  background: var(--accent);
-}
-.subscription-card-updated {
-  margin-top: 0.75rem;
-  color: var(--muted);
-  font-size: 0.65rem;
+  text-overflow: ellipsis;
 }
 
-.subscription-card .title,
-.subscription-card .subtle {
+.subscription-card .title {
   width: 100%;
   display: block;
   overflow: hidden;
@@ -240,12 +210,6 @@
 .subscription-card .title {
   font-size: 0.82rem;
   font-weight: 600;
-}
-
-.subscription-card .subtle {
-  margin-top: 0.2rem;
-  color: var(--muted);
-  font-size: 0.72rem;
 }
 
 .subscription-state-graph {

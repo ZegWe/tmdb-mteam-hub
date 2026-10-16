@@ -32,7 +32,18 @@ const routes = [
     heading: "订阅",
     headingSelector: "#page-subscriptions > .top h1",
     prepare: async (page) => {
-      await expect(page.getByRole("link", { name: "打开订阅 浏览器订阅" })).toBeVisible();
+      const card = page.getByRole("link", { name: "打开订阅 浏览器订阅" });
+      await expect(card).toBeVisible();
+      await expect(card.locator(".subscription-card-meta")).toHaveText("浏览器订阅");
+      await expect(card.locator(".subtle, progress, time")).toHaveCount(0);
+      const poster = await card.locator(".subscription-card-cover").boundingBox();
+      const badge = await card.locator(".subscription-status").boundingBox();
+      const title = await card.locator(".title").boundingBox();
+      expect(badge.x).toBeGreaterThanOrEqual(poster.x);
+      expect(badge.y).toBeGreaterThanOrEqual(poster.y);
+      expect(badge.x + badge.width).toBeLessThanOrEqual(poster.x + poster.width);
+      expect(badge.y + badge.height).toBeLessThanOrEqual(poster.y + poster.height);
+      expect(title.y).toBeGreaterThanOrEqual(poster.y + poster.height);
     },
   },
   {

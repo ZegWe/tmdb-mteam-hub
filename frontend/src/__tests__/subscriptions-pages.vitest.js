@@ -521,7 +521,7 @@ describe("subscription lazy route pages", () => {
     const { wrapper } = await mountAt("/subscriptions", fetchMock);
 
     expect(wrapper.get(".subscription-card .title").text()).toBe("分页摘要订阅");
-    expect(wrapper.get(".subscription-card .subtle").text()).toContain("2026");
+    expect(wrapper.find(".subscription-card .subtle").exists()).toBe(false);
   });
 
   it("loads the nested detail DTO by ID and reuses the revision-aware cache after navigation", async () => {
