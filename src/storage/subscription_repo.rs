@@ -313,6 +313,13 @@ impl SqliteSubscriptionRepository {
         self.executor.preflight()
     }
 
+    /// Promote metadata saved before detail_title existed without rerunning any
+    /// workflow. Keep the payload and list projection in sync, including for
+    /// completed/inactive records that will never revisit the metadata node.
+    pub(crate) fn backfill_metadata_titles(&self) -> RepoFuture<usize> {
+        self.executor.run(backfill_metadata_titles)
+    }
+
     pub(crate) fn force_retry(
         &self,
         key: SubscriptionKey,
@@ -592,6 +599,76 @@ fn confirm_candidate(
         .commit()
         .map_err(|error| map_write_error("commit candidate confirmation", error))?;
     Ok(result.summary().clone())
+}
+
+fn backfill_metadata_titles(connection: &mut Connection) -> RepositoryResult<usize> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_write_error("begin metadata title backfill", error))?;
+    let keys = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT account_key, subject_id FROM wanted_subscription_records
+                  WHERE json_extract(record_json, '$.source.detail_title') IS NULL
+                    AND json_type(record_json, '$.source.original_title') = 'text'
+                    AND length(trim(json_extract(record_json, '$.source.original_title'))) > 0",
+            )
+            .map_err(|error| map_read_error("select legacy metadata titles", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| map_read_error("query legacy metadata titles", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_read_error("read legacy metadata title keys", error))?;
+        rows
+    };
+    let mut repaired = 0;
+    for (account_key, subject_id) in keys {
+        let key = SubscriptionKey::try_new(account_key, subject_id)?;
+        let current = load_detail(&transaction, key.clone())?;
+        let revision = command_integer("revision", current.summary().head.revision.value())?;
+        if revision == i64::MAX {
+            return Err(corrupt("metadata title backfill would overflow revision"));
+        }
+        let mut payload = current.payload().clone();
+        // The original name is already authoritative metadata. Do not infer a
+        // clean title by splitting the potentially concatenated list title.
+        let title = payload.source.original_title.as_deref().unwrap().trim();
+        if title.is_empty() {
+            continue;
+        }
+        payload.source.detail_title = Some(title.to_string());
+        let projection = SubscriptionProjection::from_source(&payload.source)?;
+        let record_json =
+            serde_json::to_string(&payload).map_err(|error| RepositoryError::Internal {
+                message: format!("encode metadata title backfill: {error}"),
+            })?;
+        let changed = transaction
+            .execute(
+                "UPDATE wanted_subscription_records
+                    SET title = ?3, record_json = ?4, revision = revision + 1
+                  WHERE account_key = ?1 AND subject_id = ?2 AND revision = ?5",
+                params![
+                    key.account_key,
+                    key.subject_id,
+                    projection.title,
+                    record_json,
+                    revision
+                ],
+            )
+            .map_err(|error| map_write_error("backfill metadata title", error))?;
+        if changed != 1 {
+            return Err(corrupt(
+                "metadata title backfill did not update exactly one row",
+            ));
+        }
+        repaired += changed;
+    }
+    transaction
+        .commit()
+        .map_err(|error| map_write_error("commit metadata title backfill", error))?;
+    Ok(repaired)
 }
 
 fn force_retry(
@@ -1854,6 +1931,93 @@ SELECT account_key, ?3, revision, active, inactive_at, last_seen_snapshot_id,
             .await
             .unwrap();
         repository.load_detail(key(subject_id)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn metadata_title_backfill_repairs_completed_history_without_restarting_work() {
+        for inactive in [false, true] {
+            let fixture = fresh_fixture(&format!("legacy-title-{inactive}")).await;
+            let repository = make_repository(&fixture.path);
+            seed_retry_artifacts(
+                &repository,
+                "rows-movie-002",
+                &fixture.root.join("source.mkv"),
+                &fixture.root.join("target.mkv"),
+            )
+            .await;
+            let connection = Connection::open(&fixture.path).unwrap();
+            connection.execute(
+                "UPDATE wanted_subscription_records
+                    SET record_json = json_set(record_json, '$.source.original_title', '  Original Name  ')
+                  WHERE account_key = ?1 AND subject_id = 'rows-movie-002'",
+                [ACCOUNT],
+            ).unwrap();
+            if inactive {
+                connection
+                    .execute(
+                        "UPDATE wanted_subscription_records
+                        SET active = 0, inactive_at = ?2, schedulable = 0,
+                            blocked_reason = 'subscription_inactive', next_attempt_at = NULL
+                      WHERE account_key = ?1 AND subject_id = 'rows-movie-002'",
+                        params![ACCOUNT, SEED_AT as i64],
+                    )
+                    .unwrap();
+            }
+            let neighbors = unrelated_storage_snapshot(&connection, ACCOUNT, "rows-movie-002");
+            drop(connection);
+            let before = repository.load_detail(key("rows-movie-002")).await.unwrap();
+            assert!(before.payload().source.detail_title.is_none());
+            assert_ne!(before.summary().projection.title, "Original Name");
+
+            assert_eq!(repository.backfill_metadata_titles().await.unwrap(), 1);
+            let after = repository.load_detail(key("rows-movie-002")).await.unwrap();
+            assert_eq!(after.summary().projection.title, "Original Name");
+            assert_eq!(
+                after.summary().head.lifecycle_state,
+                SubscriptionLifecycleState::Completed
+            );
+            assert_eq!(
+                after.summary().head.revision.value(),
+                before.summary().head.revision.value() + 1
+            );
+            let mut expected_head = before.summary().head.clone();
+            expected_head.revision = after.summary().head.revision;
+            assert_eq!(after.summary().head, expected_head);
+            assert_eq!(
+                after.summary().attention_tags,
+                before.summary().attention_tags
+            );
+            let mut expected_payload = before.payload().clone();
+            expected_payload.source.detail_title = Some("Original Name".to_string());
+            assert_eq!(after.payload(), &expected_payload);
+            let observed_source = WantedSourcePayload {
+                title: "Long list title returned on a later refresh".to_string(),
+                ..WantedSourcePayload::default()
+            };
+            expected_payload
+                .merge_snapshot_observation(&observed_source, SEED_AT + 2)
+                .unwrap();
+            assert_eq!(
+                super::SubscriptionProjection::from_source(&expected_payload.source)
+                    .unwrap()
+                    .title,
+                "Original Name"
+            );
+            let connection = Connection::open(&fixture.path).unwrap();
+            assert_eq!(
+                unrelated_storage_snapshot(&connection, ACCOUNT, "rows-movie-002"),
+                neighbors
+            );
+            drop(connection);
+
+            // Reopening the database must not rewrite the same row again.
+            let reopened = make_repository(&fixture.path);
+            assert_eq!(reopened.backfill_metadata_titles().await.unwrap(), 0);
+            assert_eq!(
+                reopened.load_detail(key("rows-movie-002")).await.unwrap(),
+                after
+            );
+        }
     }
 
     #[tokio::test]

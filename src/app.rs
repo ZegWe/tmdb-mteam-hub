@@ -294,6 +294,13 @@ pub async fn bootstrap(
         })
         .await??;
     let subscription_repository = open_latest_subscription_repository(&paths).await?;
+    let repaired_titles = subscription_repository.backfill_metadata_titles().await?;
+    if repaired_titles > 0 {
+        tracing::info!(
+            repaired_titles,
+            "backfilled legacy subscription metadata titles"
+        );
+    }
     let worker_options = SubscriptionWorkerOptions::try_new(
         options.execution_batch_size,
         options.execution_concurrency,
