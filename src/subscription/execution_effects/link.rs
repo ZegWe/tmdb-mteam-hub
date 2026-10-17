@@ -55,29 +55,52 @@ pub(super) fn plans(
         .flat_map(|link| link.files.iter())
         .map(|file| (file.target_path.as_str(), file.outcome))
         .collect::<BTreeMap<_, _>>();
-    let plans = files
+    let relative_paths = files
         .iter()
-        .filter_map(|file| {
-            safe_relative_path(&file.name).map(|relative| {
-                let source_path = source_root.join(&relative);
-                let target_path = target_root.join(relative);
-                let persisted_outcome = previous
-                    .get(target_path.to_string_lossy().as_ref())
-                    .copied()
-                    .unwrap_or(LinkFileOutcome::Pending);
-                LinkPlan {
-                    source_path,
-                    target_path,
-                    size: file.size,
-                    persisted_outcome,
-                }
-            })
+        .filter_map(|file| safe_relative_path(&file.name).map(|relative| (file, relative)))
+        .collect::<Vec<_>>();
+    let paths = relative_paths
+        .iter()
+        .map(|(_, path)| path.as_path())
+        .collect::<Vec<_>>();
+    let torrent_root = common_top_level_directory(&paths);
+    let plans = relative_paths
+        .iter()
+        .map(|(file, relative)| {
+            let source_path = source_root.join(relative);
+            let target_relative = torrent_root
+                .and_then(|root| relative.strip_prefix(root).ok())
+                .unwrap_or(relative);
+            let target_path = target_root.join(target_relative);
+            let persisted_outcome = previous
+                .get(target_path.to_string_lossy().as_ref())
+                .copied()
+                .unwrap_or(LinkFileOutcome::Pending);
+            LinkPlan {
+                source_path,
+                target_path,
+                size: file.size,
+                persisted_outcome,
+            }
         })
         .collect::<Vec<_>>();
     if plans.is_empty() {
         return Err("qB file list has no safe relative files to link".to_string());
     }
     Ok(plans)
+}
+
+// Strip only a directory shared by every file, never individual parent paths.
+fn common_top_level_directory<'a>(paths: &[&'a Path]) -> Option<&'a Path> {
+    let first = paths.first()?.components().next()?.as_os_str();
+    paths
+        .iter()
+        .all(|path| {
+            let mut components = path.components();
+            components.next().map(|part| part.as_os_str()) == Some(first)
+                && components.next().is_some()
+        })
+        .then(|| Path::new(first))
 }
 
 fn link_target_root(
@@ -143,6 +166,28 @@ fn safe_title_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_shared_top_level_directory_is_removed() {
+        for (names, expected) in [
+            (vec!["Release/movie.mkv"], Some("Release")),
+            (
+                vec!["Release/movie.mkv", "Release/Subs/zh.srt"],
+                Some("Release"),
+            ),
+            (vec!["movie.mkv"], None),
+            (vec!["movie.mkv", "Subs/zh.srt"], None),
+            (vec!["A/movie.mkv", "B/movie.mkv"], None),
+            (vec![], None),
+        ] {
+            let paths = names.iter().map(Path::new).collect::<Vec<_>>();
+            assert_eq!(
+                common_top_level_directory(&paths),
+                expected.map(Path::new),
+                "{names:?}"
+            );
+        }
+    }
 
     #[test]
     fn layout_rejects_traversal_and_sanitizes_title_components() {
@@ -231,11 +276,31 @@ mod tests {
             priority: 1,
         }];
 
-        let plans = plans(&payload, &category, &download, &files).unwrap();
+        let direct_plans = plans(&payload, &category, &download, &files).unwrap();
 
         assert_eq!(
-            plans[0].target_path,
+            direct_plans[0].target_path,
             PathBuf::from("D:/media/TV/中文剧名.2026/Season 02/S02E01.mkv")
+        );
+        let nested_files = vec![
+            QbTorrentFile {
+                name: "Release/S02E01.mkv".to_string(),
+                ..files[0].clone()
+            },
+            QbTorrentFile {
+                name: "Release/Subs/zh.srt".to_string(),
+                ..files[0].clone()
+            },
+        ];
+        let nested_plans = plans(&payload, &category, &download, &nested_files).unwrap();
+        assert_eq!(nested_plans[0].target_path, direct_plans[0].target_path);
+        assert_eq!(
+            nested_plans[0].source_path,
+            PathBuf::from("D:/downloads/Release/S02E01.mkv")
+        );
+        assert_eq!(
+            nested_plans[1].target_path,
+            PathBuf::from("D:/media/TV/中文剧名.2026/Season 02/Subs/zh.srt")
         );
     }
 }
