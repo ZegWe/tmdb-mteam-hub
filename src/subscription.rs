@@ -24,6 +24,7 @@ mod operation_logs;
     )
 )]
 pub(crate) mod ports;
+pub(crate) mod poster_backfill;
 pub(crate) mod posters;
 pub(crate) mod queries;
 #[cfg_attr(

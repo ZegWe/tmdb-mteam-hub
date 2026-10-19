@@ -366,6 +366,14 @@ pub async fn bootstrap(
         state.subscription_poll.clone(),
         state.subscription_execution.clone(),
         worker_options,
+    )
+    .with_poster_backfill(
+        state.config.clone(),
+        crate::subscription::poster_backfill::PosterBackfill::new(
+            state.subscription_repository.clone(),
+            state.upstream_clients.douban.clone(),
+            state.subscription_posters.clone(),
+        ),
     );
     Ok(BootstrappedApp {
         state,

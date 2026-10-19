@@ -543,9 +543,20 @@ impl SubscriptionWorkerOptions {
 pub(crate) struct SubscriptionWorkerHandle {
     cancel: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
+    background_tasks: Vec<JoinHandle<()>>,
 }
 
 impl SubscriptionWorkerHandle {
+    pub(crate) fn with_poster_backfill(
+        mut self,
+        config: ConfigManager,
+        backfill: super::poster_backfill::PosterBackfill,
+    ) -> Self {
+        self.background_tasks
+            .push(backfill.spawn(config, self.cancel.subscribe()));
+        self
+    }
+
     pub(crate) fn cancel(&self) {
         let _ = self.cancel.send(true);
     }
@@ -553,6 +564,9 @@ impl SubscriptionWorkerHandle {
     pub(crate) async fn shutdown(mut self) {
         self.cancel();
         if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+        for task in self.background_tasks.drain(..) {
             let _ = task.await;
         }
     }
@@ -706,6 +720,7 @@ pub(crate) fn spawn_subscription_worker(
     SubscriptionWorkerHandle {
         cancel,
         task: Some(task),
+        background_tasks: Vec::new(),
     }
 }
 
