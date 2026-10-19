@@ -1,17 +1,22 @@
 ---
 status: accepted
 owner: tmdb-mteam-hub
-last_verified: 2026-07-12
+last_verified: 2026-10-19
 ---
 
 # 备份与恢复
 
 ## 备份范围
 
-当前版本恢复所需的权威文件只有：
+当前版本恢复所需的权威文件与持久化海报目录：
 
 - `config/config.toml`
 - `state/subscriptions.sqlite`
+- `state/posters/`（已有订阅海报时）
+
+`state/` 对应 `SUBSCRIPTION_STATE_DIR`。海报在元数据阶段下载一次，之后只读本地文件，
+不受 TMDB/豆瓣 API 缓存过期清理影响。备份和恢复时应保留整个 `posters/` 目录；遗漏的
+海报会返回 404，展示请求不会自动重新下载。
 
 `config/` 中由安全规范化留下的历史备份可以按运维策略另行归档，但不能代替当前
 `config.toml`。
@@ -48,6 +53,9 @@ test ! -e state/subscriptions.sqlite-shm
 test ! -e state/subscriptions.sqlite-journal
 install -m 600 config/config.toml "$backup_dir/config/config.toml"
 cp -p state/subscriptions.sqlite "$backup_dir/state/subscriptions.sqlite"
+if [ -d state/posters ]; then
+  cp -a state/posters "$backup_dir/state/posters"
+fi
 test -s "$backup_dir/config/config.toml"
 test -s "$backup_dir/state/subscriptions.sqlite"
 docker compose start
@@ -77,7 +85,7 @@ writer 已停止，再调查未完成事务；当前版本没有受支持的在�
 
 1. 停止容器。
 2. 把当前 `config/`、`state/` 移到隔离目录，不要直接覆盖后删除。
-3. 创建干净的 `config/`、`state/`，从同一时间点的备份恢复上述两个权威文件；不要把缓存或旧
+3. 创建干净的 `config/`、`state/`，从同一时间点的备份恢复配置、SQLite 和 `posters/`；不要把 API 缓存或旧
    状态文件混入恢复目录。
 4. 恢复运行 UID/GID 的属主和 `config.toml` 的 `0600` 权限。
 5. 使用生成该 `subscriptions.sqlite` 的当前版本镜像启动。
@@ -92,6 +100,9 @@ mv state "state.failed.$(date +%s)"
 mkdir -p config state cache/tmdb cache/douban
 install -m 600 backups/20260711-120000/config/config.toml ./config/config.toml
 cp -p backups/20260711-120000/state/subscriptions.sqlite ./state/subscriptions.sqlite
+if [ -d backups/20260711-120000/state/posters ]; then
+  cp -a backups/20260711-120000/state/posters ./state/posters
+fi
 chown -R 1026:100 config state
 chmod 600 config/config.toml
 docker compose up -d
@@ -102,7 +113,7 @@ docker compose up -d
 - 容器保持运行且日志没有配置解析或 SQLite schema 错误。
 - 首页可以加载。
 - 订阅数量、最近操作日志和关键状态与备份时一致。
-- 缓存可以为空并由后续请求重建。
+- API 缓存可以为空并由后续请求重建；订阅海报应从备份恢复，不能依赖展示请求重建。
 
 仓库中的 `scripts/ci/container-acceptance.sh` 把这套停机备份流程应用到临时源部署，再从只含
 `config.toml` 和 `subscriptions.sqlite` 的备份启动一个干净恢复部署。CI 会记录并比较 SQLite

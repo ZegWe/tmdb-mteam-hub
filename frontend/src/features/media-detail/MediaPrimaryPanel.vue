@@ -1,5 +1,5 @@
 <template>
-  <img v-if="primary.poster" :src="primary.poster" alt="" />
+  <img v-if="primary.poster" :src="primary.poster" alt="" referrerpolicy="no-referrer" />
   <h3>{{ primary.title }}</h3>
   <div class="detail-type-line">
     <span class="tag">{{ mediaTypeLabel }}</span>

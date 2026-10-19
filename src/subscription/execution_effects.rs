@@ -49,6 +49,7 @@ pub(crate) struct LatestSubscriptionExecutionEffects {
     tmdb: TmdbClient,
     mteam: MteamClient,
     hardlinks: HardlinkEffectAdapter,
+    posters: super::posters::SubscriptionPosters,
 }
 
 impl LatestSubscriptionExecutionEffects {
@@ -57,13 +58,34 @@ impl LatestSubscriptionExecutionEffects {
         tmdb: TmdbClient,
         mteam: MteamClient,
         filesystem_concurrency: usize,
+        posters: super::posters::SubscriptionPosters,
     ) -> Result<Self, crate::storage::blocking::BlockingExecutorConfigError> {
         Ok(Self {
             douban,
             tmdb,
             mteam,
             hardlinks: HardlinkEffectAdapter::try_new(filesystem_concurrency)?,
+            posters,
         })
+    }
+
+    async fn cache_source_poster(
+        &self,
+        subject_id: &str,
+        source: &mut WantedSourcePayload,
+    ) -> Result<(), String> {
+        let url = if source.poster_url.is_empty() {
+            &source.cover_url
+        } else {
+            &source.poster_url
+        };
+        if url.is_empty() {
+            return Ok(());
+        }
+        let local_url = self.posters.cache(&self.douban, subject_id, url).await?;
+        source.poster_url = local_url.clone();
+        source.cover_url = local_url;
+        Ok(())
     }
 
     async fn execute_claimed(
@@ -93,15 +115,26 @@ impl LatestSubscriptionExecutionEffects {
             )
             .await
             {
-                Ok(detail) => ExecutionEffectResult::Finished {
-                    disposition: FinishExecutionDisposition::MetaReady,
-                    payload_delta: ExecutionPayloadDelta::MovieMeta {
-                        source: Box::new(movie_source_from_detail(
-                            &claimed.detail().payload().source,
-                            detail,
-                        )),
-                    },
-                },
+                Ok(detail) => {
+                    let mut source =
+                        movie_source_from_detail(&claimed.detail().payload().source, detail);
+                    if let Err(message) =
+                        self.cache_source_poster(&key.subject_id, &mut source).await
+                    {
+                        return failed(
+                            ExecutionOperation::Meta,
+                            "poster_cache",
+                            message,
+                            policy.system_retry_interval_secs,
+                        );
+                    }
+                    ExecutionEffectResult::Finished {
+                        disposition: FinishExecutionDisposition::MetaReady,
+                        payload_delta: ExecutionPayloadDelta::MovieMeta {
+                            source: Box::new(source),
+                        },
+                    }
+                }
                 Err(error) => failed(
                     ExecutionOperation::Meta,
                     "movie_metadata",
@@ -118,10 +151,23 @@ impl LatestSubscriptionExecutionEffects {
             crate::douban::subject_detail(&self.douban, &policy.douban_cookie, &key.subject_id)
                 .await;
 
-        let enriched_source = douban_result
+        let mut enriched_source = douban_result
             .as_ref()
             .ok()
-            .map(|detail| Box::new(tv_source_from_detail(source, detail)));
+            .map(|detail| Box::new(tv_source_from_detail(source, detail)))
+            .unwrap_or_else(|| Box::new(source.clone()));
+        if let Err(message) = self
+            .cache_source_poster(&key.subject_id, &mut enriched_source)
+            .await
+        {
+            return failed(
+                ExecutionOperation::Meta,
+                "poster_cache",
+                message,
+                retry_after,
+            );
+        }
+        let enriched_source = Some(enriched_source);
 
         if let Ok(ref detail) = douban_result {
             if let Some(episodes_count) = detail.episodes_count.filter(|&n| n > 0) {
@@ -1842,6 +1888,10 @@ mod tests {
             TmdbClient::new().unwrap(),
             mteam,
             1,
+            super::super::posters::SubscriptionPosters::new(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join(".workspaces/unused-search-posters"),
+            ),
         )
         .unwrap();
         let source = WantedSourcePayload {

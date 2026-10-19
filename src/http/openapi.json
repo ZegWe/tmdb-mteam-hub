@@ -10,6 +10,42 @@
     }
   ],
   "paths": {
+    "/api/subscriptions/posters/{key}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[a-f0-9]{40}$" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted subscription poster; never fetches upstream",
+            "content": {
+              "image/*": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "400": {
+            "description": "Invalid poster key",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorDto" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/ManagementUnauthorized" },
+          "404": {
+            "description": "Poster is not cached",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorDto" } }
+            }
+          },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "security": [],

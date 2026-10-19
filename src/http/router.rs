@@ -245,6 +245,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscription_posters_serve_only_persisted_files() {
+        let root = temp_test_root("subscription-posters");
+        let paths = AppPaths::for_test_root(&root);
+        let poster_dir = paths.subscription_state_dir.join("posters");
+        fs::create_dir_all(&poster_dir).unwrap();
+        let key = "a".repeat(40);
+        fs::write(poster_dir.join(&key), b"image/webp\nposter-bytes").unwrap();
+        let state = AppState::for_test_with_config(paths, FileConfig::default());
+        let router = build_api_router(state);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/subscriptions/posters/{key}"))
+                    .extension(loopback_peer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "poster-bytes"
+        );
+        for key in ["b".repeat(40), "invalid".to_string()] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/subscriptions/posters/{key}"))
+                        .extension(loopback_peer())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        drop(router);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn production_douban_router_has_stable_success_and_failure_json_shapes() {
         let root = temp_test_root("douban-provider-contract");
         let paths = AppPaths::for_test_root(&root);

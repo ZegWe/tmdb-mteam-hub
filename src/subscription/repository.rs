@@ -2027,8 +2027,15 @@ fn merge_source_observation(current: &mut WantedSourcePayload, observed: &Wanted
         .trim()
         .to_string();
     current.release_year = observed.release_year.or(current.release_year);
-    replace_text_if_observed(&mut current.poster_url, &observed.poster_url);
-    replace_text_if_observed(&mut current.cover_url, &observed.cover_url);
+    if !current
+        .poster_url
+        .starts_with(super::posters::POSTER_PREFIX)
+    {
+        replace_text_if_observed(&mut current.poster_url, &observed.poster_url);
+    }
+    if !current.cover_url.starts_with(super::posters::POSTER_PREFIX) {
+        replace_text_if_observed(&mut current.cover_url, &observed.cover_url);
+    }
     replace_optional_text_if_observed(&mut current.original_title, &observed.original_title);
     replace_values_if_observed(&mut current.aka, &observed.aka);
     replace_values_if_observed(&mut current.languages, &observed.languages);
@@ -2203,6 +2210,24 @@ fn validate_next_poll_at(
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
+
+    #[test]
+    fn snapshot_keeps_persisted_posters_when_remote_urls_change() {
+        let local = format!("{}{}", super::super::posters::POSTER_PREFIX, "a".repeat(40));
+        let mut current = super::payload::WantedSourcePayload {
+            poster_url: local.clone(),
+            cover_url: local.clone(),
+            ..Default::default()
+        };
+        let observed = super::payload::WantedSourcePayload {
+            poster_url: "https://images.test/new.jpg".into(),
+            cover_url: "https://images.test/new.jpg".into(),
+            ..Default::default()
+        };
+        super::merge_source_observation(&mut current, &observed);
+        assert_eq!(current.poster_url, local);
+        assert_eq!(current.cover_url, local);
+    }
 
     use super::{
         ApplyCompleteSnapshotCommand, BlockedReason, ClaimDueCommand, ClaimDueResult,

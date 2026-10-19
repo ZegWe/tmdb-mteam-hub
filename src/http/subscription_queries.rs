@@ -70,6 +70,43 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/subscriptions/wanted", get(list_subscriptions))
         .route("/subscriptions/wanted/{id}", get(get_subscription))
+        .route("/subscriptions/posters/{key}", get(subscription_poster))
+}
+
+async fn subscription_poster(
+    State(state): State<AppState>,
+    crate::http::error::ApiPath(key): crate::http::error::ApiPath<String>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::{header, HeaderValue};
+    use axum::response::IntoResponse;
+    let (content_type, bytes) = state
+        .subscription_posters
+        .read(&key)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ApiError::not_found()
+            } else {
+                ApiError::internal("subscription poster read failed")
+            }
+        })?;
+    let content_type = HeaderValue::from_str(&content_type)
+        .map_err(|_| ApiError::internal("invalid subscription poster content type"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=31536000, immutable"),
+            ),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

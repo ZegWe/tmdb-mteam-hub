@@ -65,7 +65,12 @@
             @keydown.enter.prevent="openCardDetail(item, 'movie')"
             @keydown.space.prevent="openCardDetail(item, 'movie')"
           >
-            <img :src="itemImageUrl(item) || transparentPixel" alt="" loading="lazy" />
+            <img
+              :src="searchImageUrl(item) || transparentPixel"
+              alt=""
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
             <div class="meta">
               <div class="title">{{ item.title || "(无标题)" }}</div>
               <div class="subtle">{{ cardSubtitle(item) }}</div>
@@ -107,7 +112,12 @@
             @keydown.enter.prevent="openCardDetail(item, 'tv')"
             @keydown.space.prevent="openCardDetail(item, 'tv')"
           >
-            <img :src="itemImageUrl(item) || transparentPixel" alt="" loading="lazy" />
+            <img
+              :src="searchImageUrl(item) || transparentPixel"
+              alt=""
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
             <div class="meta">
               <div class="title">{{ item.title || item.name || "(无标题)" }}</div>
               <div class="subtle">{{ cardSubtitle(item) }}</div>
@@ -127,7 +137,7 @@ import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notificati
 import { SEARCH_CONTEXT_KEY } from "../features/search/context.js";
 import { cardKey, cardSubtitle } from "../features/search/domain.js";
 import { createSearchRouteSync } from "../features/search/route.js";
-import { itemImageUrl } from "../shared/media/images.js";
+import { searchImageUrl } from "../shared/media/images.js";
 
 const transparentPixel =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";

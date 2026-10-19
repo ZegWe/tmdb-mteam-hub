@@ -696,7 +696,7 @@ fn search_results_from_rexxar_json(
         }
         let cover_url = best_image_url_from_value(target)
             .as_deref()
-            .and_then(proxied_image_url)
+            .and_then(clean_douban_image_url)
             .unwrap_or_default();
         let rating = rating_from_value(target.get("rating"));
         let vote_average = rating.value;
@@ -1971,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn search_poster_preserves_signed_url_through_proxy_and_fetch() {
+    fn search_poster_preserves_signed_url_for_browser_loading() {
         let original = "https://qnmob3-sign.doubanio.com/view/photo/large/public/p2545472803.jpg?sa_cv=e7adeef0f1f261e825a4bc96f7db335d&sa_ct=6ace35a4&imageView2/0/q/80/w/9999/h/120/format/jpg";
         let data = json!({
             "subjects": { "items": [{
@@ -1980,12 +1980,8 @@ mod tests {
             }] }
         });
         let items = search_results_from_rexxar_json(&data, 1).expect("search results");
-        let proxy =
-            Url::parse(&format!("http://localhost{}", items[0].poster_url)).expect("proxy URL");
-        let (_, image_url) = proxy.query_pairs().find(|(key, _)| key == "url").unwrap();
-
-        assert_eq!(image_url, original);
-        assert_eq!(image_fetch_candidates(&image_url), vec![original]);
+        assert_eq!(items[0].poster_url, original);
+        assert_eq!(items[0].cover_url, original);
     }
 
     #[test]
@@ -2256,7 +2252,7 @@ mod tests {
         assert_eq!(item.rating.count, Some(3300949));
         assert_eq!(item.rating.star_count, Some(5.0));
         assert_eq!(item.vote_average, Some(9.7));
-        assert!(item.poster_url.starts_with("/api/douban/image?url="));
+        assert!(item.poster_url.starts_with("https://qnmob3.doubanio.com/"));
         let tv_item = &items[1];
         assert_eq!(tv_item.id, "35467152");
         assert_eq!(tv_item.title, "测试剧集");

@@ -135,6 +135,7 @@ pub struct AppState {
     pub(crate) media_catalog: MediaCatalogService,
     pub(crate) mteam_search: MteamSearchService,
     pub(crate) subscription_database_path: PathBuf,
+    pub(crate) subscription_posters: crate::subscription::posters::SubscriptionPosters,
     pub(crate) _storage_service_lock: Option<Arc<StorageServiceLock>>,
 }
 
@@ -199,11 +200,15 @@ impl AppState {
             subscription_repository.clone(),
             Arc::new(DoubanWantedSource::new(upstream_clients.douban.clone())),
         );
+        let subscription_posters = crate::subscription::posters::SubscriptionPosters::new(
+            paths.subscription_state_dir.join("posters"),
+        );
         let execution_effects = LatestSubscriptionExecutionEffects::try_production(
             upstream_clients.douban.clone(),
             upstream_clients.tmdb.clone(),
             upstream_clients.mteam.clone(),
             runtime.filesystem_effect_concurrency,
+            subscription_posters.clone(),
         )
         .expect("filesystem effect concurrency must be positive");
         let subscription_execution = SubscriptionExecutionService::try_new(
@@ -214,6 +219,7 @@ impl AppState {
         .expect("execution lease TTL must be valid");
         Self {
             config,
+            subscription_posters,
             startup_management,
             upstream_clients,
             tmdb_cache,
