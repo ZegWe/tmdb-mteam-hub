@@ -1,5 +1,4 @@
 import { computed, reactive } from "vue";
-import { browserImageUrl } from "../../shared/media/images.js";
 import {
   createLatestRequestWins,
   StaleRequestError,
@@ -39,7 +38,7 @@ export function createMediaDetailPrimaryStore({
   );
   const poster = computed(() => {
     if (state.mediaType === "douban") {
-      return browserImageUrl(state.data?.poster_url || state.data?.image || "");
+      return state.data?.poster_url || state.data?.image || "";
     }
     return state.data?.poster_url || "";
   });

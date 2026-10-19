@@ -12,6 +12,19 @@ function deferred() {
 }
 
 describe("media detail primary store", () => {
+  it("keeps the Douban detail proxy URL and signed query intact", async () => {
+    const original =
+      "https://img3-sign.doubanio.com/view/photo/m_ratio_poster/public/p123.jpg?sa_cv=abc&sa_ct=123";
+    const poster = `/api/douban/image?url=${encodeURIComponent(original)}`;
+    const transport = {
+      loadDetail: vi.fn().mockResolvedValue({ subject_id: "123", poster_url: poster }),
+    };
+    const store = createMediaDetailPrimaryStore({ transport });
+    await store.load({ mediaType: "douban", id: "123" });
+    expect(store.model.value.poster).toBe(poster);
+    store.dispose();
+  });
+
   it("loads TMDB detail and publishes the derived presentation model", async () => {
     const detail = {
       id: 77,
