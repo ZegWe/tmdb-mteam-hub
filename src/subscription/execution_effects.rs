@@ -480,17 +480,17 @@ impl LatestSubscriptionExecutionEffects {
             .downloads
             .iter()
             .find(|artifact| artifact.idempotency_key == artifact_key);
-        let download_url = match self
+        let torrent = match self
             .mteam
-            .fetch_download_url(policy.mteam_api_key.trim(), &torrent_id)
+            .fetch_torrent(policy.mteam_api_key.trim(), &torrent_id)
             .await
         {
-            Ok(url) => url,
+            Ok(torrent) => torrent,
             Err(error) => {
                 return failed_search_with_candidates(
                     matches,
                     Vec::new(),
-                    "mteam_download_url",
+                    "mteam_download",
                     error.to_string(),
                     policy.system_retry_interval_secs,
                 )
@@ -501,7 +501,7 @@ impl LatestSubscriptionExecutionEffects {
             key.subject_id.clone(),
             torrent_id.clone(),
             existing.and_then(|artifact| artifact.qb_hash.as_deref()),
-            None,
+            Some(&torrent.info_hash),
         ) {
             Ok(request) => request,
             Err(error) => {
@@ -514,13 +514,15 @@ impl LatestSubscriptionExecutionEffects {
                 )
             }
         };
-        let input = match QbTorrentInput::from_url(download_url) {
+        let torrent_hash = torrent.info_hash;
+        let input = match QbTorrentInput::from_bytes(format!("{torrent_id}.torrent"), torrent.bytes)
+        {
             Ok(input) => input,
             Err(error) => {
                 return failed_search_with_candidates(
                     matches,
                     Vec::new(),
-                    "mteam_download_url",
+                    "mteam_download",
                     error.to_string(),
                     policy.system_retry_interval_secs,
                 )
@@ -535,9 +537,12 @@ impl LatestSubscriptionExecutionEffects {
         let now = system_now();
         let ensured = adapter.ensure(&request, &add).await;
         let (state, qb_hash, qb_name, error) = match ensured {
-            Ok(EnsureQbTorrentOutcome::Added { .. }) => {
-                (DownloadArtifactStatePayload::Pushed, None, None, None)
-            }
+            Ok(EnsureQbTorrentOutcome::Added { .. }) => (
+                DownloadArtifactStatePayload::Pushed,
+                Some(torrent_hash),
+                None,
+                None,
+            ),
             Ok(EnsureQbTorrentOutcome::Reconciled { torrent, .. }) => (
                 DownloadArtifactStatePayload::Pushed,
                 Some(torrent.hash().to_string()),
@@ -546,7 +551,7 @@ impl LatestSubscriptionExecutionEffects {
             ),
             Err(error) => (
                 DownloadArtifactStatePayload::Failed,
-                existing.and_then(|artifact| artifact.qb_hash.clone()),
+                Some(torrent_hash),
                 existing.and_then(|artifact| artifact.qb_name.clone()),
                 Some(error.to_string()),
             ),

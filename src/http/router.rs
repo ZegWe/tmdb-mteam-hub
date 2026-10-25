@@ -188,11 +188,11 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn fetch_mteam_download_url(
+        fn fetch_mteam_torrent(
             &self,
             _api_key: String,
             _torrent_id: String,
-        ) -> ManualQbPortFuture<String> {
+        ) -> ManualQbPortFuture<Vec<u8>> {
             Box::pin(async {
                 Err(ClientError::unavailable(
                     "M-Team",
@@ -201,10 +201,10 @@ mod tests {
             })
         }
 
-        fn add_torrent_from_url(
+        fn add_torrent_bytes(
             &self,
             _server: QbServerEntry,
-            _download_url: String,
+            _torrent_bytes: Vec<u8>,
             _category: Option<String>,
             _savepath: Option<String>,
         ) -> ManualQbPortFuture<()> {

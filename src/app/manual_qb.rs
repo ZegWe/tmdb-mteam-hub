@@ -44,16 +44,16 @@ pub(crate) type ManualQbPortFuture<T> =
 pub(crate) trait ManualQbPort: Send + Sync {
     fn test_connection(&self, server: QbServerEntry) -> ManualQbPortFuture<String>;
 
-    fn fetch_mteam_download_url(
+    fn fetch_mteam_torrent(
         &self,
         api_key: String,
         torrent_id: String,
-    ) -> ManualQbPortFuture<String>;
+    ) -> ManualQbPortFuture<Vec<u8>>;
 
-    fn add_torrent_from_url(
+    fn add_torrent_bytes(
         &self,
         server: QbServerEntry,
-        download_url: String,
+        torrent_bytes: Vec<u8>,
         category: Option<String>,
         savepath: Option<String>,
     ) -> ManualQbPortFuture<()>;
@@ -74,28 +74,35 @@ impl ManualQbPort for LiveManualQbPort {
         Box::pin(async move { qbittorrent::test_connection(&server).await })
     }
 
-    fn fetch_mteam_download_url(
+    fn fetch_mteam_torrent(
         &self,
         api_key: String,
         torrent_id: String,
-    ) -> ManualQbPortFuture<String> {
+    ) -> ManualQbPortFuture<Vec<u8>> {
         let mteam = self.mteam.clone();
-        Box::pin(async move { mteam.fetch_download_url(&api_key, &torrent_id).await })
+        Box::pin(async move {
+            mteam
+                .fetch_torrent(&api_key, &torrent_id)
+                .await
+                .map(|torrent| torrent.bytes)
+        })
     }
 
-    fn add_torrent_from_url(
+    fn add_torrent_bytes(
         &self,
         server: QbServerEntry,
-        download_url: String,
+        torrent_bytes: Vec<u8>,
         category: Option<String>,
         savepath: Option<String>,
     ) -> ManualQbPortFuture<()> {
         Box::pin(async move {
-            qbittorrent::add_torrent_from_url(
+            qbittorrent::add_torrent_bytes_with_tags(
                 &server,
-                &download_url,
+                "download.torrent",
+                torrent_bytes,
                 category.as_deref(),
                 savepath.as_deref(),
+                &[],
             )
             .await
         })
@@ -166,23 +173,23 @@ impl ManualQbService {
             )
             .await;
             return Err(ManualQbError::validation(
-                "请先在设置中填写 M-Team OpenAPI Key（用于向 qB 换取可下载链接）",
+                "请先在设置中填写 M-Team OpenAPI Key（用于下载种子文件）",
             ));
         }
 
-        let download_url = match self
+        let torrent_bytes = match self
             .port
-            .fetch_mteam_download_url(mteam_key.to_string(), torrent_id.to_string())
+            .fetch_mteam_torrent(mteam_key.to_string(), torrent_id.to_string())
             .await
         {
-            Ok(url) => url,
+            Ok(bytes) => bytes,
             Err(error) => {
                 self.record(
                     &config,
                     &server,
                     &command,
                     "failed",
-                    "手动推送种子到 qB 失败：M-Team 取链失败",
+                    "手动推送种子到 qB 失败：M-Team 下载种子失败",
                     Some(error.to_string()),
                 )
                 .await;
@@ -192,9 +199,9 @@ impl ManualQbService {
 
         if let Err(error) = self
             .port
-            .add_torrent_from_url(
+            .add_torrent_bytes(
                 server.clone(),
-                download_url,
+                torrent_bytes,
                 command.category.clone(),
                 command.savepath.clone(),
             )
@@ -292,14 +299,14 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct AddCall {
         server_id: String,
-        download_url: String,
+        torrent_bytes: Vec<u8>,
         category: Option<String>,
         savepath: Option<String>,
     }
 
     struct FakePortState {
         test_result: Result<String, ClientError>,
-        fetch_result: Result<String, ClientError>,
+        fetch_result: Result<Vec<u8>, ClientError>,
         add_result: Result<(), ClientError>,
         tested_servers: Vec<String>,
         fetch_calls: Vec<(String, String)>,
@@ -313,7 +320,7 @@ mod tests {
     impl FakeManualQbPort {
         fn new(
             test_result: Result<String, ClientError>,
-            fetch_result: Result<String, ClientError>,
+            fetch_result: Result<Vec<u8>, ClientError>,
             add_result: Result<(), ClientError>,
         ) -> Self {
             Self {
@@ -339,11 +346,11 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn fetch_mteam_download_url(
+        fn fetch_mteam_torrent(
             &self,
             api_key: String,
             torrent_id: String,
-        ) -> ManualQbPortFuture<String> {
+        ) -> ManualQbPortFuture<Vec<u8>> {
             let result = {
                 let mut state = self.state.lock().expect("fake port lock");
                 state.fetch_calls.push((api_key, torrent_id));
@@ -352,10 +359,10 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn add_torrent_from_url(
+        fn add_torrent_bytes(
             &self,
             server: QbServerEntry,
-            download_url: String,
+            torrent_bytes: Vec<u8>,
             category: Option<String>,
             savepath: Option<String>,
         ) -> ManualQbPortFuture<()> {
@@ -363,7 +370,7 @@ mod tests {
                 let mut state = self.state.lock().expect("fake port lock");
                 state.add_calls.push(AddCall {
                     server_id: server.id,
-                    download_url,
+                    torrent_bytes,
                     category,
                     savepath,
                 });
@@ -435,7 +442,7 @@ mod tests {
     async fn fake_port_drives_connection_and_one_successful_push_with_one_audit() {
         let port = Arc::new(FakeManualQbPort::new(
             Ok("5.0.4".to_string()),
-            Ok("https://download.test/torrent/42".to_string()),
+            Ok(vec![1, 2, 3]),
             Ok(()),
         ));
         let audit = Arc::new(RecordingAudit::default());
@@ -460,7 +467,7 @@ mod tests {
             state.add_calls,
             [AddCall {
                 server_id: "nas".to_string(),
-                download_url: "https://download.test/torrent/42".to_string(),
+                torrent_bytes: vec![1, 2, 3],
                 category: Some("movies".to_string()),
                 savepath: Some("/downloads/movies".to_string()),
             }]
@@ -503,7 +510,7 @@ mod tests {
         assert_eq!(entries[0].status, "failed");
         assert_eq!(
             entries[0].summary,
-            "手动推送种子到 qB 失败：M-Team 取链失败"
+            "手动推送种子到 qB 失败：M-Team 下载种子失败"
         );
         assert!(entries[0]
             .error
@@ -515,7 +522,7 @@ mod tests {
     async fn add_failure_records_one_failure_after_exactly_one_add_effect() {
         let port = Arc::new(FakeManualQbPort::new(
             Ok("unused".to_string()),
-            Ok("https://download.test/torrent/42".to_string()),
+            Ok(vec![1, 2, 3]),
             Err(ClientError::unavailable(
                 "qBittorrent",
                 "fixture unavailable",

@@ -4,6 +4,10 @@ TMDB M-Team Hub 是一个面向个人媒体库的单体应用：统一完成 TMD
 种子匹配、qBittorrent 推送、订阅状态跟踪和同文件系统硬链接。仓库由一个 Rust/Axum
 服务、一个 Vue SPA 和一个 SQLite 状态库组成。
 
+手动推送和订阅下载均由服务先获取并校验 `.torrent` 文件，再以文件上传方式提交给
+qBittorrent，并按种子哈希确认任务已存在后才报告成功。种子仅保存在内存中，下载使用服务
+现有的代理、超时和响应大小限制；站点错误页面或不完整的种子不会提交给 qB。
+
 项目正在进行模块边界、安全默认值、存储和前端契约的收敛。当前权威方向见
 [架构总览](docs/architecture/overview.md)和
 [架构收敛 PRD](docs/superpowers/specs/2026-07-11-project-architecture-convergence-prd.md)。

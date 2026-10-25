@@ -5,6 +5,7 @@ pub mod http;
 pub mod mteam;
 pub mod qbittorrent;
 pub mod tmdb;
+pub(crate) mod torrent;
 
 use douban::DoubanClient;
 use http::ClientError;

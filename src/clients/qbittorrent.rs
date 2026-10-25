@@ -184,6 +184,9 @@ pub async fn add_torrent_bytes_with_tags(
             "torrent file is empty",
         ));
     }
+    let hash = super::torrent::info_hash(&bytes).ok_or_else(|| {
+        ClientError::invalid_request(QB_POLICY.provider, "invalid or incomplete torrent file")
+    })?;
     let (client, base) = session(server).await?;
     let filename = if filename.trim().is_empty() {
         "download.torrent"
@@ -202,7 +205,31 @@ pub async fn add_torrent_bytes_with_tags(
         savepath,
         tags,
     );
-    submit_add_torrent_form(&client, &base, form).await
+    submit_add_torrent_form(&client, &base, form).await?;
+    // An HTTP success alone does not prove qB actually imported the metainfo.
+    for attempt in 0..3 {
+        let response = client
+            .execute(torrents_info_request(&client, &base, Some(&hash), None))
+            .await?;
+        if !response.is_success() {
+            return Err(ClientError::for_status(QB_POLICY.provider, response.status));
+        }
+        let torrents: Vec<QbTorrentInfo> = serde_json::from_slice(&response.body)
+            .map_err(|_| ClientError::protocol(QB_POLICY.provider, "invalid torrent list JSON"))?;
+        if torrents
+            .iter()
+            .any(|torrent| torrent.hash.eq_ignore_ascii_case(&hash))
+        {
+            return Ok(());
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+    Err(ClientError::protocol(
+        QB_POLICY.provider,
+        "torrent upload was accepted but the task was not found in qB",
+    ))
 }
 
 fn add_torrent_options_form(
@@ -434,3 +461,7 @@ mod tests {
         assert_eq!(request.url().path(), "/api/v2/torrents/info");
     }
 }
+
+#[cfg(test)]
+#[path = "torrent_upload_tests.rs"]
+mod upload_tests;

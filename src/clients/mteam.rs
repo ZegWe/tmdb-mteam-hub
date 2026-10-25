@@ -5,6 +5,11 @@ use super::http::{ClientError, PolicyClient, MTEAM_POLICY};
 const MTEAM_BASE_URL: &str = "https://api.m-team.cc";
 const MTEAM_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) tmdb-mteam-hub/0.1";
 
+pub struct DownloadedTorrent {
+    pub bytes: Vec<u8>,
+    pub info_hash: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct MteamClient {
     http: PolicyClient,
@@ -121,6 +126,53 @@ impl MteamClient {
                 ClientError::protocol(MTEAM_POLICY.provider, "download URL is invalid")
             })?;
         Ok(url.to_string())
+    }
+
+    /// Fetch once into bounded memory. Never forward the API key to the download host.
+    pub async fn fetch_torrent(
+        &self,
+        api_key: &str,
+        torrent_id: &str,
+    ) -> Result<DownloadedTorrent, ClientError> {
+        let url = self.fetch_download_url(api_key, torrent_id).await?;
+        let parsed = reqwest::Url::parse(&url).map_err(|_| {
+            ClientError::protocol(MTEAM_POLICY.provider, "invalid torrent download URL")
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(ClientError::protocol(
+                MTEAM_POLICY.provider,
+                "torrent download URL must use HTTP or HTTPS",
+            ));
+        }
+        let response = self
+            .http
+            .execute(
+                self.http
+                    .get(parsed)
+                    .header("User-Agent", MTEAM_USER_AGENT)
+                    .header("Referer", "https://kp.m-team.cc/")
+                    .header(
+                        "Accept",
+                        "application/x-bittorrent, application/octet-stream",
+                    ),
+            )
+            .await?;
+        if !response.is_success() {
+            return Err(ClientError::for_status(
+                MTEAM_POLICY.provider,
+                response.status,
+            ));
+        }
+        let info_hash = super::torrent::info_hash(&response.body).ok_or_else(|| {
+            ClientError::protocol(
+                MTEAM_POLICY.provider,
+                "download did not return a complete torrent file (site error, download limit or invalid response)",
+            )
+        })?;
+        Ok(DownloadedTorrent {
+            bytes: response.body,
+            info_hash,
+        })
     }
 
     pub fn policy(&self) -> super::http::HttpClientPolicy {
