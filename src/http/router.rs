@@ -36,12 +36,14 @@ pub fn build_api_router(state: AppState) -> Router {
 pub fn build_router(state: AppState, static_dir: PathBuf) -> Router {
     let management = state.startup_management.clone();
     let api = security::apply_cors(build_api_router(state.clone()), &management);
+    let mcp = super::mcp::routes(state.clone());
     let health = health::routes(state);
     let static_service =
         ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
 
     Router::new()
         .merge(health)
+        .merge(mcp)
         .nest("/api", api)
         .fallback_service(static_service)
 }
@@ -84,12 +86,14 @@ mod tests {
 
     struct FakeDoubanSearchProvider {
         results: Mutex<Vec<Result<DoubanSearchOutcome, DoubanCatalogError>>>,
+        marked: Mutex<Vec<MarkDoubanInterestCommand>>,
     }
 
     impl FakeDoubanSearchProvider {
         fn new(results: Vec<Result<DoubanSearchOutcome, DoubanCatalogError>>) -> Self {
             Self {
                 results: Mutex::new(results),
+                marked: Mutex::default(),
             }
         }
 
@@ -125,9 +129,17 @@ mod tests {
         fn mark_interest(
             &self,
             _cookie: String,
-            _command: MarkDoubanInterestCommand,
+            command: MarkDoubanInterestCommand,
         ) -> DoubanProviderFuture<DoubanInterestResult> {
-            Self::unused()
+            self.marked.lock().unwrap().push(command.clone());
+            Box::pin(async move {
+                Ok(DoubanInterestResult {
+                    ok: true,
+                    tags: command.tags,
+                    rating: command.rating,
+                    interest: command.interest,
+                })
+            })
         }
 
         fn library(
@@ -242,6 +254,171 @@ mod tests {
 
     fn loopback_peer() -> ConnectInfo<SocketAddr> {
         ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000))
+    }
+
+    #[tokio::test]
+    async fn mcp_client_can_discover_tools_subscribe_and_file_a_download() {
+        use crate::config::SubscriptionCategory;
+
+        let root = temp_test_root("mcp");
+        let category = SubscriptionCategory {
+            name: "电影".into(),
+            wanted_tag: "movies".into(),
+            qb_server_id: "nas".into(),
+            qb_category: "movie".into(),
+            qb_save_dir_name: "/downloads".into(),
+            download_dir: root.join("downloads").to_string_lossy().into_owned(),
+            link_target_dir: root.join("library").to_string_lossy().into_owned(),
+        };
+        fs::create_dir_all(&category.download_dir).unwrap();
+        fs::write(root.join("downloads/movie.mkv"), b"fixture").unwrap();
+        let config = FileConfig {
+            douban_cookie: "dbcl2=fixture:private; ck=test".into(),
+            management: crate::config::ManagementConfig {
+                admin_token: "test-client-management-token".into(),
+                ..Default::default()
+            },
+            subscription_categories: vec![category],
+            ..FileConfig::default()
+        };
+        let mut state = AppState::for_test_with_config(AppPaths::for_test_root(&root), config);
+        let provider = Arc::new(FakeDoubanSearchProvider::new(vec![]));
+        state.douban_catalog = DoubanCatalogService::with_provider(
+            state.config.clone(),
+            provider.clone(),
+            state.douban_cache.clone(),
+            60,
+            state.audit_log.clone(),
+        );
+        let app = crate::http::mcp::routes(state);
+        let rpc = |method: &str, params: Value, token: &str| {
+            let request = Request::post("/mcp")
+                .header(header::HOST, "localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("mcp-protocol-version", "2025-11-25")
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string(),
+                ))
+                .unwrap();
+            app.clone().oneshot(request)
+        };
+        let call = |name: &str, arguments: Value| {
+            rpc(
+                "tools/call",
+                json!({"name":name,"arguments":arguments}),
+                "test-client-management-token",
+            )
+        };
+        assert_eq!(
+            rpc("tools/list", json!({}), "wrong")
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let init = body_json(rpc("initialize", json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}), "test-client-management-token").await.unwrap()).await;
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+        let tools = body_json(
+            rpc("tools/list", json!({}), "test-client-management-token")
+                .await
+                .unwrap(),
+        )
+        .await;
+        for name in [
+            "search_media",
+            "search_resources",
+            "list_download_targets",
+            "push_download",
+            "list_subscriptions",
+            "get_subscription",
+            "add_subscription",
+            "create_hardlink",
+        ] {
+            assert!(
+                tools["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == name),
+                "{name}"
+            );
+        }
+        let added = body_json(
+            call(
+                "add_subscription",
+                json!({"douban_id":"123", "category":"电影"}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            added["result"]["structuredContent"]["wish_saved"], true,
+            "{added}"
+        );
+        assert_eq!(
+            provider.marked.lock().unwrap().as_slice(),
+            &[MarkDoubanInterestCommand {
+                subject_id: "123".into(),
+                interest: crate::app::douban_catalog::DoubanInterest::Wish,
+                rating: None,
+                tags: "movies".into(),
+            }]
+        );
+        let link = |source: &str, target: &str| {
+            call(
+                "create_hardlink",
+                json!({"category":"电影","source":source,"target":target}),
+            )
+        };
+        for (src, dst) in [
+            ("../outside", "file"),
+            ("movie.mkv", "../outside"),
+            ("/absolute", "file"),
+        ] {
+            let rejected = body_json(link(src, dst).await.unwrap()).await;
+            assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::{fs::symlink, fs::MetadataExt};
+            let target = "Movie.2021/movie.mkv";
+            for status in ["created", "already_linked"] {
+                let linked = body_json(link("movie.mkv", target).await.unwrap()).await;
+                assert_eq!(
+                    linked["result"]["structuredContent"]["status"], status,
+                    "{linked}"
+                );
+            }
+            assert_eq!(
+                fs::metadata(root.join("downloads/movie.mkv"))
+                    .unwrap()
+                    .ino(),
+                fs::metadata(root.join("library").join(target))
+                    .unwrap()
+                    .ino()
+            );
+            fs::write(root.join("downloads/other.mkv"), b"other").unwrap();
+            symlink(&root, root.join("downloads/escape")).unwrap();
+            symlink(&root, root.join("library/escape")).unwrap();
+            for (src, dst) in [
+                ("other.mkv", target),
+                ("escape/downloads/movie.mkv", "other"),
+                ("movie.mkv", "escape/other"),
+            ] {
+                let rejected = body_json(link(src, dst).await.unwrap()).await;
+                assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+            }
+            assert_eq!(
+                fs::read(root.join("library").join(target)).unwrap(),
+                b"fixture"
+            );
+            assert!(!root.join("other").exists());
+        }
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

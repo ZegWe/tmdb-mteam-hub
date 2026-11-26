@@ -105,6 +105,7 @@ describe("settings form model", () => {
     const form = createSettingsForm();
     form.tmdb_api_key = "";
     form.mteam_api_key = "replacement-mteam-key";
+    form.mcp_host = " nas.lan:8787 ";
     form.douban_cookie = "must-not-be-sent";
     form.qb_servers = [
       {
@@ -134,6 +135,7 @@ describe("settings form model", () => {
       }),
     ).toEqual({
       expected_revision: 7,
+      mcp_host: "nas.lan:8787",
       mteam_api_key: "replacement-mteam-key",
       clear_douban_cookie: true,
       qb_servers: [

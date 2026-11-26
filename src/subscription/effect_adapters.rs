@@ -401,6 +401,18 @@ pub(crate) struct HardlinkEffectAdapter {
 }
 
 impl HardlinkEffectAdapter {
+    /// A manual request has no persisted artifact. Always check the destination
+    /// via its pinned parent, including when the requested link already exists.
+    pub(crate) async fn link_one(
+        &self,
+        source: PathBuf,
+        target: PathBuf,
+    ) -> Result<HardlinkFileStatus, BlockingTaskError> {
+        self.blocking
+            .run(move || create_hardlink(&source, &target, None))
+            .await
+    }
+
     pub(crate) fn try_new(max_concurrency: usize) -> Result<Self, BlockingExecutorConfigError> {
         Ok(Self {
             blocking: BoundedBlockingExecutor::try_new("filesystem", max_concurrency)?,
@@ -629,10 +641,12 @@ fn execute_link_action(
         LinkFileAction::Create => create_hardlink(
             planned.source_path(),
             planned.target_path(),
-            observed
-                .source
-                .identity
-                .expect("Create requires a successfully probed source"),
+            Some(
+                observed
+                    .source
+                    .identity
+                    .expect("Create requires a successfully probed source"),
+            ),
         ),
     }
 }
@@ -726,7 +740,7 @@ fn metadata_identity(_metadata: &std::fs::Metadata) -> Result<FileIdentity, io::
 fn create_hardlink(
     source: &Path,
     target: &Path,
-    expected_source: FileIdentity,
+    expected_source: Option<FileIdentity>,
 ) -> HardlinkFileStatus {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -773,7 +787,10 @@ fn create_hardlink(
         }
     }
 
-    fn safe_parent(target: &Path) -> Result<(OwnedFd, CString), HardlinkFilesystemFailure> {
+    fn safe_parent(
+        target: &Path,
+        create: bool,
+    ) -> Result<(OwnedFd, CString), HardlinkFilesystemFailure> {
         let filename = target
             .file_name()
             .ok_or_else(|| {
@@ -807,7 +824,7 @@ fn create_hardlink(
                 })?;
                 directory = match open_dir_at(&directory, &component) {
                     Ok(next) => next,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
                         if let Err(error) = mkdir_at(&directory, &component) {
                             if error.kind() != io::ErrorKind::AlreadyExists {
                                 return Err(HardlinkFilesystemFailure::io(
@@ -886,13 +903,25 @@ fn create_hardlink(
 
     fn open_stable_source(
         source: &Path,
-        expected: FileIdentity,
-    ) -> Result<OwnedFd, HardlinkFileStatus> {
-        let source = c_string(source.as_os_str()).map_err(HardlinkFileStatus::Failed)?;
-        // SAFETY: `source` is NUL-terminated and live for the call. O_PATH plus
-        // O_NOFOLLOW pins the final inode without following a raced symlink.
+        expected: Option<FileIdentity>,
+    ) -> Result<(OwnedFd, FileIdentity), HardlinkFileStatus> {
+        // Agent-supplied paths must stay inside the configured download tree.
+        // Subscription jobs may use a configured symlink to a download mount.
+        let (parent, source) = if expected.is_none() {
+            let (parent, filename) =
+                safe_parent(source, false).map_err(HardlinkFileStatus::Failed)?;
+            (Some(parent), filename)
+        } else {
+            (
+                None,
+                c_string(source.as_os_str()).map_err(HardlinkFileStatus::Failed)?,
+            )
+        };
+        // SAFETY: the optional parent fd and the source C string remain live
+        // throughout the call. O_NOFOLLOW pins the final inode.
         let descriptor = unsafe {
-            libc::open(
+            libc::openat(
+                parent.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd),
                 source.as_ptr(),
                 libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
@@ -935,20 +964,20 @@ fn create_hardlink(
             }));
         }
         let actual = FileIdentity::new(stat.st_dev, stat.st_ino);
-        if actual != expected {
+        if expected.is_some_and(|identity| actual != identity) {
             return Err(HardlinkFileStatus::Failed(HardlinkFilesystemFailure {
                 operation: HardlinkFilesystemOperation::ProbeSource,
                 kind: HardlinkFilesystemFailureKind::SourceChanged,
             }));
         }
-        Ok(descriptor)
+        Ok((descriptor, actual))
     }
 
-    let source_descriptor = match open_stable_source(source, expected_source) {
-        Ok(descriptor) => descriptor,
+    let (source_descriptor, expected_source) = match open_stable_source(source, expected_source) {
+        Ok(source) => source,
         Err(status) => return status,
     };
-    let (target_directory, target_filename) = match safe_parent(target) {
+    let (target_directory, target_filename) = match safe_parent(target, true) {
         Ok(value) => value,
         Err(failure) => return HardlinkFileStatus::Failed(failure),
     };
@@ -1028,7 +1057,7 @@ fn create_hardlink(
 fn create_hardlink(
     _source: &Path,
     _target: &Path,
-    _expected_source: FileIdentity,
+    _expected_source: Option<FileIdentity>,
 ) -> HardlinkFileStatus {
     HardlinkFileStatus::Failed(HardlinkFilesystemFailure::io(
         HardlinkFilesystemOperation::CreateLink,

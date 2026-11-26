@@ -75,6 +75,8 @@ pub struct ManagementConfig {
     #[serde(default)]
     pub admin_token: String,
     #[serde(default)]
+    pub mcp_host: String,
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
     #[serde(default)]
     pub secure_cookie: bool,
@@ -91,6 +93,19 @@ impl ManagementConfig {
         }
         for origin in &self.allowed_origins {
             validate_management_origin(origin)?;
+        }
+        let host = &self.mcp_host;
+        if !host.is_empty()
+            && (host.ends_with(':')
+                || !host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+                || reqwest::Url::parse(&format!("http://{host}")).is_err())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MCP 主机应为域名或 IP，可附加端口，例如 nas.lan:8787",
+            ));
         }
         Ok(())
     }

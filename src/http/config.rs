@@ -28,6 +28,7 @@ struct ConfigResponse {
     has_mteam_api_key: bool,
     has_douban_cookie: bool,
     has_admin_token: bool,
+    mcp_host: String,
     qb_servers: Vec<RedactedQbServerResponse>,
     subscription_categories: Vec<SubscriptionCategory>,
     subscription_watcher: SubscriptionWatcherConfig,
@@ -83,6 +84,8 @@ struct ConfigPatch {
     admin_token: Option<String>,
     #[serde(default)]
     clear_admin_token: bool,
+    #[serde(default)]
+    mcp_host: Option<String>,
     #[serde(default)]
     qb_servers: Option<Vec<QbServerPatch>>,
     #[serde(default)]
@@ -212,6 +215,7 @@ fn config_response(revision: u64, cfg: &FileConfig, restart_required: bool) -> C
         has_mteam_api_key: !cfg.mteam_api_key.trim().is_empty(),
         has_douban_cookie: !cfg.douban_cookie.trim().is_empty(),
         has_admin_token: !cfg.management.admin_token.trim().is_empty(),
+        mcp_host: cfg.management.mcp_host.clone(),
         qb_servers: cfg
             .qb_servers
             .iter()
@@ -245,6 +249,7 @@ fn merge_config_patch(current: &FileConfig, patch: ConfigPatch) -> Result<FileCo
         clear_douban_cookie,
         admin_token,
         clear_admin_token,
+        mcp_host,
         qb_servers,
         subscription_categories,
         subscription_watcher,
@@ -283,6 +288,9 @@ fn merge_config_patch(current: &FileConfig, patch: ConfigPatch) -> Result<FileCo
         "clear_admin_token",
         str::to_string,
     )?;
+    if let Some(host) = mcp_host {
+        next.management.mcp_host = host.trim().to_owned();
+    }
     if let Some(qb_servers) = qb_servers {
         next.qb_servers = merge_qb_server_patches(&current.qb_servers, qb_servers)?;
     }
@@ -423,6 +431,7 @@ mod tests {
             management: config::ManagementConfig {
                 admin_token: ADMIN_SECRET.to_string(),
                 allowed_origins: vec!["https://admin.example".to_string()],
+                mcp_host: String::new(),
                 secure_cookie: true,
             },
             ..FileConfig::default()

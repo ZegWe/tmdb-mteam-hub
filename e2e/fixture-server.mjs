@@ -39,6 +39,7 @@ function redactedConfig(revision = 7, overrides = {}) {
   return {
     revision,
     has_admin_token: true,
+    mcp_host: "",
     has_tmdb_api_key: true,
     has_mteam_api_key: true,
     has_douban_cookie: false,
@@ -203,6 +204,7 @@ export function resolveFixtureApi({ method = "GET", url, body = null, state }) {
     state.lastSettingsPayload = body;
     state.config = redactedConfig(state.config.revision + 1, {
       has_admin_token: state.config.has_admin_token || typeof body?.admin_token === "string",
+      mcp_host: body?.mcp_host ?? state.config.mcp_host,
       has_tmdb_api_key: state.config.has_tmdb_api_key || typeof body?.tmdb_api_key === "string",
       has_mteam_api_key: state.config.has_mteam_api_key || typeof body?.mteam_api_key === "string",
       has_douban_cookie: state.config.has_douban_cookie || typeof body?.douban_cookie === "string",

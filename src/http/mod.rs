@@ -4,6 +4,7 @@ pub(crate) mod douban;
 pub(crate) mod dto;
 pub(crate) mod error;
 pub(crate) mod health;
+mod mcp;
 pub(crate) mod media;
 pub(crate) mod mteam;
 #[cfg(test)]

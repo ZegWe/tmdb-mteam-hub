@@ -64,7 +64,7 @@ impl MteamQuery {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-struct MteamSearchResponse {
+pub(super) struct MteamSearchResponse {
     items: Vec<MteamTorrentDto>,
     page: u32,
     page_size: u32,

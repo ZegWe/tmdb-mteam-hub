@@ -38,6 +38,7 @@ function configSnapshot(overrides = {}) {
     has_mteam_api_key: true,
     has_douban_cookie: false,
     has_admin_token: true,
+    mcp_host: "nas.lan:8787",
     qb_servers: [
       {
         id: "nas",
@@ -133,6 +134,9 @@ describe("SettingsPage boundary", () => {
     await managementToken.setValue("draft-token-with-at-least-24-characters");
     await navigation.get('[aria-controls="settings-api"]').trigger("click");
     await navigation.get('[aria-controls="settings-access"]').trigger("click");
+    expect(activeWrapper.get("#settings-access code").text()).toContain("//nas.lan:8787/mcp");
+    await activeWrapper.get("#settings-access button").trigger("click");
+    expect(store.form.mcp_host).toBe(window.location.host);
     expect(managementToken.element.value).toBe("draft-token-with-at-least-24-characters");
     expect(transport.load).toHaveBeenCalledOnce();
     await managementToken.setValue("");

@@ -43,6 +43,105 @@ fn loopback_peer() -> ConnectInfo<SocketAddr> {
 }
 
 #[tokio::test]
+async fn mcp_uses_current_web_settings_for_host_and_bearer() {
+    use serde_json::{json, Value};
+
+    let root = temp_test_root("mcp-web-access");
+    let paths = AppPaths::for_test_root(&root);
+    let app = build_router(AppState::for_test(paths.clone()), paths.static_dir);
+    let rpc = |host: &str, token: &str| {
+        let request = Request::post("/mcp")
+            .header(header::HOST, host)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("mcp-protocol-version", "2025-11-25")
+            .extension(loopback_peer())
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+            ))
+            .unwrap();
+        app.clone().oneshot(request)
+    };
+    let save = |body: Value, token: &str| {
+        let request = Request::put("/api/config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .extension(loopback_peer())
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        app.clone().oneshot(request)
+    };
+    let first = "fixture-management-key-first";
+    let second = "fixture-management-key-second";
+    let nas = "nas.lan:8787";
+    assert_eq!(
+        rpc("localhost", first).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let saved = save(
+        json!({"expected_revision":1,"admin_token":first,"mcp_host":nas}),
+        "",
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let snapshot = body_json(saved).await;
+    assert_eq!(snapshot["mcp_host"], nas);
+    assert_eq!(snapshot["restart_required"], false);
+    assert!(!snapshot.to_string().contains(first));
+    assert_eq!(rpc(nas, first).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        rpc("unlisted.lan", first).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    for invalid in ["https://nas.lan/path", "*.lan", "user@host", "nas:99999"] {
+        assert!(
+            save(json!({"expected_revision":2,"mcp_host":invalid}), first)
+                .await
+                .unwrap()
+                .status()
+                .is_client_error()
+        );
+    }
+    let saved = save(
+        json!({"expected_revision":2,"mcp_host":"","admin_token":second}),
+        first,
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(
+        rpc("localhost", first).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        rpc(nas, second).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        rpc("localhost", second).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        save(
+            json!({"expected_revision":3,"clear_admin_token":true}),
+            second
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        rpc("localhost", second).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    drop(app);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn api_errors_use_flat_stable_envelopes_for_extractors_and_handlers() {
     let root = temp_test_root("error-envelope");
     let paths = AppPaths::for_test_root(&root);

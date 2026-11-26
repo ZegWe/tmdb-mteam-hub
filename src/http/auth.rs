@@ -243,7 +243,7 @@ fn bootstrap_mutation_is_cross_site(headers: &HeaderMap) -> bool {
     }
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+pub(super) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()).then(|| token.trim())
@@ -259,7 +259,7 @@ fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {
         .find_map(|(name, value)| (name == SESSION_COOKIE_NAME).then_some(value))
 }
 
-fn token_matches(candidate: &str, configured: &str) -> bool {
+pub(super) fn token_matches(candidate: &str, configured: &str) -> bool {
     token_digest(candidate)
         .ct_eq(&token_digest(configured))
         .into()

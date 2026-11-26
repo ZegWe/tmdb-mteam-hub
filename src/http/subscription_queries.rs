@@ -119,13 +119,23 @@ pub(crate) fn staged_routes(state: SubscriptionQueryHttpState) -> Router {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct ListSubscriptionQuery {
+pub(super) struct ListSubscriptionQuery {
     limit: Option<u32>,
     active: Option<bool>,
     media_kind: Option<SubscriptionMediaKind>,
     lifecycle_state: Option<SubscriptionLifecycleState>,
     attention_tag: Option<SubscriptionAttentionTag>,
     cursor: Option<String>,
+}
+
+impl ListSubscriptionQuery {
+    pub(super) fn page(limit: Option<u32>, cursor: Option<String>) -> Self {
+        Self {
+            limit,
+            cursor,
+            ..Self::default()
+        }
+    }
 }
 
 struct ParsedListSubscriptionQuery {
@@ -155,8 +165,16 @@ async fn list_subscriptions_with(
     service: &SubscriptionQueryService,
     query: Result<Query<ListSubscriptionQuery>, QueryRejection>,
 ) -> Result<Json<SubscriptionListResponse>, ApiError> {
-    let context = request_context(config).await?;
     let Query(query) = query.map_err(|_| invalid_subscription_query())?;
+    Ok(Json(query_list(config, service, query).await?))
+}
+
+pub(super) async fn query_list(
+    config: &ConfigManager,
+    service: &SubscriptionQueryService,
+    query: ListSubscriptionQuery,
+) -> Result<SubscriptionListResponse, ApiError> {
+    let context = request_context(config).await?;
     let parsed = parse_list_query(query, &context.account_key)?;
     let command = ListSubscriptions::try_new(
         context.account_key,
@@ -171,7 +189,7 @@ async fn list_subscriptions_with(
         .map_err(|error| subscription_query_error(error, SubscriptionQueryTarget::List))?;
     let response = SubscriptionListResponse::try_from_page_with_scope(&page, parsed.cursor_scope)
         .map_err(|_| internal_error())?;
-    Ok(Json(response))
+    Ok(response)
 }
 
 fn parse_list_query(
@@ -247,8 +265,16 @@ async fn get_subscription_with(
     service: &SubscriptionQueryService,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<SubscriptionDetailDto>, ApiError> {
-    let context = request_context(config).await?;
     let Path(subject_id) = path.map_err(|_| invalid_subscription_id())?;
+    Ok(Json(query_detail(config, service, subject_id).await?))
+}
+
+pub(super) async fn query_detail(
+    config: &ConfigManager,
+    service: &SubscriptionQueryService,
+    subject_id: String,
+) -> Result<SubscriptionDetailDto, ApiError> {
+    let context = request_context(config).await?;
     validate_subscription_id(&subject_id)?;
     let command = GetSubscription::try_new(context.account_key, subject_id)
         .map_err(|error| subscription_query_error(error, SubscriptionQueryTarget::Detail))?;
@@ -259,7 +285,7 @@ async fn get_subscription_with(
     let dto = SubscriptionDetailDto::from_detail(&detail, &|value| {
         context.diagnostic_redactor.redact(value)
     });
-    Ok(Json(dto))
+    Ok(dto)
 }
 
 fn validate_subscription_id(value: &str) -> Result<(), ApiError> {

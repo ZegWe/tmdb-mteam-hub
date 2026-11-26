@@ -24,6 +24,8 @@ douban_cookie = ""
 # HTTPS 部署应开启 secure_cookie；直接使用本地 HTTP 时保持 false。
 [management]
 admin_token = ""
+# MCP 复用管理 Token。局域网或反向代理的访问主机可在网页「设置 → 管理访问」保存。
+mcp_host = ""
 allowed_origins = []
 secure_cookie = false
 

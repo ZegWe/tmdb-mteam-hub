@@ -160,6 +160,7 @@ export function createSettingsForm() {
     mteam_api_key: "",
     douban_cookie: "",
     admin_token: "",
+    mcp_host: "",
     qb_servers: [],
     subscription_categories: [],
     subscription_watcher: subscriptionWatcherDraft(),
@@ -260,6 +261,7 @@ export function settingsFormFromSnapshot(snapshot = {}) {
   const subscriptionCategories = subscriptionCategoryDtos(snapshot.subscription_categories);
   const subscriptionWatcher = subscriptionWatcherDto(snapshot.subscription_watcher);
   const form = createSettingsForm();
+  form.mcp_host = normalizedText(snapshot.mcp_host);
   form.qb_servers = qbServerDrafts;
   form.subscription_categories = subscriptionCategories.map((category) => ({
     ...category,
@@ -368,6 +370,7 @@ export function settingsUpdatePayload({
   confirmEnableAutomation = false,
 } = {}) {
   const payload = { expected_revision: expectedRevision };
+  if (typeof form.mcp_host === "string") payload.mcp_host = normalizedText(form.mcp_host);
   if (confirmEnableAutomation === true) payload.confirm_enable_automation = true;
   for (const [field, definition] of Object.entries(SECRET_FIELDS)) {
     Object.assign(

@@ -74,6 +74,27 @@
             只有 loopback
             监听允许清除最后一个管理凭据；远程或容器监听会拒绝保存。清除后请立即确认服务仍只对可信本机开放。
           </p>
+          <h3>MCP 连接</h3>
+          <p class="hint">
+            客户端使用上方的管理 Token 作为 Bearer 凭据。更新 Token 后，请同步更新客户端。
+          </p>
+          <label
+            >允许的 MCP 主机
+            <input
+              v-model.trim="settings.mcp_host"
+              class="input input-bordered"
+              placeholder="例如 nas.lan:8787"
+            />
+          </label>
+          <button type="button" class="btn btn-sm" @click="settings.mcp_host = pageHost">
+            使用当前网页主机
+          </button>
+          <p class="hint">
+            留空时仅允许回环主机。通过 NAS 或反向代理连接时，填入客户端使用的主机和端口后保存。
+          </p>
+          <p v-if="mcpUrl" class="hint">
+            客户端地址（Streamable HTTP） <code>{{ mcpUrl }}</code>
+          </p>
         </section>
 
         <section
@@ -509,7 +530,7 @@
 </template>
 
 <script setup>
-import { inject, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { AUTH_CONTEXT_KEY } from "../app/auth-context.js";
 import { APP_NOTIFICATIONS_KEY, NOOP_APP_NOTIFICATIONS } from "../app/notifications.js";
 import { qbServerOptionLabel } from "../features/settings/form-model.js";
@@ -532,6 +553,12 @@ const settingSections = [
 const activeSection = ref("automation");
 const settingsFormElement = ref(null);
 const settings = settingsStore.form;
+const pageHost = window.location.host;
+const mcpUrl = computed(() => {
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
+  const host = settings.mcp_host || (local ? pageHost : "");
+  return host ? `${window.location.protocol}//${host}/mcp` : "";
+});
 const secretPresence = settingsStore.secretPresence;
 const clearSecrets = settingsStore.clearSecrets;
 const settingsLoaded = settingsStore.pageLoaded;

@@ -164,6 +164,7 @@ const validSettingsSnapshot = {
   has_mteam_api_key: true,
   has_douban_cookie: false,
   has_admin_token: true,
+  mcp_host: "nas.lan:8787",
   qb_servers: [
     {
       id: "nas",

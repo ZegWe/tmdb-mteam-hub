@@ -91,6 +91,7 @@ describe("settings store", () => {
     const saveRequest = store.save();
     expect(requests.save).toHaveBeenCalledWith({
       expected_revision: 7,
+      mcp_host: "",
       mteam_api_key: "replacement-key",
       clear_douban_cookie: true,
       qb_servers: [

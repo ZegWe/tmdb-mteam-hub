@@ -2031,6 +2031,7 @@
           "has_mteam_api_key",
           "has_douban_cookie",
           "has_admin_token",
+          "mcp_host",
           "qb_servers",
           "subscription_categories",
           "subscription_watcher",
@@ -2063,6 +2064,9 @@
           },
           "has_admin_token": {
             "type": "boolean"
+          },
+          "mcp_host": {
+            "type": "string"
           },
           "qb_servers": {
             "type": "array",
@@ -2170,6 +2174,9 @@
           },
           "clear_admin_token": {
             "type": "boolean"
+          },
+          "mcp_host": {
+            "type": "string"
           },
           "qb_servers": {
             "type": "array",

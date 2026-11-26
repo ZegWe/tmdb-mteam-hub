@@ -88,6 +88,43 @@ curl -H "Authorization: Bearer $TMDB_MTEAM_ADMIN_TOKEN" http://127.0.0.1:8787/ap
 新安装、容器、token 轮换和忘记 token 的步骤见
 [安全 Bootstrap](docs/operations/security-bootstrap.md)。
 
+## 从外部 Agent 连接 MCP
+
+打开网页 **设置 → 管理访问**。MCP 与网页登录共用管理 Token。通过 NAS 或反向代理访问时，
+在「允许的 MCP 主机」填入客户端使用的主机和端口，例如 `nas.lan:8787`，也可以点击
+「使用当前网页主机」。保存后立即生效；留空时允许回环主机。MCP 客户端使用以下连接设置。
+
+| 设置     | 示例                                     |
+| -------- | ---------------------------------------- |
+| 服务地址 | `http://nas.lan:8787/mcp`（局域网示例）  |
+| 传输     | Streamable HTTP                          |
+| 请求头   | `Authorization: Bearer <网页管理 Token>` |
+
+对于支持远程 MCP 的 Codex 客户端，可在客户端的 `config.toml` 配置：
+
+```toml
+[mcp_servers.media_hub]
+url = "http://nas.lan:8787/mcp"
+bearer_token_env_var = "TMDB_MTEAM_ADMIN_TOKEN"
+```
+
+在启动 Codex 的环境中将 `TMDB_MTEAM_ADMIN_TOKEN` 设为网页管理 Token。持有该 Token 的
+客户端也具备 Hub 管理权限。轮换后更新客户端凭据。清除管理 Token 后，`/mcp` 返回 404。
+从旧部署升级时，将原 `HUB_MCP_HOST` 的值填入网页，并把客户端的独立 MCP 密钥换成管理 Token。
+
+- 查影片用 `search_media`（支持豆瓣和 TMDB）。用 `search_resources` 按豆瓣 ID、IMDb ID 或关键词查 M-Team 资源。
+- 调用 `list_download_targets` 查看服务器和分类。`push_download` 可按分类配置把指定种子推送到对应 qB 下载目录。
+- 对豆瓣条目调用 `add_subscription`，传入 `douban_id` 和配置中的分类名 `category`。
+  工具会将其标记为带分类标签的“想看”；下次订阅轮询时导入。返回值包含监听和 dry-run 状态。
+  开启监听且关闭 dry-run 后，worker 按现有订阅规则下载并入库。
+  `list_subscriptions` 和 `get_subscription` 可查看已导入记录、进度与链接结果。
+- 对已经下载完成的文件调用 `create_hardlink`。例如分类“电影”的 `download_dir` 为
+  `/srv/media/downloads/movies`、`link_target_dir` 为 `/srv/media/library/movies` 时，
+  参数 `{"category":"电影","source":"Release/Dune.mkv","target":"沙丘.2021/沙丘.mkv"}`
+  会把源文件硬链接到媒体库，保留原文件做种。每次操作一个文件，自动创建目标子目录；
+  重试返回 `already_linked`，目标同名异文件会报冲突。该工具使用项目现有的 Linux
+  硬链接实现。两个目录须在同一文件系统，容器中建议像 NAS Compose 一样挂载共同父目录。
+
 ## 验证
 
 仓库当前可用的验证命令是：
